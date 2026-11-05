@@ -250,6 +250,12 @@ func (s *Stripe) ParseWebhook(payload []byte, sigHeader string) (payments.Event,
 	if inv.StatusTransitions != nil {
 		paidAt = inv.StatusTransitions.PaidAt
 	}
+	// A real invoice.paid webhook always carries paid_at, but a replayed
+	// or synthetic event might not: fall back to the event's own created
+	// time rather than reporting a payment at the Unix epoch.
+	if paidAt == 0 {
+		paidAt = event.Created
+	}
 
 	return payments.Event{
 		ID:               event.ID,

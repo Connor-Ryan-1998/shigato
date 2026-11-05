@@ -21,6 +21,24 @@ var ErrInvalidState = errors.New("invalid state")
 // lines).
 var ErrInvalidInput = errors.New("invalid input")
 
+// invoiceHasPaymentsError is VoidInvoice's error for an invoice that has at
+// least one recorded payment. It unwraps to ErrInvalidState (so
+// errors.Is(err, ErrInvalidState) and the 409 mapping both still work) but
+// carries its own exact message rather than ErrInvalidState's generic one,
+// since credit notes and refunds are out of scope for this plan: voiding a
+// paid invoice outright would make the money disappear from the books.
+type invoiceHasPaymentsError struct{}
+
+func (invoiceHasPaymentsError) Error() string {
+	return "invoice has payments; record a credit note instead"
+}
+
+func (invoiceHasPaymentsError) Unwrap() error { return ErrInvalidState }
+
+// ErrInvoiceHasPayments is returned by VoidInvoice when the invoice being
+// voided has at least one recorded payment.
+var ErrInvoiceHasPayments error = invoiceHasPaymentsError{}
+
 // NewLine is one line of a draft invoice being created.
 type NewLine struct {
 	Description   string
@@ -202,18 +220,29 @@ func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoi
 		return Invoice{}, err
 	}
 
+	settings, err := GetSettings(ctx, q, orgID)
+	if err != nil {
+		return Invoice{}, err
+	}
+
 	codes := make([]GSTCode, len(in.Lines))
 	lines := make([]Line, len(in.Lines))
 	for i, l := range in.Lines {
-		if l.QuantityMilli <= 0 {
-			return Invoice{}, fmt.Errorf("%w: line %d: quantity_milli must be positive", ErrInvalidInput, i)
+		// Bounds keep LineAmount's quantityMilli*int64(unit) multiplication
+		// (up to 1e9 * 1e11 = 1e20) within int64 range (~9.2e18), so
+		// LineAmount can never overflow.
+		if l.QuantityMilli < 1 || l.QuantityMilli > 1_000_000_000 {
+			return Invoice{}, fmt.Errorf("%w: line %d: quantity_milli must be from 1 to 1,000,000,000", ErrInvalidInput, i)
 		}
-		if l.UnitAmount < 0 {
-			return Invoice{}, fmt.Errorf("%w: line %d: unit_amount must not be negative", ErrInvalidInput, i)
+		if l.UnitAmount < 0 || l.UnitAmount > 100_000_000_000 {
+			return Invoice{}, fmt.Errorf("%w: line %d: unit_amount must be from 0 to 100,000,000,000", ErrInvalidInput, i)
 		}
 		code, err := ParseGSTCode(l.GSTCode)
 		if err != nil {
 			return Invoice{}, fmt.Errorf("%w: line %d: %v", ErrInvalidInput, i, err)
+		}
+		if code == GST && !settings.GSTRegistered {
+			return Invoice{}, fmt.Errorf("%w: line %d: org is not GST-registered", ErrInvalidInput, i)
 		}
 		codes[i] = code
 		lines[i] = Line{QuantityMilli: l.QuantityMilli, Unit: l.UnitAmount, Code: code}
@@ -332,6 +361,14 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 // keeps it visible for audit purposes and lets billing.Void's single code
 // path unlock its time entries and skip the provider call (a draft never
 // has a provider_ref) the same way it does for an open invoice.
+//
+// An invoice with any recorded payment is refused with ErrInvalidState
+// ("invoice has payments; record a credit note instead"): voiding a paid
+// (or partially paid) invoice would make it disappear from the books while
+// the money stayed collected. The payment count is checked after the FOR
+// UPDATE lock above, in the same transaction, so a payment RecordPayment
+// commits concurrently (it takes the same row lock) can't be recorded
+// after this check passes and before the void commits.
 func VoidInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, error) {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&status)
@@ -343,6 +380,14 @@ func VoidInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, err
 	}
 	if status != "open" && status != "draft" {
 		return Invoice{}, ErrInvalidState
+	}
+
+	var paymentCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM payments WHERE org_id = $1 AND invoice_id = $2`, orgID, id).Scan(&paymentCount); err != nil {
+		return Invoice{}, err
+	}
+	if paymentCount > 0 {
+		return Invoice{}, ErrInvoiceHasPayments
 	}
 
 	if _, err := tx.Exec(ctx, `UPDATE invoices SET status = 'void' WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {

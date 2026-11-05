@@ -14,6 +14,7 @@ func TestLineAmount(t *testing.T) {
 		{"1.5h @ $120.00", 1500, 12000, 18000},
 		{"0.333 → 0", 333, 1, 0},
 		{"0.5 → 1 (half away from zero)", 500, 1, 1},
+		{"negative unit (a refund/credit line)", 1500, -12000, -18000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -36,6 +37,7 @@ func TestGSTOnExclusive(t *testing.T) {
 		{"5 @ GST → 1", 5, GST, 1},
 		{"4 @ GST", 4, GST, 0},
 		{"50000 @ INP", 50000, INP, 0},
+		{"-5 @ GST → -1", -5, GST, -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,6 +59,7 @@ func TestGSTInInclusive(t *testing.T) {
 		{"1100 @ GST", 1100, GST, 100},
 		{"1000 @ GST → 91", 1000, GST, 91},
 		{"1000 @ FRE", 1000, FRE, 0},
+		{"-1000 @ GST → -91", -1000, GST, -91},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,6 +83,10 @@ func TestTotals(t *testing.T) {
 			{1000, 5, GST},
 			{1000, 5, GST},
 		}, 10, 2, 12},
+		{"one negative line sums correctly", []Line{
+			{1000, 18000, GST},
+			{1000, -5000, GST},
+		}, 13000, 1300, 14300},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

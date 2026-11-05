@@ -114,6 +114,31 @@ func TestParseWebhookInvoicePaidNoPaymentsExpanded(t *testing.T) {
 	}
 }
 
+// TestParseWebhookPaidAtZeroUsesEventCreated covers a webhook whose invoice
+// has status_transitions.paid_at == 0 (e.g. a replayed or synthetic
+// event): PaidOn must fall back to the event's own created time rather
+// than reporting the payment at the Unix epoch.
+func TestParseWebhookPaidAtZeroUsesEventCreated(t *testing.T) {
+	payload := loadFixture(t, "invoice_paid_zero_paid_at.json")
+	const secret = "whsec_test_secret"
+
+	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
+		Payload: payload,
+		Secret:  secret,
+	})
+
+	s := New("sk_test_dummy", secret, brisbane)
+	event, err := s.ParseWebhook(signed.Payload, signed.Header)
+	if err != nil {
+		t.Fatalf("ParseWebhook: %v", err)
+	}
+
+	wantPaidOn := time.Unix(1700000200, 0).In(brisbane)
+	if !event.PaidOn.Equal(wantPaidOn) {
+		t.Errorf("PaidOn = %v, want event.created fallback %v", event.PaidOn, wantPaidOn)
+	}
+}
+
 func TestParseWebhookBadSignature(t *testing.T) {
 	payload := loadFixture(t, "invoice_paid.json")
 

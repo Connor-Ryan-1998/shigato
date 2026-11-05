@@ -555,6 +555,74 @@ func TestVoidCallsProviderVoidInvoice(t *testing.T) {
 	}
 }
 
+// TestVoidRefusesInvoiceWithPayments covers the follow-ups void guard: an
+// invoice with any recorded payment (even a partial one) must be refused
+// with 409 rather than voided, since shigoto has no credit-note/refund
+// path yet to reconcile the money already collected.
+func TestVoidRefusesInvoiceWithPayments(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	contactID := webhookTestContact(t, pool, org.ID)
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	handler := newWebhookHandler(pool, nil)
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 10000)
+	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, issueReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("issue: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	// A partial payment, not the full amount: it still counts as "has
+	// payments" for the void guard.
+	payBody, err := json.Marshal(map[string]any{"amount": 4000, "paid_on": "2026-11-05", "method": "cash"})
+	if err != nil {
+		t.Fatalf("marshaling payment body: %v", err)
+	}
+	payReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/payments", draftID), bytes.NewReader(payBody))
+	payReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	payReq.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, payReq)
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusOK {
+		t.Fatalf("record payment: status = %d, want 200/201, body=%s", rr.Code, rr.Body.String())
+	}
+
+	voidReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/void", draftID), nil)
+	voidReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, voidReq)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("void: status = %d, want 409, body=%s", rr.Code, rr.Body.String())
+	}
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("decoding error body: %v", err)
+	}
+	if errBody.Error != "invoice has payments; record a credit note instead" {
+		t.Fatalf("error = %q, want %q", errBody.Error, "invoice has payments; record a credit note instead")
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" {
+		t.Fatalf("status = %s, want open (refused void must not change it)", inv.Status)
+	}
+}
+
 func TestVoidProviderFailureLeavesOpen(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()

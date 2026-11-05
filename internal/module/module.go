@@ -97,7 +97,7 @@ func WriteCoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, core.ErrInvalidInput):
 		WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, core.ErrInvalidState):
-		WriteError(w, http.StatusConflict, "invalid state")
+		WriteError(w, http.StatusConflict, err.Error())
 	default:
 		slog.Error("request failed", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal error")

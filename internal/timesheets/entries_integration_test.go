@@ -302,6 +302,10 @@ func TestBilledEntryLocked(t *testing.T) {
 		t.Fatalf("CreateEntry: %v", err)
 	}
 
+	// CreateDraftInvoice rejects a GST-coded line in an org that isn't
+	// GST-registered; this test only cares about locking a billed entry,
+	// so register the org rather than switch the line to FRE/N-T.
+	setOrgGSTRegistered(t, pool, orgID, true)
 	inv, err := core.CreateDraftInvoice(ctx, pool, orgID, core.NewInvoice{
 		ContactID: client, Source: "manual", DueInDays: 14,
 		Lines: []core.NewLine{{Description: "Build", QuantityMilli: 1000, UnitAmount: 12000, GSTCode: "GST"}},

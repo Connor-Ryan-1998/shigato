@@ -699,3 +699,100 @@ func TestInvoiceValidation422(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateDraftRejectsHugeQuantity covers CreateDraftInvoice's upper
+// quantity_milli bound: one over 1,000,000,000 is rejected rather than
+// risking LineAmount's multiplication overflowing.
+func TestCreateDraftRejectsHugeQuantity(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+
+	_, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    "manual",
+		DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "line", QuantityMilli: 1_000_000_001, UnitAmount: 100, GSTCode: "N-T"},
+		},
+	})
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestCreateDraftRejectsGSTWhenUnregistered covers the GST-registration
+// guard: a manual invoice line coded GST in an org that isn't
+// GST-registered is rejected, closing the gap rent/timesheet runs don't
+// have (they always pick FRE/INP/N-T based on settings.GSTRegistered).
+func TestCreateDraftRejectsGSTWhenUnregistered(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme") // gst_registered defaults to false
+	contactID := createContact(t, pool, org.ID)
+
+	_, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    "manual",
+		DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "line", QuantityMilli: 1000, UnitAmount: 100, GSTCode: "GST"},
+		},
+	})
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+	if !strings.Contains(err.Error(), "org is not GST-registered") {
+		t.Fatalf("err = %v, want message containing %q", err, "org is not GST-registered")
+	}
+}
+
+// TestVoidRefusesInvoiceWithPayments covers core.VoidInvoice's payment
+// guard directly (the httpapi-level TestVoidRefusesInvoiceWithPayments in
+// package httpapi covers the same rule end to end through billing.Void and
+// the HTTP response).
+func TestVoidRefusesInvoiceWithPayments(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	invID := createIssuedInvoice(t, pool, org.ID, contactID, 10000)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// A partial payment, not the full amount: it still counts as "has
+	// payments" for the void guard.
+	if _, _, err := core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
+		InvoiceID: invID, Amount: 4000, PaidOn: time.Now(), Method: "cash",
+	}); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx2.Rollback(ctx)
+	if _, err := core.VoidInvoice(ctx, tx2, org.ID, invID); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("VoidInvoice err = %v, want ErrInvalidState", err)
+	} else if err.Error() != "invoice has payments; record a credit note instead" {
+		t.Fatalf("VoidInvoice err = %q, want %q", err.Error(), "invoice has payments; record a credit note instead")
+	}
+	if err := tx2.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" {
+		t.Fatalf("status = %s, want open (refused void must not change it)", inv.Status)
+	}
+}
