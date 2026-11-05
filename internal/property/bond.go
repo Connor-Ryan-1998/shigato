@@ -20,7 +20,7 @@ const bondWarningDays = 10
 const rtaRefMaxLen = 64
 
 // BondStatus derives a lease's bond status, never a stored column: "due"
-// until its bond invoice is paid, "held" once paid but not yet lodged with
+// until its bond invoice is paid (a void bond invoice is still "due"), "held" once paid but not yet lodged with
 // the RTA, "lodged" once an RTA reference is recorded. inv is the lease's
 // bond invoice (nil if none exists yet); paidOn is the latest payment date
 // against it once it's paid (see bondPaidOn).
@@ -91,8 +91,10 @@ func BondInfo(ctx context.Context, q core.Querier, orgID int64, l Lease, today t
 // single transaction holding a row lock (SELECT ... FOR UPDATE) on the
 // lease, so two concurrent calls can't both create a bond invoice: the
 // second sees bond_invoice_id already set and returns core.ErrInvalidState
-// (409) without creating anything. billing.Issue then runs separately,
-// after that transaction has committed. If Issue fails (e.g.
+// (409) without creating anything - unless that invoice was voided, in
+// which case a new one is created and re-stamped in its place.
+// billing.Issue then runs separately, after that transaction has
+// committed. If Issue fails (e.g.
 // billing.ErrTooFewPayOptions), the draft stays linked - a later call to
 // this function still finds bond_invoice_id set and returns 409; the
 // caller must issue the existing draft via the invoices API instead of
@@ -114,19 +116,23 @@ func createBondDraft(ctx context.Context, b *billing.Service, orgID, leaseID int
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// FOR UPDATE OF l locks only the lease row; a voided bond invoice
+	// doesn't block a new one, which re-stamps bond_invoice_id below.
 	var bondAmount int64
-	var existingInvoiceID *int64
-	err = tx.QueryRow(ctx,
-		`SELECT bond_amount, bond_invoice_id FROM leases WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+	var existingStatus *string
+	err = tx.QueryRow(ctx, `
+		SELECT l.bond_amount, i.status FROM leases l
+		LEFT JOIN invoices i ON i.org_id = l.org_id AND i.id = l.bond_invoice_id
+		WHERE l.org_id = $1 AND l.id = $2 FOR UPDATE OF l`,
 		orgID, leaseID,
-	).Scan(&bondAmount, &existingInvoiceID)
+	).Scan(&bondAmount, &existingStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, core.ErrNotFound
 	}
 	if err != nil {
 		return 0, err
 	}
-	if existingInvoiceID != nil {
+	if existingStatus != nil && *existingStatus != "void" {
 		return 0, core.ErrInvalidState
 	}
 	if bondAmount == 0 {

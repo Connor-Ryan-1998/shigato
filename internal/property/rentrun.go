@@ -110,9 +110,13 @@ func runRentForLease(ctx context.Context, b *billing.Service, orgID int64, orgSl
 		return err
 	}
 
+	// A period whose invoice was voided doesn't count as invoiced, so the
+	// latest such period is generated again and re-billed below.
 	var latestEnd *time.Time
-	if err := b.Pool.QueryRow(ctx,
-		`SELECT max(period_end) FROM rent_periods WHERE org_id = $1 AND lease_id = $2`,
+	if err := b.Pool.QueryRow(ctx, `
+		SELECT max(rp.period_end) FROM rent_periods rp
+		LEFT JOIN invoices i ON i.org_id = rp.org_id AND i.id = rp.invoice_id
+		WHERE rp.org_id = $1 AND rp.lease_id = $2 AND i.status IS DISTINCT FROM 'void'`,
 		orgID, leaseID,
 	).Scan(&latestEnd); err != nil {
 		return err
@@ -192,9 +196,12 @@ func periodTotal(p Period) core.Cents {
 // createPeriodInvoice runs one period's whole idempotent write - the
 // rent_periods insert, the draft invoice and lines, and stamping
 // rent_periods.invoice_id - in a single transaction. If the period is
-// already recorded (ON CONFLICT DO NOTHING finds nothing to insert, e.g. a
-// concurrent run claimed it first), it returns created=false and does
-// nothing else.
+// already recorded with a live invoice (or a concurrent run claimed it
+// first), the conditional ON CONFLICT update touches nothing and it
+// returns created=false. A period whose invoice was voided is reclaimed
+// instead: the upsert takes the row lock, clears invoice_id and the new
+// draft is linked in its place, so a concurrent run waiting on that lock
+// re-checks the row, finds a live invoice and backs off.
 func createPeriodInvoice(ctx context.Context, pool *pgxpool.Pool, orgID, leaseID, contactID, propertyID int64, gstCode core.GSTCode, asOf time.Time, period Period) (invoiceID int64, created bool, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -206,7 +213,12 @@ func createPeriodInvoice(ctx context.Context, pool *pgxpool.Pool, orgID, leaseID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO rent_periods (org_id, lease_id, period_start, period_end, amount_due)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (lease_id, period_start) DO NOTHING
+		ON CONFLICT (lease_id, period_start) DO UPDATE
+			SET invoice_id = NULL, period_end = EXCLUDED.period_end, amount_due = EXCLUDED.amount_due
+			WHERE EXISTS (
+				SELECT 1 FROM invoices i
+				WHERE i.org_id = rent_periods.org_id AND i.id = rent_periods.invoice_id AND i.status = 'void'
+			)
 		RETURNING id`,
 		orgID, leaseID, period.Start, period.End, int64(periodTotal(period)),
 	).Scan(&periodID)

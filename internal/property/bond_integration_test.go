@@ -212,3 +212,65 @@ func TestBondLodgementSameDayInBrisbaneTime(t *testing.T) {
 		t.Fatalf("tomorrow's lodgement error = %v, want core.ErrInvalidInput (422)", err)
 	}
 }
+
+func TestBondInvoiceReissueAfterVoid(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
+	setOrgPayOptions(t, pool, org.ID)
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
+		RentAmount: 50000, BondAmount: 140000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	b := testService(pool)
+	first, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	if err != nil {
+		t.Fatalf("CreateBondInvoice: %v", err)
+	}
+	if _, err := b.Void(ctx, org.ID, "acme", first.ID); err != nil {
+		t.Fatalf("Void: %v", err)
+	}
+
+	today := mustDate(t, "2026-11-05")
+	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
+	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "due" {
+		t.Fatalf("status after void = %q (err %v), want due", status, err)
+	}
+
+	second, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	if err != nil {
+		t.Fatalf("CreateBondInvoice after void: %v", err)
+	}
+	if second.ID == first.ID || second.Status != "open" {
+		t.Fatalf("second invoice = %d (%s), want a new open invoice", second.ID, second.Status)
+	}
+	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
+	if lease.BondInvoiceID == nil || *lease.BondInvoiceID != second.ID {
+		t.Fatalf("bond_invoice_id = %v, want %d", lease.BondInvoiceID, second.ID)
+	}
+	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "due" {
+		t.Fatalf("status before payment = %q (err %v), want due", status, err)
+	}
+
+	// A live (non-void) bond invoice still blocks another.
+	if _, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("third CreateBondInvoice error = %v, want core.ErrInvalidState", err)
+	}
+
+	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
+		InvoiceID: second.ID, Amount: 140000, PaidOn: today, Method: "bank_transfer",
+	}); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "held" {
+		t.Fatalf("status after payment = %q (err %v), want held", status, err)
+	}
+}

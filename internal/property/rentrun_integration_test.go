@@ -350,3 +350,81 @@ func TestNonResidentialGST(t *testing.T) {
 		t.Fatalf("GSTAmount = %d, want 5000 (10%% of 50000)", inv.Lines[0].GSTAmount)
 	}
 }
+
+// liveRentInvoices counts orgID's rent invoices that aren't void.
+func liveRentInvoices(t *testing.T, pool *pgxpool.Pool, orgID int64) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		"SELECT count(*) FROM invoices WHERE org_id = $1 AND source = 'rent' AND status <> 'void'", orgID,
+	).Scan(&n); err != nil {
+		t.Fatalf("counting live rent invoices: %v", err)
+	}
+	return n
+}
+
+func TestRunRentRebillsVoidedPeriod(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	propertyID := testProperty(t, pool, org.ID)
+	setOrgLeadAndAutoSend(t, pool, org.ID, 0, true) // one period per run, issued
+	setOrgPayOptions(t, pool, org.ID)
+
+	asOf := mustDate(t, "2026-11-05")
+	lease := testWeeklyLease(t, pool, org.ID, propertyID, asOf, 50000, nil)
+	b := testService(pool)
+
+	if _, err := RunRent(ctx, b, org.ID, "acme", asOf); err != nil {
+		t.Fatalf("RunRent: %v", err)
+	}
+	var oldInvoiceID int64
+	if err := pool.QueryRow(ctx, "SELECT invoice_id FROM rent_periods WHERE lease_id = $1", lease.ID).Scan(&oldInvoiceID); err != nil {
+		t.Fatalf("selecting period invoice: %v", err)
+	}
+	if _, err := b.Void(ctx, org.ID, "acme", oldInvoiceID); err != nil {
+		t.Fatalf("Void: %v", err)
+	}
+
+	// Two concurrent runs after the void must re-bill the period exactly once.
+	var wg sync.WaitGroup
+	results := make([]RunResult, 2)
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = RunRent(ctx, b, org.ID, "acme", asOf)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("RunRent[%d]: %v", i, err)
+		}
+	}
+	if got := results[0].Created + results[1].Created; got != 1 {
+		t.Fatalf("total Created after void = %d, want 1", got)
+	}
+	if got := liveRentInvoices(t, pool, org.ID); got != 1 {
+		t.Fatalf("live rent invoices = %d, want 1", got)
+	}
+
+	var periods int
+	var newInvoiceID int64
+	if err := pool.QueryRow(ctx, "SELECT count(*), max(invoice_id) FROM rent_periods WHERE lease_id = $1", lease.ID).Scan(&periods, &newInvoiceID); err != nil {
+		t.Fatalf("selecting periods: %v", err)
+	}
+	if periods != 1 || newInvoiceID == oldInvoiceID {
+		t.Fatalf("periods = %d, invoice_id = %d (old %d); want 1 period relinked to a new invoice", periods, newInvoiceID, oldInvoiceID)
+	}
+
+	// And nothing more on a further run.
+	again, err := RunRent(ctx, b, org.ID, "acme", asOf)
+	if err != nil {
+		t.Fatalf("third RunRent: %v", err)
+	}
+	if again.Created != 0 {
+		t.Fatalf("third run Created = %d, want 0", again.Created)
+	}
+}
