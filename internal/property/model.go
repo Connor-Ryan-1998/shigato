@@ -95,8 +95,8 @@ type Charge struct {
 }
 
 // LeaseTerms is the pure, DB-free view of a lease periods.go computes
-// against. All dates are UTC midnight. End is min(end_date, termination_date)
-// once loaded from the DB. Changes must be sorted ascending by Effective,
+// against. All dates are UTC midnight. End is termination_date once
+// loaded from the DB (end_date doesn't stop rent). Changes must be sorted ascending by Effective,
 // with Changes[0].Effective <= Start.
 type LeaseTerms struct {
 	Start     time.Time

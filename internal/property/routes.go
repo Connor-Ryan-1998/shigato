@@ -171,16 +171,16 @@ type leaseResponse struct {
 
 // leaseToResponse builds l's JSON response. bondStatus and warnings come
 // from BondInfo, which needs DB access leaseToResponse itself doesn't have;
-// callers compute them first and merge them in here rather than duplicating
-// a warnings field.
-func leaseToResponse(l Lease, bondStatus string, warnings []string) leaseResponse {
+// callers compute them first and merge them in here, together with
+// leaseWarnings as of today, rather than duplicating a warnings field.
+func leaseToResponse(l Lease, bondStatus string, warnings []string, today time.Time) leaseResponse {
 	resp := leaseResponse{
 		ID: l.ID, PropertyID: l.PropertyID, StartDate: l.StartDate.Format(dateLayout),
 		Frequency: string(l.Frequency), OpeningArrears: int64(l.OpeningArrears), BondAmount: int64(l.BondAmount),
 		OpeningArrearsInvoiceID: l.OpeningArrearsInvoiceID,
 		RTALodgementRef:         l.RTALodgementRef,
 		BondStatus:              bondStatus,
-		Warnings:                warnings,
+		Warnings:                append(warnings, leaseWarnings(l, today)...),
 		Tenants:                 make([]leaseTenantResponse, len(l.Tenants)),
 		RentChanges:             make([]rentChangeResponse, len(l.RentChanges)),
 		Charges:                 make([]chargeResponse, len(l.Charges)),
@@ -369,7 +369,7 @@ func createLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusCreated, leaseToResponse(created, status, warnings))
+	module.WriteJSON(w, http.StatusCreated, leaseToResponse(created, status, warnings, today(d)))
 }
 
 func getLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -389,7 +389,7 @@ func getLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, leaseToResponse(l, status, warnings))
+	module.WriteJSON(w, http.StatusOK, leaseToResponse(l, status, warnings, today(d)))
 }
 
 func listLeases(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -414,7 +414,7 @@ func listLeases(w http.ResponseWriter, r *http.Request, d module.Deps) {
 			module.WriteCoreError(w, err)
 			return
 		}
-		resp[i] = leaseToResponse(l, status, warnings)
+		resp[i] = leaseToResponse(l, status, warnings, now)
 	}
 	module.WriteJSON(w, http.StatusOK, resp)
 }
@@ -559,7 +559,7 @@ func terminateLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings))
+	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings, today(d)))
 }
 
 // --- ledger handler ---
@@ -692,5 +692,5 @@ func createBondLodgementHandler(w http.ResponseWriter, r *http.Request, d module
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings))
+	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings, now))
 }

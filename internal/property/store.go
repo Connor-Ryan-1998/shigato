@@ -493,15 +493,26 @@ func TerminateLease(ctx context.Context, q core.Querier, orgID, leaseID int64, t
 	return GetLease(ctx, q, orgID, leaseID)
 }
 
-// ToTerms builds the pure LeaseTerms periods.go computes against from a
-// loaded Lease: End is min(EndDate, TerminationDate), Changes and Charges
-// are converted and Changes stay sorted ascending (GetLease already orders
-// them by effective_date).
-func (l Lease) ToTerms() LeaseTerms {
-	end := l.EndDate
-	if l.TerminationDate != nil && (end == nil || l.TerminationDate.Before(*end)) {
-		end = l.TerminationDate
+// warnFixedTermEnded is the lease warning leaseWarnings returns once a
+// lease's fixed term has ended without a termination.
+const warnFixedTermEnded = "fixed term ended; tenancy continues periodic"
+
+// leaseWarnings returns l's tenancy warnings as of today: currently just
+// warnFixedTermEnded, once end_date has passed and no termination_date is
+// recorded.
+func leaseWarnings(l Lease, today time.Time) []string {
+	if l.EndDate != nil && l.EndDate.Before(today) && l.TerminationDate == nil {
+		return []string{warnFixedTermEnded}
 	}
+	return nil
+}
+
+// ToTerms builds the pure LeaseTerms periods.go computes against from a
+// loaded Lease: End is TerminationDate only - EndDate ends the fixed term,
+// but the tenancy continues periodic until terminated (see
+// leaseWarnings). Changes and Charges are converted and Changes stay
+// sorted ascending (GetLease already orders them by effective_date).
+func (l Lease) ToTerms() LeaseTerms {
 
 	changes := make([]RentChange, len(l.RentChanges))
 	for i, c := range l.RentChanges {
@@ -516,7 +527,7 @@ func (l Lease) ToTerms() LeaseTerms {
 
 	return LeaseTerms{
 		Start:     l.StartDate,
-		End:       end,
+		End:       l.TerminationDate,
 		Frequency: l.Frequency,
 		PaidTo:    l.PaidToDate,
 		Changes:   changes,
