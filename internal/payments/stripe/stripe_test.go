@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -205,7 +206,8 @@ func TestSendInvoiceIdempotencyKeys(t *testing.T) {
 	if _, err := s.EnsureCustomer(ctx, core.Contact{ID: 7, OrgID: 3, Name: "C"}); err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
-	inv := core.Invoice{ID: 9, OrgID: 3, DueInDays: 14}
+	due := time.Now().AddDate(0, 0, 14)
+	inv := core.Invoice{ID: 9, OrgID: 3, DueInDays: 14, DueDate: &due}
 	lines := []core.InvoiceLine{{ID: 11, Amount: 100}, {ID: 12, Amount: 200}}
 	if _, _, err := s.SendInvoice(ctx, inv, lines, "cus_test_1", time.Now()); err != nil {
 		t.Fatalf("SendInvoice: %v", err)
@@ -230,17 +232,25 @@ func TestSendInvoiceIdempotencyKeys(t *testing.T) {
 }
 
 // newCreateInvoiceStub starts an httptest server that stands in for Stripe,
-// recording the form params of the POST /v1/invoices request (Create), and
-// answering every request with the minimal JSON SendInvoice needs to
-// proceed.
-func newCreateInvoiceStub(t *testing.T) (s *Stripe, params func() url.Values) {
+// recording the form params of the POST /v1/invoices request (Create) and
+// how many requests it has seen in total, and answering every request with
+// the minimal JSON SendInvoice needs to proceed. Handler failures are
+// reported with t.Errorf (not t.Fatalf: that's only safe on the test
+// goroutine, and this handler runs on the server's own).
+func newCreateInvoiceStub(t *testing.T) (s *Stripe, params func() url.Values, calls func() int) {
 	t.Helper()
 	var mu sync.Mutex
 	var createParams url.Values
+	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		mu.Unlock()
 		if r.URL.Path == "/v1/invoices" && r.Method == http.MethodPost {
 			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parsing form: %v", err)
+				t.Errorf("parsing form: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
 			}
 			mu.Lock()
 			createParams = r.PostForm
@@ -256,20 +266,28 @@ func newCreateInvoiceStub(t *testing.T) (s *Stripe, params func() url.Values) {
 		MaxNetworkRetries: stripego.Int64(0),
 		HTTPClient:        srv.Client(),
 	})
-	return &Stripe{client: stripego.NewClient("sk_test_dummy", stripego.WithBackends(backends))}, func() url.Values {
+	s = &Stripe{client: stripego.NewClient("sk_test_dummy", stripego.WithBackends(backends))}
+	params = func() url.Values {
 		mu.Lock()
 		defer mu.Unlock()
 		return createParams
 	}
+	calls = func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+	return s, params, calls
 }
 
 // TestSendInvoiceAutoAdvanceFalse checks the Create Invoice call always
 // disables Stripe's auto_advance: shigoto drives finalize/send/void
 // explicitly and must not race Stripe's own invoice-advancing clock.
 func TestSendInvoiceAutoAdvanceFalse(t *testing.T) {
-	s, params := newCreateInvoiceStub(t)
+	s, params, _ := newCreateInvoiceStub(t)
 
-	inv := core.Invoice{ID: 9, OrgID: 3, DueInDays: 14}
+	due := time.Now().AddDate(0, 0, 14)
+	inv := core.Invoice{ID: 9, OrgID: 3, DueDate: &due}
 	if _, _, err := s.SendInvoice(context.Background(), inv, nil, "cus_test_1", time.Now()); err != nil {
 		t.Fatalf("SendInvoice: %v", err)
 	}
@@ -279,29 +297,53 @@ func TestSendInvoiceAutoAdvanceFalse(t *testing.T) {
 	}
 }
 
-// TestDaysUntilDueFromToday checks days_until_due is computed fresh from
-// inv.DueDate and today, floored at 0, rather than replaying the
-// due_in_days fixed at issue time - a retried send can happen well after
-// issue.
-func TestDaysUntilDueFromToday(t *testing.T) {
+// TestSendInvoiceDueDateIdenticalAcrossRetryDays checks SendInvoice sends
+// Stripe's absolute `due_date` (Unix timestamp of inv.DueDate at 23:59:59 in
+// the provider's location) rather than a days-until-due count: a retried
+// send shares the create call's fixed idempotency key, and Stripe rejects a
+// retried idempotency key whose params differ from the first attempt
+// (idempotency_error) - a day-count would differ once the retry lands on a
+// later calendar day than the original attempt.
+func TestSendInvoiceDueDateIdenticalAcrossRetryDays(t *testing.T) {
 	due := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	inv := core.Invoice{ID: 9, OrgID: 3, DueDate: &due}
+	wantUnix := time.Date(2026, 11, 20, 23, 59, 59, 0, time.UTC).Unix()
 
-	cases := []struct {
-		today time.Time
-		want  string
-	}{
-		{time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC), "2"},
-		{time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC), "0"},
+	todays := []time.Time{
+		time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC),
 	}
-	for _, c := range cases {
-		s, params := newCreateInvoiceStub(t)
-		if _, _, err := s.SendInvoice(context.Background(), inv, nil, "cus_test_1", c.today); err != nil {
-			t.Fatalf("SendInvoice(today=%v): %v", c.today, err)
+	for _, today := range todays {
+		s, params, _ := newCreateInvoiceStub(t)
+		if _, _, err := s.SendInvoice(context.Background(), inv, nil, "cus_test_1", today); err != nil {
+			t.Fatalf("SendInvoice(today=%v): %v", today, err)
 		}
-		if got := params().Get("days_until_due"); got != c.want {
-			t.Errorf("today=%v: days_until_due = %q, want %q", c.today, got, c.want)
+		got := params().Get("due_date")
+		want := strconv.FormatInt(wantUnix, 10)
+		if got != want {
+			t.Errorf("today=%v: due_date = %q, want %q", today, got, want)
 		}
+	}
+}
+
+// TestSendInvoicePastDueDateRejected checks that when inv's due date has
+// already passed at today, SendInvoice makes no Stripe call at all and
+// returns an error wrapping core.ErrInvalidState, so the caller (POST
+// .../send) gets a 409 telling it to void and reissue instead of sending a
+// now-misleading due date to Stripe.
+func TestSendInvoicePastDueDateRejected(t *testing.T) {
+	due := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	inv := core.Invoice{ID: 9, OrgID: 3, DueDate: &due}
+	s, _, calls := newCreateInvoiceStub(t)
+
+	// One second after the due date's 23:59:59 cutoff.
+	today := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
+	_, _, err := s.SendInvoice(context.Background(), inv, nil, "cus_test_1", today)
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("err = %v, want core.ErrInvalidState", err)
+	}
+	if n := calls(); n != 0 {
+		t.Errorf("stub saw %d requests, want 0 (must not call Stripe for a past-due invoice)", n)
 	}
 }
 

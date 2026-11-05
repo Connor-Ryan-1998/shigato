@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -64,33 +65,45 @@ func lineDescription(l core.InvoiceLine) string {
 	return fmt.Sprintf("%s (incl. GST)", l.Description)
 }
 
-// daysUntilDue returns the whole number of days between today and inv's due
-// date, floored at 0 (never negative): max(0, due_date − today). A retried
-// send can happen well after issue, so this is computed fresh from
-// inv.DueDate rather than reusing the due_in_days fixed at issue time. If
-// inv.DueDate is unset (shouldn't happen for an issued invoice), it falls
-// back to inv.DueInDays.
-func daysUntilDue(inv core.Invoice, today time.Time) int64 {
-	if inv.DueDate == nil {
-		if inv.DueInDays < 0 {
-			return 0
-		}
-		return int64(inv.DueInDays)
+// dueDateUnix returns the Stripe `due_date` to send for inv: the Unix
+// timestamp of inv.DueDate at 23:59:59 in loc. It is absolute (not a day
+// count from "today"), so it is identical on every retry regardless of what
+// calendar day the retry happens on - unlike a days-until-due figure, it can
+// safely share SendInvoice's fixed idempotency key: Stripe rejects a
+// retried idempotency key whose params differ from the first attempt
+// (idempotency_error), which a day-count recomputed on a later day would
+// trigger.
+func dueDateUnix(dueDate time.Time, loc *time.Location) int64 {
+	y, m, d := dueDate.Date()
+	return time.Date(y, m, d, 23, 59, 59, 0, loc).Unix()
+}
+
+// locOrUTC returns s.loc, defaulting to UTC.
+func (s *Stripe) locOrUTC() *time.Location {
+	if s.loc == nil {
+		return time.UTC
 	}
-	y, m, d := today.Date()
-	todayDate := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	days := int64(inv.DueDate.Sub(todayDate).Hours() / 24)
-	if days < 0 {
-		return 0
-	}
-	return days
+	return s.loc
 }
 
 // SendInvoice creates a draft Stripe invoice for inv, adds one invoice item
 // per line (amount = line amount + GST, since Stripe Tax isn't used),
-// finalizes it and sends it. today is the caller's current date, used to
-// compute days_until_due.
+// finalizes it and sends it. today is the caller's current time, checked
+// against inv's due date: if the due date has already passed, SendInvoice
+// makes no Stripe call and returns an error wrapping core.ErrInvalidState,
+// since sending a past-due invoice to the provider now would misrepresent
+// it; the caller should void and reissue instead.
 func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string, today time.Time) (string, string, error) {
+	if inv.DueDate == nil {
+		return "", "", fmt.Errorf("stripe: invoice %d has no due date: %w", inv.ID, core.ErrInvalidState)
+	}
+	loc := s.locOrUTC()
+	dueUnix := dueDateUnix(*inv.DueDate, loc)
+	if dueUnix <= today.Unix() {
+		slog.Warn("due date has passed; void and reissue", "invoice_id", inv.ID, "due_date", time.Unix(dueUnix, 0).In(loc))
+		return "", "", fmt.Errorf("stripe: invoice %d due date has passed: %w", inv.ID, core.ErrInvalidState)
+	}
+
 	// Every write carries a key derived from shigoto ids, so a retried
 	// send (a network blip, or POST .../send after a partial failure)
 	// replays onto the same Stripe invoice and items instead of creating
@@ -105,9 +118,9 @@ func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core
 		// Stripe auto-finalize/auto-collect/auto-mark-uncollectible a
 		// draft invoice on its own clock, racing shigoto's explicit
 		// finalize+send below and any later void.
-		AutoAdvance:  stripego.Bool(false),
-		DaysUntilDue: stripego.Int64(daysUntilDue(inv, today)),
-		Currency:     stripego.String("aud"),
+		AutoAdvance: stripego.Bool(false),
+		DueDate:     stripego.Int64(dueUnix),
+		Currency:    stripego.String("aud"),
 		PaymentSettings: &stripego.InvoiceCreatePaymentSettingsParams{
 			PaymentMethodTypes: stripego.StringSlice([]string{"card", "au_becs_debit"}),
 		},
@@ -238,18 +251,13 @@ func (s *Stripe) ParseWebhook(payload []byte, sigHeader string) (payments.Event,
 		paidAt = inv.StatusTransitions.PaidAt
 	}
 
-	loc := s.loc
-	if loc == nil {
-		loc = time.UTC
-	}
-
 	return payments.Event{
 		ID:               event.ID,
 		Kind:             "invoice.paid",
 		InvoiceRef:       inv.ID,
 		PaymentRef:       paymentRef(&inv),
 		Amount:           core.Cents(inv.AmountPaid),
-		PaidOn:           time.Unix(paidAt, 0).In(loc),
+		PaidOn:           time.Unix(paidAt, 0).In(s.locOrUTC()),
 		ShigotoInvoiceID: shigotoID,
 	}, nil
 }
