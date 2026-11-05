@@ -433,12 +433,7 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 			writeError(w, http.StatusUnprocessableEntity, "no payment provider configured")
 			return
 		}
-		if errors.Is(err, core.ErrInvalidState) {
-			writeCoreError(w, err)
-			return
-		}
-		slog.Error("sending invoice to provider failed", "invoice_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeCoreError(w, err)
 		return
 	}
 

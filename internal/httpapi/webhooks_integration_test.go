@@ -413,6 +413,44 @@ func TestSendAlreadySentRejected(t *testing.T) {
 	}
 }
 
+// TestSendUnknownOrCrossOrgInvoice404 covers POST .../send for an invoice
+// id that doesn't exist, and for one that belongs to another org: both
+// must 404 (core.ErrNotFound from billing.Send's GetInvoice), not 500.
+func TestSendUnknownOrCrossOrgInvoice404(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	other := webhookTestOrg(t, pool, "other")
+	otherContact := webhookTestContact(t, pool, other.ID)
+	otherDraftID := webhookTestDraft(t, pool, other.ID, otherContact, "manual", 1000)
+
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	post := func(id int64) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", id), nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	if rr := post(999999); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown invoice id: status = %d, want 404, body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := post(otherDraftID); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-org invoice id: status = %d, want 404, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestVoidCallsProviderVoidInvoice(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
