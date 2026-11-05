@@ -109,7 +109,7 @@ One small self-hosted app, shipped as one Go binary plus Postgres, that runs a m
 - Cash basis uses the payment date.
 - Co-tenants are supported through a join table.
 - Expenses can be split into lines.
-- Tooling is Docker plus uv.
+- Tooling is Go, Docker and go-task.
 - The bond-not-lodged warning fires at 10 days.
 
 ## Architecture
@@ -136,7 +136,7 @@ apps/shigoto/                      (own local repo; submodule later)
 ```
 
 - **Modules:** each module registers its routes, migrations and permissions at startup. A disabled module registers nothing and the SPA hides it, because `/api/v1/meta` lists the enabled modules. Migrations for every module always run, so turning a module back on never leaves the schema half-migrated.
-- **The only two interfaces:** `payments.Provider` (create customer, create/send/void invoice, verify and parse webhook) and `importers.Source` (yield normalised bank lines). Per the user's ask, everything else is concrete.
+- **The only two interfaces:** `payments.Provider` (create customer, create/send/void invoice, verify and parse webhook) and `importers.Source` (yield normalised bank lines). Per the user's ask, everything else is concrete. The one accepted third is `core.Querier`, the small pool-or-tx interface that lets core functions run on a `pgxpool.Pool` or inside a caller's `pgx.Tx`.
 - **Scheduler:** a ticker inside the process runs daily. It creates due rent periods, then drafts their invoices and sends them automatically if the org allows it. Each step is idempotent, so a missed day catches up on the next run.
 - **Files** (receipts, lease PDFs) are stored on a local volume path set in config. Postgres keeps only the metadata.
 - **Email:** SMTP config is used for magic links and notices. Stripe emails the invoices itself.

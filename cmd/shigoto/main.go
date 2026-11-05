@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -62,6 +63,10 @@ func admin(args []string) error {
 	}
 }
 
+// slugPattern is what an org slug may contain: it appears in URLs and in
+// SHIGOTO_STRIPE_<SLUG>_* env var names.
+var slugPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+
 func adminCreateOwner(args []string) error {
 	fs := flag.NewFlagSet("create-owner", flag.ContinueOnError)
 	orgSlug := fs.String("org-slug", "", "org slug (required)")
@@ -72,6 +77,9 @@ func adminCreateOwner(args []string) error {
 	}
 	if *orgSlug == "" || *orgName == "" || *email == "" {
 		return fmt.Errorf("--org-slug, --org-name and --email are required")
+	}
+	if !slugPattern.MatchString(*orgSlug) {
+		return fmt.Errorf("--org-slug must match %s", slugPattern)
 	}
 
 	password, err := readPassword(os.Stdin)
@@ -179,8 +187,9 @@ func serve() error {
 	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: cfg})
 
 	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: handler,
+		Addr:              cfg.Listen,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
