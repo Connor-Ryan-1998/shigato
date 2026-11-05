@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"shigoto/internal/config"
+	"shigoto/internal/module"
 	"shigoto/internal/payments"
 )
 
@@ -17,10 +18,10 @@ func TestMetaListsEnabledModules(t *testing.T) {
 	saved := modules
 	defer func() { modules = saved }()
 
-	modules = []Module{
+	modules = []module.Module{
 		{
 			Name: "property",
-			Routes: func(mux *http.ServeMux, d Deps) {
+			Routes: func(mux *http.ServeMux, d module.Deps) {
 				mux.HandleFunc("GET /api/v1/property/ping", func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
 				})

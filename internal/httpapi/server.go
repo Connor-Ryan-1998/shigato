@@ -11,19 +11,15 @@ import (
 	"shigoto/internal/auth"
 	"shigoto/internal/billing"
 	"shigoto/internal/config"
+	"shigoto/internal/module"
 	"shigoto/internal/payments"
 	"shigoto/internal/payments/stripe"
+	"shigoto/internal/property"
 )
 
-// Module is a feature module that contributes routes to the API, gated by
-// config.Config.Modules[Name].
-type Module struct {
-	Name   string
-	Routes func(mux *http.ServeMux, d Deps)
-}
-
-// Deps holds the dependencies a module's Routes func needs to register its
-// handlers.
+// Deps holds httpapi's own dependencies, a superset of module.Deps: it adds
+// the bits (GetEnv, Payments) only core routes and module construction need,
+// which modules themselves don't see.
 type Deps struct {
 	Pool *pgxpool.Pool
 	Auth *auth.Auth
@@ -63,7 +59,7 @@ func defaultPayments(getenv func(string) string, loc *time.Location) func(orgSlu
 // modules lists the feature modules available to mount. Plans 2, 3 and 4
 // each append one entry. It is a package-level var (not a const slice) so
 // tests can swap it out and restore it.
-var modules = []Module{}
+var modules = []module.Module{property.Module()}
 
 // New builds the HTTP handler: the core routes (auth, health, meta) plus
 // each module in modules whose name is enabled in d.Cfg.Modules.
@@ -111,11 +107,12 @@ func New(d Deps) http.Handler {
 	registerSettingsRoutes(mux, d)
 	registerWebhookRoutes(mux, d)
 
+	md := module.Deps{Pool: d.Pool, Auth: d.Auth, Cfg: d.Cfg, Billing: d.Billing}
 	var enabled []string
 	for _, m := range modules {
 		if d.Cfg.Modules[m.Name] {
 			enabled = append(enabled, m.Name)
-			m.Routes(mux, d)
+			m.Routes(mux, md)
 		}
 	}
 	sort.Strings(enabled)

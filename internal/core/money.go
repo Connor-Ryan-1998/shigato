@@ -29,9 +29,11 @@ func ParseGSTCode(s string) (GSTCode, error) {
 	}
 }
 
-// roundHalfAwayFromZero rounds n/d to the nearest integer, rounding half away from zero.
-// Uses integer arithmetic: (2n+d)/(2d) for n>=0, negates for n<0.
-func roundHalfAwayFromZero(n, d int64) int64 {
+// DivRound rounds n/d to the nearest integer, rounding half away from zero.
+// Uses integer arithmetic: (2n+d)/(2d) for n>=0, negates for n<0. Exported
+// so other packages (e.g. property's rent-period proration) share the same
+// rounding rule as invoice/GST line math.
+func DivRound(n, d int64) int64 {
 	if n >= 0 {
 		return (2*n + d) / (2 * d)
 	}
@@ -42,7 +44,7 @@ func roundHalfAwayFromZero(n, d int64) int64 {
 // LineAmount calculates the total amount for a line: quantityMilli × unit / 1000,
 // rounded half away from zero. quantityMilli is in thousandths of a unit.
 func LineAmount(quantityMilli int64, unit Cents) Cents {
-	return Cents(roundHalfAwayFromZero(quantityMilli*int64(unit), 1000))
+	return Cents(DivRound(quantityMilli*int64(unit), 1000))
 }
 
 // GSTOnExclusive calculates GST on an exclusive (pre-tax) amount.
@@ -54,7 +56,7 @@ func GSTOnExclusive(amount Cents, code GSTCode) Cents {
 	if code != GST {
 		return 0
 	}
-	return Cents(roundHalfAwayFromZero(int64(amount), 10))
+	return Cents(DivRound(int64(amount), 10))
 }
 
 // GSTInInclusive calculates GST from a total (inclusive) amount.
@@ -64,7 +66,7 @@ func GSTInInclusive(total Cents, code GSTCode) Cents {
 	if code != GST {
 		return 0
 	}
-	return Cents(roundHalfAwayFromZero(int64(total), 11))
+	return Cents(DivRound(int64(total), 11))
 }
 
 // Line represents a single invoice or expense line.

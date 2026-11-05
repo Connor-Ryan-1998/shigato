@@ -3,32 +3,22 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
+
+	"shigoto/internal/module"
 )
 
-// maxBodyBytes caps request bodies readJSON (and the login route) will
-// accept.
+// maxBodyBytes caps request bodies the login route reads directly (readJSON
+// enforces its own copy of this limit via module.ReadJSON).
 const maxBodyBytes = 1 << 20 // 1 MiB
 
-// writeJSON writes v as a JSON response with the given status code.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
+// writeJSON, writeError and readJSON are thin wrappers over the module
+// package's exported helpers, kept so httpapi's many call sites don't need
+// a package-qualified rename.
+func writeJSON(w http.ResponseWriter, status int, v any) { module.WriteJSON(w, status, v) }
 
-// writeError writes a JSON error body {"error":"<message>"} with the given
-// status code.
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	module.WriteError(w, status, message)
 }
 
-// readJSON decodes a JSON request body into v. The body is limited to
-// maxBodyBytes and unknown fields are rejected.
-func readJSON(r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	return dec.Decode(v)
-}
+func readJSON(r *http.Request, v any) error { return module.ReadJSON(r, v) }

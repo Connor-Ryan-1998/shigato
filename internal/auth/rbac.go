@@ -24,6 +24,8 @@ const (
 	PermPaymentsWrite Perm = "payments_write"
 	PermReportsRead   Perm = "reports_read"
 	PermReconWrite    Perm = "recon_write"
+	PermPropertyWrite Perm = "property_write"
+	PermPropertyRead  Perm = "property_read"
 )
 
 // rolePerms is the single source of truth for Can. Owner holds every
@@ -37,6 +39,8 @@ var rolePerms = map[Role]map[Perm]bool{
 		PermPaymentsWrite: true,
 		PermReportsRead:   true,
 		PermReconWrite:    true,
+		PermPropertyWrite: true,
+		PermPropertyRead:  true,
 	},
 	Staff: {
 		PermContactsWrite: true,
@@ -45,12 +49,15 @@ var rolePerms = map[Role]map[Perm]bool{
 		PermPaymentsWrite: true,
 		PermReportsRead:   true,
 		PermReconWrite:    true,
+		PermPropertyWrite: true,
+		PermPropertyRead:  true,
 	},
 	Bookkeeper: {
 		PermInvoicesRead:  true,
 		PermReportsRead:   true,
 		PermReconWrite:    true,
 		PermPaymentsWrite: true,
+		PermPropertyRead:  true,
 	},
 	Tenant: {},
 	Client: {},

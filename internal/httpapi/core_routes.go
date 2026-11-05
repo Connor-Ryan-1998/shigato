@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +13,7 @@ import (
 	"shigoto/internal/auth"
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
+	"shigoto/internal/module"
 	"shigoto/internal/payments"
 )
 
@@ -186,43 +186,23 @@ func paymentToResponse(p core.Payment) paymentResponse {
 
 // --- helpers ---
 
-// runInTx runs fn in a new transaction on d.Pool, committing on success and
+// runInTx, pathID and writeCoreError are thin wrappers over the module
+// package's exported helpers, kept so httpapi's many call sites don't need
+// a package-qualified rename.
+
+// runInTx runs fn in a new transaction on pool, committing on success and
 // rolling back (a no-op once committed) otherwise.
 func runInTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return module.RunInTx(ctx, pool, fn)
 }
 
 // pathID parses the {id} path value as an int64. A malformed id is treated
 // like an unknown one: the caller should respond 404, not reveal that the
 // path shape mattered.
-func pathID(r *http.Request) (int64, bool) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	return id, err == nil
-}
+func pathID(r *http.Request) (int64, bool) { return module.PathID(r) }
 
 // writeCoreError maps a core package error to an HTTP response.
-func writeCoreError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, core.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, core.ErrInvalidInput):
-		writeError(w, http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, core.ErrInvalidState):
-		writeError(w, http.StatusConflict, "invalid state")
-	default:
-		slog.Error("request failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-	}
-}
+func writeCoreError(w http.ResponseWriter, err error) { module.WriteCoreError(w, err) }
 
 // writeBillingError maps a billing package error to an HTTP response,
 // falling back to writeCoreError for the core errors billing passes
