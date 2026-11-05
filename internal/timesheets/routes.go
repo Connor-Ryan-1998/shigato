@@ -2,6 +2,8 @@ package timesheets
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -622,9 +624,36 @@ type billingRunRequest struct {
 }
 
 type billingRunResponse struct {
-	Invoice      core.Invoice `json:"invoice"`
-	EntryCount   int          `json:"entry_count"`
-	TotalMinutes int          `json:"total_minutes"`
+	Invoice      billing.InvoiceResponse `json:"invoice"`
+	EntryCount   int                     `json:"entry_count"`
+	TotalMinutes int                     `json:"total_minutes"`
+}
+
+// writeBillingRunError maps a RunBilling error to an HTTP response, the
+// same way httpapi's writeBillingError does for the other billing-backed
+// routes, plus invoiceID in the body: once RunBilling has committed its
+// draft, a later failure (only Issue can still fail at that point) must
+// not strand the caller without a way to find and retry it.
+func writeBillingRunError(w http.ResponseWriter, err error, invoiceID int64) {
+	status := http.StatusInternalServerError
+	msg := "internal error"
+	switch {
+	case errors.Is(err, billing.ErrTooFewPayOptions):
+		status, msg = http.StatusUnprocessableEntity, err.Error()
+	case errors.Is(err, billing.ErrDueDatePassed):
+		status, msg = http.StatusConflict, err.Error()
+	case errors.Is(err, core.ErrNotFound):
+		status, msg = http.StatusNotFound, "not found"
+	case errors.Is(err, core.ErrForbidden):
+		status, msg = http.StatusForbidden, "forbidden"
+	case errors.Is(err, core.ErrInvalidInput):
+		status, msg = http.StatusUnprocessableEntity, err.Error()
+	case errors.Is(err, core.ErrInvalidState):
+		status, msg = http.StatusConflict, "invalid state"
+	default:
+		slog.Error("billing run issue failed", "invoice_id", invoiceID, "error", err)
+	}
+	module.WriteJSON(w, status, map[string]any{"error": msg, "invoice_id": invoiceID})
 }
 
 func runBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -650,10 +679,23 @@ func runBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		ClientContactID: body.ClientContactID, From: from, To: to, DueInDays: body.DueInDays, Issue: body.Issue,
 	})
 	if err != nil {
+		if result.Invoice.ID != 0 {
+			// The draft invoice (and its locked entries) survived; only
+			// the Issue step failed. Tell the caller where to find it.
+			writeBillingRunError(w, err, result.Invoice.ID)
+			return
+		}
 		module.WriteCoreError(w, err)
 		return
 	}
+
+	invResp, err := d.Billing.InvoiceJSON(r.Context(), d.Pool, result.Invoice)
+	if err != nil {
+		slog.Error("building billing-run invoice response failed", "error", err)
+		module.WriteError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	module.WriteJSON(w, http.StatusOK, billingRunResponse{
-		Invoice: result.Invoice, EntryCount: result.EntryCount, TotalMinutes: result.TotalMinutes,
+		Invoice: invResp, EntryCount: result.EntryCount, TotalMinutes: result.TotalMinutes,
 	})
 }

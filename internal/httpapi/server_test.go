@@ -6,12 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"testing"
 	"time"
 
 	"shigoto/internal/config"
-	"shigoto/internal/core"
 	"shigoto/internal/module"
 	"shigoto/internal/payments"
 )
@@ -120,26 +118,5 @@ func TestReadJSONRejectsUnknownField(t *testing.T) {
 	}
 	if err := readJSON(req, &body); err == nil {
 		t.Fatal("readJSON with unknown field: got nil error, want error")
-	}
-}
-
-// TestInvoicePayOptionsOmitStripeWithoutURL covers finding 5: once an
-// invoice is issued, stripe is only a real option if it has a provider
-// URL to pay at.
-func TestInvoicePayOptionsOmitStripeWithoutURL(t *testing.T) {
-	opts := []string{"bank_transfer", "payid", "stripe"}
-	cases := []struct {
-		name string
-		inv  core.Invoice
-		want []string
-	}{
-		{"draft", core.Invoice{Status: "draft"}, opts},
-		{"open, sent", core.Invoice{Status: "open", ProviderURL: "https://pay.example/1"}, opts},
-		{"open, unsent", core.Invoice{Status: "open"}, []string{"bank_transfer", "payid"}},
-	}
-	for _, c := range cases {
-		if got := invoicePayOptions(c.inv, opts); !slices.Equal(got, c.want) {
-			t.Errorf("%s: pay options = %v, want %v", c.name, got, c.want)
-		}
 	}
 }

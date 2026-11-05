@@ -102,9 +102,11 @@ func (s *Service) loc() *time.Location {
 	return s.Location
 }
 
-// runInTx runs fn in a new transaction on s.Pool, committing on success and
-// rolling back (a no-op once committed) otherwise.
-func runInTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+// RunInTx runs fn in a new transaction on pool, committing on success and
+// rolling back (a no-op once committed) otherwise. Exported so other
+// packages whose transactional work must share this exact commit/rollback
+// shape (e.g. timesheets' billing runs) don't need their own copy.
+func RunInTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -158,7 +160,7 @@ func (s *Service) Issue(ctx context.Context, orgID int64, orgSlug string, invoic
 	actor := actorFrom(ctx)
 
 	var inv core.Invoice
-	err := runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+	err := RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		existing, err := core.GetInvoice(ctx, tx, orgID, invoiceID)
 		if err != nil {
 			return err
@@ -245,7 +247,7 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 		return ErrDueDatePassed
 	}
 
-	return runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+	return RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		var providerRef string
 		var contactID int64
 		if err := tx.QueryRow(ctx,
@@ -313,7 +315,7 @@ func (s *Service) Void(ctx context.Context, orgID int64, orgSlug string, invoice
 
 	var inv core.Invoice
 	var providerErr error
-	err := runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+	err := RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		var err error
 		inv, err = core.VoidInvoice(ctx, tx, orgID, invoiceID)
 		if err != nil {

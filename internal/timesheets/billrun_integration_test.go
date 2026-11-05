@@ -4,7 +4,9 @@ package timesheets_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -358,5 +360,183 @@ func TestRunBillingIssueFlag(t *testing.T) {
 	}
 	if result.Invoice.Number == nil {
 		t.Fatalf("Number = nil, want assigned")
+	}
+}
+
+// TestRunBillingIssueFailureLeavesDraft covers the controller ruling that a
+// failed Issue after the billing transaction has committed must not strand
+// the caller: RunBilling returns the already-populated RunResult (the
+// invoice id, EntryCount and TotalMinutes) alongside the error, and the
+// draft invoice - with its entries still locked to it - is left in place.
+//
+// The timesheet billing run's invoices use Source "timesheet", which the
+// QLD pay-options rule in billing.Service.Issue does not apply to (only
+// "rent"/"bond" - see billing.go and
+// docs/superpowers/plans/2026-11-05-02-property.md), so "no pay options
+// configured" does not make Issue fail here. Instead this drives Issue's
+// other failure mode - core.IssueInvoice's zero-total guard - with a
+// 1-cent rate and a 1-minute entry: DivRound(1*1, 60) rounds the line to
+// $0.00, so the invoice totals zero and IssueInvoice refuses to issue it
+// (core.ErrInvalidInput), after the draft and its line are already
+// committed.
+func TestRunBillingIssueFailureLeavesDraft(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	userID := testUser(t, pool, "entries-issue-fail@example.com")
+	client := testContact(t, pool, org.ID, "client", "A Client")
+	proj, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
+		ClientContactID: client, Name: "Pro bono", HourlyRate: 1, GSTCode: core.GST,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	from := mustDate(t, "2026-11-01")
+	to := mustDate(t, "2026-11-30")
+	testEntry(t, pool, org.ID, userID, task.ID, from, 1)
+
+	b := testBillingService(pool)
+	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
+	})
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("RunBilling: err = %v, want ErrInvalidInput", err)
+	}
+	if result.Invoice.ID == 0 {
+		t.Fatalf("result.Invoice.ID = 0, want the committed draft's id")
+	}
+	if result.EntryCount != 1 || result.TotalMinutes != 1 {
+		t.Fatalf("EntryCount/TotalMinutes = %d/%d, want 1/1", result.EntryCount, result.TotalMinutes)
+	}
+
+	draft, err := core.GetInvoice(ctx, pool, org.ID, result.Invoice.ID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if draft.Status != "draft" {
+		t.Fatalf("draft.Status = %q, want draft", draft.Status)
+	}
+
+	entries, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].InvoiceLineID == nil {
+		t.Fatalf("entries = %+v, want the one entry still locked to the draft", entries)
+	}
+}
+
+// --- HTTP route tests ---
+
+func TestBillingRunRouteResponseShape(t *testing.T) {
+	pool, handler, token, orgID := timesheetsTestSetup(t)
+	ctx := context.Background()
+	client := testContact(t, pool, orgID, "client", "A Client")
+	proj := testProject(t, pool, orgID, client)
+	task, err := timesheets.CreateTask(ctx, pool, orgID, proj.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	var ownerID int64
+	if err := pool.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", "owner@example.com").Scan(&ownerID); err != nil {
+		t.Fatalf("looking up owner id: %v", err)
+	}
+	if _, err := timesheets.CreateEntry(ctx, pool, orgID, ownerID, timesheets.Entry{
+		TaskID: task.ID, WorkDate: mustParseDate(t, "2026-11-01"), Minutes: 60,
+	}, mustParseDate(t, "2026-11-05")); err != nil {
+		t.Fatalf("CreateEntry: %v", err)
+	}
+
+	body := map[string]any{
+		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14,
+	}
+	rr := postJSON(handler, token, "/api/v1/orgs/acme/billing-runs", body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v, body=%s", err, rr.Body.String())
+	}
+	for _, key := range []string{"invoice", "entry_count", "total_minutes"} {
+		if _, ok := resp[key]; !ok {
+			t.Fatalf("response missing top-level key %q: body=%s", key, rr.Body.String())
+		}
+	}
+
+	var invoice map[string]json.RawMessage
+	if err := json.Unmarshal(resp["invoice"], &invoice); err != nil {
+		t.Fatalf("decoding invoice: %v", err)
+	}
+	for _, key := range []string{"id", "contact_id", "total", "subtotal", "gst_total", "pay_options", "lines"} {
+		if _, ok := invoice[key]; !ok {
+			t.Fatalf("invoice missing snake_case key %q: body=%s", key, rr.Body.String())
+		}
+	}
+	for _, key := range []string{"OrgID", "org_id", "ProviderRef", "provider_ref", "ProviderURL", "provider_url", "DueOn", "due_on", "DueInDays", "due_in_days"} {
+		if _, ok := invoice[key]; ok {
+			t.Fatalf("invoice leaks internal key %q: body=%s", key, rr.Body.String())
+		}
+	}
+
+	var lines []map[string]json.RawMessage
+	if err := json.Unmarshal(invoice["lines"], &lines); err != nil {
+		t.Fatalf("decoding invoice.lines: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("len(invoice.lines) = %d, want 1", len(lines))
+	}
+	if _, ok := lines[0]["unit_amount"]; !ok {
+		t.Fatalf("lines[0] missing unit_amount: body=%s", rr.Body.String())
+	}
+}
+
+func TestBillingRunRouteForbiddenForBookkeeper(t *testing.T) {
+	pool, handler, _, orgID := timesheetsTestSetup(t)
+	ctx := context.Background()
+	client := testContact(t, pool, orgID, "client", "A Client")
+
+	bookkeeperID := testUser(t, pool, "bookkeeper@example.com")
+	addMembership(t, pool, bookkeeperID, orgID, auth.Bookkeeper)
+	bookkeeperToken, err := auth.Login(ctx, pool, "bookkeeper@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	body := map[string]any{
+		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14,
+	}
+	rr := postJSON(handler, bookkeeperToken, "/api/v1/orgs/acme/billing-runs", body)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBillingRunRouteNoUnbilled422(t *testing.T) {
+	pool, handler, token, orgID := timesheetsTestSetup(t)
+	client := testContact(t, pool, orgID, "client", "A Client")
+	_ = testProject(t, pool, orgID, client) // a project with no logged time
+
+	body := map[string]any{
+		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14,
+	}
+	rr := postJSON(handler, token, "/api/v1/orgs/acme/billing-runs", body)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Error != "invalid input: no unbilled time" {
+		t.Fatalf("error = %q, want to contain %q", resp.Error, "no unbilled time")
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -98,16 +97,6 @@ type lineRequest struct {
 	GSTCode       string `json:"gst_code"`
 }
 
-type lineResponse struct {
-	ID            int64  `json:"id"`
-	Description   string `json:"description"`
-	QuantityMilli int64  `json:"quantity_milli"`
-	UnitAmount    int64  `json:"unit_amount"`
-	GSTCode       string `json:"gst_code"`
-	GSTAmount     int64  `json:"gst_amount"`
-	Amount        int64  `json:"amount"`
-}
-
 type invoiceRequest struct {
 	ContactID int64         `json:"contact_id"`
 	Source    string        `json:"source"`
@@ -115,62 +104,13 @@ type invoiceRequest struct {
 	Lines     []lineRequest `json:"lines"`
 }
 
-type invoiceResponse struct {
-	ID               int64          `json:"id"`
-	ContactID        int64          `json:"contact_id"`
-	Number           *int           `json:"number"`
-	Source           string         `json:"source"`
-	Status           string         `json:"status"`
-	IssueDate        *string        `json:"issue_date"`
-	DueDate          *string        `json:"due_date"`
-	Currency         string         `json:"currency"`
-	Subtotal         int64          `json:"subtotal"`
-	GSTTotal         int64          `json:"gst_total"`
-	Total            int64          `json:"total"`
-	PaymentReference string         `json:"payment_reference"`
-	PayOptions       []string       `json:"pay_options"`
-	Lines            []lineResponse `json:"lines"`
-}
-
 const dateLayout = "2006-01-02"
 
-// invoicePayOptions narrows the org's pay options to what inv can
-// actually be paid with: an issued invoice that never reached the
-// provider (no ProviderURL) has nowhere to pay by card, so stripe is
-// dropped.
-func invoicePayOptions(inv core.Invoice, opts []string) []string {
-	if inv.Status == "draft" || inv.ProviderURL != "" {
-		return opts
-	}
-	return slices.DeleteFunc(slices.Clone(opts), func(o string) bool { return o == "stripe" })
-}
-
-func invoiceToResponse(ctx context.Context, q core.Querier, bill *billing.Service, inv core.Invoice) (invoiceResponse, error) {
-	opts, err := bill.PayOptions(ctx, q, inv.OrgID)
-	if err != nil {
-		return invoiceResponse{}, err
-	}
-
-	resp := invoiceResponse{
-		ID: inv.ID, ContactID: inv.ContactID, Number: inv.Number, Source: inv.Source, Status: inv.Status,
-		Currency: inv.Currency, Subtotal: int64(inv.Subtotal), GSTTotal: int64(inv.GSTTotal), Total: int64(inv.Total),
-		PaymentReference: inv.PaymentReference, PayOptions: invoicePayOptions(inv, opts), Lines: make([]lineResponse, len(inv.Lines)),
-	}
-	if inv.IssueDate != nil {
-		s := inv.IssueDate.Format(dateLayout)
-		resp.IssueDate = &s
-	}
-	if inv.DueDate != nil {
-		s := inv.DueDate.Format(dateLayout)
-		resp.DueDate = &s
-	}
-	for i, l := range inv.Lines {
-		resp.Lines[i] = lineResponse{
-			ID: l.ID, Description: l.Description, QuantityMilli: l.QuantityMilli, UnitAmount: int64(l.UnitAmount),
-			GSTCode: string(l.GSTCode), GSTAmount: int64(l.GSTAmount), Amount: int64(l.Amount),
-		}
-	}
-	return resp, nil
+// invoiceToResponse builds inv's API representation via d.Billing's
+// InvoiceJSON (billing.InvoiceResponse), the single exported invoice-JSON
+// shaper shared with the timesheets billing-run route.
+func invoiceToResponse(ctx context.Context, q core.Querier, bill *billing.Service, inv core.Invoice) (billing.InvoiceResponse, error) {
+	return bill.InvoiceJSON(ctx, q, inv)
 }
 
 type paymentRequest struct {
@@ -370,7 +310,7 @@ func listInvoices(w http.ResponseWriter, r *http.Request, d Deps) {
 		return
 	}
 
-	resp := make([]invoiceResponse, len(invoices))
+	resp := make([]billing.InvoiceResponse, len(invoices))
 	for i, inv := range invoices {
 		ir, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 		if err != nil {

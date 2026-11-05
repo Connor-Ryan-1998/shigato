@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
@@ -95,8 +94,10 @@ type taskGroup struct {
 // returns core.ErrInvalidInput ("no unbilled time").
 //
 // If in.Issue is set, b.Issue is called once the billing transaction has
-// committed; a failure there is returned as-is and the draft invoice (with
-// its entries already locked to it) is left in place for a retry.
+// committed; a failure there is returned alongside the already-populated
+// RunResult (its Invoice is the still-draft invoice, EntryCount/
+// TotalMinutes reflect what it billed), so a caller can still find and
+// retry the draft - its entries stay locked to it either way.
 func RunBilling(ctx context.Context, b *billing.Service, orgID int64, orgSlug string, in RunInput) (RunResult, error) {
 	if in.From.After(in.To) {
 		return RunResult{}, fmt.Errorf("%w: from must not be after to", core.ErrInvalidInput)
@@ -123,7 +124,7 @@ func RunBilling(ctx context.Context, b *billing.Service, orgID int64, orgSlug st
 
 	var result RunResult
 	var invoiceID int64
-	err = runBillingTx(ctx, b.Pool, func(tx pgx.Tx) error {
+	err = billing.RunInTx(ctx, b.Pool, func(tx pgx.Tx) error {
 		groups, err := lockUnbilledEntries(ctx, tx, orgID, in)
 		if err != nil {
 			return err
@@ -179,7 +180,10 @@ func RunBilling(ctx context.Context, b *billing.Service, orgID int64, orgSlug st
 	if in.Issue {
 		inv, err := b.Issue(ctx, orgID, orgSlug, invoiceID)
 		if err != nil {
-			return RunResult{}, err
+			// The draft (result.Invoice) and its locked entries survive:
+			// let the caller see and retry it rather than losing track of
+			// it behind a bare error.
+			return result, err
 		}
 		result.Invoice = inv
 	}
@@ -255,20 +259,4 @@ func lockUnbilledEntries(ctx context.Context, tx pgx.Tx, orgID int64, in RunInpu
 		groups = append(groups, *g)
 	}
 	return groups, nil
-}
-
-// runBillingTx runs fn in a new transaction on pool, committing on success
-// and rolling back (a no-op once committed) otherwise. Mirrors billing's own
-// unexported runInTx; duplicated here since Service doesn't expose it.
-func runBillingTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }
