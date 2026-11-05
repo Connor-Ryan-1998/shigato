@@ -108,6 +108,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", d.Auth.LogoutHandler)
 
 	registerCoreRoutes(mux, d)
+	registerSettingsRoutes(mux, d)
 	registerWebhookRoutes(mux, d)
 
 	var enabled []string
