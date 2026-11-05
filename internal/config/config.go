@@ -29,6 +29,9 @@ type Config struct {
 	// calculated in, so "today" means the operator's calendar day, not
 	// UTC's. Defaults to Australia/Brisbane.
 	Location *time.Location
+	// SchedulerEnabled controls the in-process hourly scheduler (rent
+	// runs and session pruning). Defaults to true.
+	SchedulerEnabled bool
 }
 
 // Load reads configuration from environment variables via getenv.
@@ -78,6 +81,16 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("unknown module %q (known: %s)", name, strings.Join(Known, ", "))
 		}
 		c.Modules[name] = true
+	}
+
+	scheduler := getenv("SHIGOTO_SCHEDULER")
+	switch scheduler {
+	case "", "on":
+		c.SchedulerEnabled = true
+	case "off":
+		c.SchedulerEnabled = false
+	default:
+		return Config{}, fmt.Errorf("invalid SHIGOTO_SCHEDULER %q (want \"on\" or \"off\")", scheduler)
 	}
 
 	return c, nil

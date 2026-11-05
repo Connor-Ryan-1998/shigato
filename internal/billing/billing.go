@@ -80,6 +80,14 @@ type Service struct {
 	Location *time.Location
 }
 
+// New builds a Service against pool: resolve reads an org's payment
+// provider (e.g. httpapi's defaultPayments) and getenv reads environment
+// variables for config.StripeFor. loc is used for Issue's issue date and
+// any other "today" the service needs.
+func New(pool *pgxpool.Pool, getenv func(string) string, resolve func(orgSlug string) (payments.Provider, error), loc *time.Location) *Service {
+	return &Service{Pool: pool, GetEnv: getenv, Payments: resolve, Location: loc}
+}
+
 // loc returns s.Location, defaulting to UTC so a Service built without one
 // set (e.g. a non-HTTP caller) doesn't panic calling time.Now().In(nil).
 func (s *Service) loc() *time.Location {

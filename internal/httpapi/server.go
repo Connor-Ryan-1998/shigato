@@ -61,9 +61,9 @@ func defaultPayments(getenv func(string) string, loc *time.Location) func(orgSlu
 // tests can swap it out and restore it.
 var modules = []module.Module{property.Module()}
 
-// New builds the HTTP handler: the core routes (auth, health, meta) plus
-// each module in modules whose name is enabled in d.Cfg.Modules.
-func New(d Deps) http.Handler {
+// withDefaults fills in d's optional fields the way New always has:
+// GetEnv, Cfg.Location, Payments and Billing.
+func (d Deps) withDefaults() Deps {
 	if d.GetEnv == nil {
 		d.GetEnv = os.Getenv
 	}
@@ -77,13 +77,22 @@ func New(d Deps) http.Handler {
 		d.Payments = defaultPayments(d.GetEnv, d.Cfg.Location)
 	}
 	if d.Billing == nil {
-		d.Billing = &billing.Service{
-			Pool:     d.Pool,
-			GetEnv:   d.GetEnv,
-			Payments: d.Payments,
-			Location: d.Cfg.Location,
-		}
+		d.Billing = billing.New(d.Pool, d.GetEnv, d.Payments, d.Cfg.Location)
 	}
+	return d
+}
+
+// DefaultBilling returns the billing.Service New would build from d by
+// default. main.go calls this once and shares the result between New and
+// the scheduler, so the two don't end up with divergently-built services.
+func DefaultBilling(d Deps) *billing.Service {
+	return d.withDefaults().Billing
+}
+
+// New builds the HTTP handler: the core routes (auth, health, meta) plus
+// each module in modules whose name is enabled in d.Cfg.Modules.
+func New(d Deps) http.Handler {
+	d = d.withDefaults()
 
 	mux := http.NewServeMux()
 

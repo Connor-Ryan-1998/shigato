@@ -44,6 +44,7 @@ The server is configured by environment variables, all prefixed `SHIGOTO_`:
 | `SHIGOTO_FILES_DIR` | no | `./data/files` | Directory for uploaded files. |
 | `SHIGOTO_BASE_URL` | yes | | Public base URL, used for webhooks and links. |
 | `SHIGOTO_TIMEZONE` | no | `Australia/Brisbane` | Timezone invoice dates (issue_date, due_date) are calculated in. |
+| `SHIGOTO_SCHEDULER` | no | `on` | `on` or `off`. Enables the in-process hourly scheduler (rent runs and session pruning). |
 | `SHIGOTO_STRIPE_<ORGSLUG>_SECRET_KEY` | no | | Stripe secret key for the org identified by slug. |
 | `SHIGOTO_STRIPE_<ORGSLUG>_WEBHOOK_SECRET` | no | | Stripe webhook signing secret for the org. |
 

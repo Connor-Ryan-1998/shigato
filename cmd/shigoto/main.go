@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -26,6 +27,7 @@ import (
 	"shigoto/internal/core"
 	"shigoto/internal/db"
 	"shigoto/internal/httpapi"
+	"shigoto/internal/scheduler"
 )
 
 func main() {
@@ -184,7 +186,10 @@ func serve() error {
 	}
 
 	a := auth.New(pool, strings.HasPrefix(cfg.BaseURL, "https://"))
-	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: cfg})
+	deps := httpapi.Deps{Pool: pool, Auth: a, Cfg: cfg}
+	billingSvc := httpapi.DefaultBilling(deps)
+	deps.Billing = billingSvc
+	handler := httpapi.New(deps)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -194,6 +199,22 @@ func serve() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	defer schedCancel()
+	var schedWG sync.WaitGroup
+	if cfg.SchedulerEnabled {
+		schedWG.Add(1)
+		go func() {
+			defer schedWG.Done()
+			scheduler.Run(schedCtx, scheduler.Jobs{
+				Pool:            pool,
+				Billing:         billingSvc,
+				Location:        cfg.Location,
+				PropertyEnabled: cfg.Modules["property"],
+			}, time.Hour, time.Now)
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -205,9 +226,17 @@ func serve() error {
 
 	select {
 	case err := <-errCh:
+		schedCancel()
+		schedWG.Wait()
 		return err
 	case <-ctx.Done():
 	}
+
+	// Stop the scheduler and wait for its goroutine to exit before
+	// shutting down the HTTP server and (via the deferred pool.Close
+	// above) closing the pool.
+	schedCancel()
+	schedWG.Wait()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

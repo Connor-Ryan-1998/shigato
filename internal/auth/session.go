@@ -67,6 +67,13 @@ func Logout(ctx context.Context, q core.Querier, token string) error {
 	return err
 }
 
+// PruneSessions deletes every session whose expires_at is before now. It's
+// called by the hourly scheduler so expired sessions don't accumulate.
+func PruneSessions(ctx context.Context, q core.Querier, now time.Time) error {
+	_, err := q.Exec(ctx, "DELETE FROM sessions WHERE expires_at < $1", now)
+	return err
+}
+
 // newToken generates a random 32-byte session token and returns it along
 // with the hash stored in the database.
 func newToken() (token string, hash []byte, err error) {

@@ -109,6 +109,47 @@ func TestLoadRejectsInvalidTimezone(t *testing.T) {
 	}
 }
 
+func TestLoadSchedulerDefaultsOn(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !c.SchedulerEnabled {
+		t.Errorf("SchedulerEnabled = false, want true")
+	}
+}
+
+func TestLoadSchedulerOff(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_SCHEDULER":    "off",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.SchedulerEnabled {
+		t.Errorf("SchedulerEnabled = true, want false")
+	}
+}
+
+func TestLoadRejectsInvalidScheduler(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_SCHEDULER":    "maybe",
+	}))
+	if err == nil {
+		t.Fatal("expected error for invalid SHIGOTO_SCHEDULER, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "SHIGOTO_SCHEDULER") {
+		t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_SCHEDULER")
+	}
+}
+
 func TestStripeFor(t *testing.T) {
 	getenv := env(map[string]string{
 		"SHIGOTO_DATABASE_URL":                 "postgres://x",
