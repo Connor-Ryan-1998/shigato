@@ -82,6 +82,33 @@ func TestModulesSubset(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultTimezone(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Location == nil || c.Location.String() != "Australia/Brisbane" {
+		t.Errorf("Location = %v, want Australia/Brisbane", c.Location)
+	}
+}
+
+func TestLoadRejectsInvalidTimezone(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_TIMEZONE":     "Not/AZone",
+	}))
+	if err == nil {
+		t.Fatal("expected error for invalid timezone, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "Not/AZone") {
+		t.Errorf("error = %q, want it to mention %q", got, "Not/AZone")
+	}
+}
+
 func TestStripeFor(t *testing.T) {
 	getenv := env(map[string]string{
 		"SHIGOTO_DATABASE_URL":                 "postgres://x",

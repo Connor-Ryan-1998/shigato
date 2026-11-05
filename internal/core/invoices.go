@@ -274,7 +274,12 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 		return Invoice{}, err
 	}
 
-	issueDate := today.Truncate(24 * time.Hour)
+	// today is expected to already be in the operator's timezone (the
+	// handler passes time.Now().In(cfg.Location)): take its calendar
+	// date, not a UTC day truncation, which would shift the date for
+	// callers east of UTC during their morning.
+	y, m, d := today.Date()
+	issueDate := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 	dueDate := issueDate.AddDate(0, 0, dueInDays)
 	_, err = tx.Exec(ctx,
 		`UPDATE invoices SET number = $1, issue_date = $2, due_date = $3, status = 'open' WHERE org_id = $4 AND id = $5`,

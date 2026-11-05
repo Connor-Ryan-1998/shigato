@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Known lists the module names that SHIGOTO_MODULES may select.
@@ -24,6 +25,10 @@ type Config struct {
 	FilesDir    string
 	BaseURL     string
 	Stripe      map[string]StripeOrg
+	// Location is the timezone invoice dates (issue_date, due_date) are
+	// calculated in, so "today" means the operator's calendar day, not
+	// UTC's. Defaults to Australia/Brisbane.
+	Location *time.Location
 }
 
 // Load reads configuration from environment variables via getenv.
@@ -48,6 +53,16 @@ func Load(getenv func(string) string) (Config, error) {
 	if c.BaseURL == "" {
 		return Config{}, fmt.Errorf("SHIGOTO_BASE_URL is required")
 	}
+
+	tz := getenv("SHIGOTO_TIMEZONE")
+	if tz == "" {
+		tz = "Australia/Brisbane"
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid SHIGOTO_TIMEZONE %q: %w", tz, err)
+	}
+	c.Location = loc
 
 	modules := strings.TrimSpace(getenv("SHIGOTO_MODULES"))
 	var names []string

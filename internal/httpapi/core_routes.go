@@ -431,7 +431,7 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 			}
 		}
 
-		inv, err = core.IssueInvoice(r.Context(), tx, p.OrgID, id, time.Now())
+		inv, err = core.IssueInvoice(r.Context(), tx, p.OrgID, id, time.Now().In(d.Cfg.Location))
 		if err != nil {
 			return err
 		}

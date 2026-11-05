@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -41,6 +42,12 @@ var modules = []Module{}
 func New(d Deps) http.Handler {
 	if d.GetEnv == nil {
 		d.GetEnv = os.Getenv
+	}
+	if d.Cfg.Location == nil {
+		// Callers that build Config by hand (mainly tests) instead of
+		// config.Load may leave this nil; fall back to UTC rather than
+		// let time.Now().In(nil) panic in the invoice-issuing handler.
+		d.Cfg.Location = time.UTC
 	}
 
 	mux := http.NewServeMux()

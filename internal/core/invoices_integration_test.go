@@ -323,6 +323,40 @@ func TestIssueNonDraftInvalid(t *testing.T) {
 	}
 }
 
+func TestIssueInvoiceUsesCallersCalendarDate(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	draftID := createDraft(t, pool, org.ID, contactID, "manual", 1000)
+
+	// 08:00 in +10:00 (Queensland) is 22:00 the previous day in UTC. A
+	// naive UTC-truncation of "today" would wrongly give issue_date
+	// 2026-11-04.
+	today, err := time.Parse(time.RFC3339, "2026-11-05T08:00:00+10:00")
+	if err != nil {
+		t.Fatalf("parsing today: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	inv, err := core.IssueInvoice(ctx, tx, org.ID, draftID, today)
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if inv.IssueDate == nil || inv.IssueDate.Format(time.DateOnly) != "2026-11-05" {
+		t.Fatalf("issue_date = %v, want 2026-11-05", inv.IssueDate)
+	}
+}
+
 func TestCrossOrgInvoice404(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
