@@ -1,0 +1,298 @@
+// Package billing owns the money-moving half of an invoice's lifecycle:
+// issuing (QLD pay-options rule, numbering, best-effort send), retried
+// sending and voiding. It wraps the transactions, context.WithoutCancel
+// handling and audit entries each of those needs so httpapi's handlers stay
+// thin HTTP wrappers.
+package billing
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"shigoto/internal/config"
+	"shigoto/internal/core"
+	"shigoto/internal/payments"
+)
+
+// ErrTooFewPayOptions is the QLD rule: a rent or bond invoice needs at
+// least minPayOptions ways to pay before it can be issued.
+var ErrTooFewPayOptions = errors.New("rent and bond invoices need at least 2 payment options")
+
+// ErrProviderVoidFailed wraps a payments.Provider error from Void, so
+// callers can tell a provider-side void failure (502) apart from a local
+// state error (409/404).
+var ErrProviderVoidFailed = errors.New("void failed with payment provider")
+
+// minPayOptions is the QLD rule: a rent or bond invoice needs at least this
+// many ways to pay before it can be issued.
+const minPayOptions = 2
+
+// actorKey is the context key WithActor/actorFrom use to pass the acting
+// user through to an audit_log entry.
+type actorKey struct{}
+
+// WithActor returns a context carrying userID as the actor for any audit
+// entries Issue, Send or Void write. Callers with no user in scope (e.g.
+// the scheduler) can omit it; audit_log.actor_user_id is then NULL.
+func WithActor(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, actorKey{}, userID)
+}
+
+// actorFrom reads the actor set by WithActor, or nil if none was set.
+func actorFrom(ctx context.Context) *int64 {
+	if id, ok := ctx.Value(actorKey{}).(int64); ok {
+		return &id
+	}
+	return nil
+}
+
+// Service implements invoice issuing, sending and voiding against Postgres
+// and an org's payment provider.
+type Service struct {
+	Pool *pgxpool.Pool
+	// GetEnv reads environment variables for config.StripeFor. It
+	// defaults to os.Getenv in httpapi.New; tests inject a fake.
+	GetEnv func(string) string
+	// Payments resolves the payments.Provider for an org slug, returning
+	// payments.ErrNoProvider when the org has none configured.
+	Payments func(orgSlug string) (payments.Provider, error)
+	// Location is used for Issue's issue date and any other "today" the
+	// service needs.
+	Location *time.Location
+}
+
+// runInTx runs fn in a new transaction on s.Pool, committing on success and
+// rolling back (a no-op once committed) otherwise.
+func runInTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// PayOptions builds the pay_options an org currently offers: bank transfer
+// when it has both a BSB and account number, PayID when it has one, and
+// Stripe when config.StripeFor finds both a secret key and a webhook
+// secret for its slug (a secret key alone can create charges but can't
+// verify the webhooks that confirm they were paid).
+func (s *Service) PayOptions(ctx context.Context, q core.Querier, orgID int64) ([]string, error) {
+	var slug string
+	var bsb, account, payid sql.NullString
+	err := q.QueryRow(ctx, `SELECT slug, bank_bsb, bank_account, payid FROM orgs WHERE id = $1`, orgID).
+		Scan(&slug, &bsb, &account, &payid)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []string{}
+	if bsb.String != "" && account.String != "" {
+		opts = append(opts, "bank_transfer")
+	}
+	if payid.String != "" {
+		opts = append(opts, "payid")
+	}
+	if org, ok := config.StripeFor(s.GetEnv, slug); ok && org.SecretKey != "" && org.WebhookSecret != "" {
+		opts = append(opts, "stripe")
+	}
+	return opts, nil
+}
+
+// Issue enforces the QLD pay-options rule (rent and bond invoices need at
+// least 2, returning ErrTooFewPayOptions and leaving the invoice a draft
+// otherwise), assigns the gap-free invoice number, and audits the issue -
+// all in one transaction. Once that's committed, it makes a best-effort
+// attempt to send the invoice to the org's payment provider in a detached
+// context (context.WithoutCancel): a client disconnect mid-send must not
+// abandon a provider call, or the commit recording it, half-done. A failed
+// send (other than payments.ErrNoProvider) is logged, not returned: the
+// number is already burned and won't move, and the invoice stays open with
+// no provider_ref for POST .../send to retry.
+func (s *Service) Issue(ctx context.Context, orgID int64, orgSlug string, invoiceID int64) (core.Invoice, error) {
+	actor := actorFrom(ctx)
+
+	var inv core.Invoice
+	err := runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		existing, err := core.GetInvoice(ctx, tx, orgID, invoiceID)
+		if err != nil {
+			return err
+		}
+
+		if existing.Source == "rent" || existing.Source == "bond" {
+			opts, err := s.PayOptions(ctx, tx, orgID)
+			if err != nil {
+				return err
+			}
+			if len(opts) < minPayOptions {
+				return ErrTooFewPayOptions
+			}
+		}
+
+		inv, err = core.IssueInvoice(ctx, tx, orgID, invoiceID, time.Now().In(s.Location))
+		if err != nil {
+			return err
+		}
+		return core.Audit(ctx, tx, orgID, actor, "invoice", inv.ID, "issue", map[string]any{"number": inv.Number})
+	})
+	if err != nil {
+		return core.Invoice{}, err
+	}
+
+	if err := s.sendToProvider(context.WithoutCancel(ctx), orgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
+		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
+	}
+
+	return inv, nil
+}
+
+// Send retries sending an issued invoice to the org's payment provider
+// after a previous attempt failed. Only an 'open' invoice with no
+// provider_ref yet can be sent; a previously-sent invoice (provider_ref
+// already set) returns core.ErrInvalidState rather than sending a second
+// time.
+func (s *Service) Send(ctx context.Context, orgID int64, orgSlug string, invoiceID int64) (core.Invoice, error) {
+	inv, err := core.GetInvoice(ctx, s.Pool, orgID, invoiceID)
+	if err != nil {
+		return core.Invoice{}, err
+	}
+	if inv.Status != "open" || inv.ProviderRef != "" {
+		return core.Invoice{}, core.ErrInvalidState
+	}
+
+	// Detached from the request, as in Issue.
+	if err := s.sendToProvider(context.WithoutCancel(ctx), orgID, orgSlug, &inv); err != nil {
+		return core.Invoice{}, err
+	}
+	return inv, nil
+}
+
+// sendToProvider resolves orgSlug's payments.Provider, ensures the
+// invoice's contact has a provider customer ref (creating one if needed),
+// sends the invoice, and stores the returned provider_ref/provider_url.
+// inv is updated in place on success. Returns payments.ErrNoProvider
+// unchanged when the org has no provider configured, so callers can treat
+// that as "nothing to do" rather than a failure.
+//
+// It re-reads and locks the invoice row (FOR UPDATE) before sending and
+// re-checks provider_ref there, returning core.ErrInvalidState if another
+// call already sent it: the caller's own pre-check (e.g. Send's) is only a
+// fast path, since two concurrent sends (an explicit retry racing Issue's
+// automatic attempt, or two retries) could otherwise both pass it and
+// double-send to the provider.
+func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug string, inv *core.Invoice) error {
+	provider, err := s.Payments(orgSlug)
+	if err != nil {
+		return err
+	}
+
+	return runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var providerRef string
+		var contactID int64
+		if err := tx.QueryRow(ctx,
+			`SELECT contact_id, coalesce(provider_ref,'') FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+			orgID, inv.ID,
+		).Scan(&contactID, &providerRef); err != nil {
+			return err
+		}
+		if providerRef != "" {
+			return core.ErrInvalidState
+		}
+
+		contact, err := core.GetContact(ctx, tx, orgID, contactID)
+		if err != nil {
+			return err
+		}
+
+		custRef := contact.ProviderCustomerRef
+		if custRef == "" {
+			custRef, err = provider.EnsureCustomer(ctx, contact)
+			if err != nil {
+				return fmt.Errorf("ensuring provider customer: %w", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE contacts SET provider_customer_ref = $1 WHERE org_id = $2 AND id = $3`,
+				custRef, orgID, contact.ID,
+			); err != nil {
+				return err
+			}
+		}
+
+		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef)
+		if err != nil {
+			return fmt.Errorf("sending invoice: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE invoices SET provider_ref = $1, provider_url = $2 WHERE org_id = $3 AND id = $4`,
+			ref, hostedURL, orgID, inv.ID,
+		); err != nil {
+			return err
+		}
+
+		inv.ProviderRef = ref
+		inv.ProviderURL = hostedURL
+		return nil
+	})
+}
+
+// Void voids an invoice and, if it was already sent to a payment provider,
+// voids it there too, inside the same transaction: a shigoto void with no
+// corresponding provider void would leave the invoice payable on the
+// provider's side, so if the provider call fails the whole transaction
+// (including the local void) rolls back and the two sides never disagree.
+// The returned error wraps ErrProviderVoidFailed when the provider call is
+// what failed, so callers can map it to 502 rather than a local-state
+// status.
+//
+// ctx is detached from the caller's own (context.WithoutCancel) before any
+// work starts: once the provider void is under way, a client disconnect
+// must not roll back the local void and leave the two sides disagreeing.
+func (s *Service) Void(ctx context.Context, orgID int64, orgSlug string, invoiceID int64) (core.Invoice, error) {
+	actor := actorFrom(ctx)
+	ctx = context.WithoutCancel(ctx)
+
+	var inv core.Invoice
+	var providerErr error
+	err := runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		inv, err = core.VoidInvoice(ctx, tx, orgID, invoiceID)
+		if err != nil {
+			return err
+		}
+		if err := core.Audit(ctx, tx, orgID, actor, "invoice", inv.ID, "void", nil); err != nil {
+			return err
+		}
+
+		if inv.ProviderRef == "" {
+			return nil
+		}
+		provider, err := s.Payments(orgSlug)
+		if err != nil {
+			providerErr = err
+			return err
+		}
+		if err := provider.VoidInvoice(ctx, inv.ProviderRef); err != nil {
+			providerErr = err
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		if providerErr != nil {
+			return core.Invoice{}, fmt.Errorf("%w: %w", ErrProviderVoidFailed, providerErr)
+		}
+		return core.Invoice{}, err
+	}
+	return inv, nil
+}

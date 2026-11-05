@@ -2,9 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -14,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
-	"shigoto/internal/config"
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/payments"
 )
@@ -23,8 +21,6 @@ import (
 // Unlike the modules in the modules registry, these are always on: they
 // aren't gated by config.Config.Modules.
 func registerCoreRoutes(mux *http.ServeMux, d Deps) {
-	getenv := d.GetEnv
-
 	mux.Handle("POST /api/v1/orgs/{org}/contacts",
 		d.Auth.RequireOrg(auth.PermContactsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			createContact(w, r, d)
@@ -36,27 +32,27 @@ func registerCoreRoutes(mux *http.ServeMux, d Deps) {
 
 	mux.Handle("POST /api/v1/orgs/{org}/invoices",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			createInvoice(w, r, d, getenv)
+			createInvoice(w, r, d)
 		})))
 	mux.Handle("GET /api/v1/orgs/{org}/invoices/{id}",
 		d.Auth.RequireOrg(auth.PermInvoicesRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			getInvoice(w, r, d, getenv)
+			getInvoice(w, r, d)
 		})))
 	mux.Handle("GET /api/v1/orgs/{org}/invoices",
 		d.Auth.RequireOrg(auth.PermInvoicesRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			listInvoices(w, r, d, getenv)
+			listInvoices(w, r, d)
 		})))
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/issue",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			issueInvoice(w, r, d, getenv)
+			issueInvoice(w, r, d)
 		})))
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/send",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			sendInvoice(w, r, d, getenv)
+			sendInvoice(w, r, d)
 		})))
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/void",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			voidInvoice(w, r, d, getenv)
+			voidInvoice(w, r, d)
 		})))
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/payments",
 		d.Auth.RequireOrg(auth.PermPaymentsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -137,8 +133,8 @@ type invoiceResponse struct {
 
 const dateLayout = "2006-01-02"
 
-func invoiceToResponse(ctx context.Context, q core.Querier, getenv func(string) string, inv core.Invoice) (invoiceResponse, error) {
-	opts, err := payOptionsFor(ctx, q, getenv, inv.OrgID)
+func invoiceToResponse(ctx context.Context, q core.Querier, bill *billing.Service, inv core.Invoice) (invoiceResponse, error) {
+	opts, err := bill.PayOptions(ctx, q, inv.OrgID)
 	if err != nil {
 		return invoiceResponse{}, err
 	}
@@ -163,32 +159,6 @@ func invoiceToResponse(ctx context.Context, q core.Querier, getenv func(string) 
 		}
 	}
 	return resp, nil
-}
-
-// payOptionsFor builds the pay_options an org currently offers: bank
-// transfer when it has both a BSB and account number, PayID when it has
-// one, and Stripe when config.StripeFor finds credentials for its slug
-// (Task 7 wires actually charging through it).
-func payOptionsFor(ctx context.Context, q core.Querier, getenv func(string) string, orgID int64) ([]string, error) {
-	var slug string
-	var bsb, account, payid sql.NullString
-	err := q.QueryRow(ctx, `SELECT slug, bank_bsb, bank_account, payid FROM orgs WHERE id = $1`, orgID).
-		Scan(&slug, &bsb, &account, &payid)
-	if err != nil {
-		return nil, err
-	}
-
-	opts := []string{}
-	if bsb.String != "" && account.String != "" {
-		opts = append(opts, "bank_transfer")
-	}
-	if payid.String != "" {
-		opts = append(opts, "payid")
-	}
-	if _, ok := config.StripeFor(getenv, slug); ok {
-		opts = append(opts, "stripe")
-	}
-	return opts, nil
 }
 
 type paymentRequest struct {
@@ -254,6 +224,17 @@ func writeCoreError(w http.ResponseWriter, err error) {
 	}
 }
 
+// writeBillingError maps a billing package error to an HTTP response,
+// falling back to writeCoreError for the core errors billing passes
+// through unchanged (ErrNotFound, ErrInvalidState, ...).
+func writeBillingError(w http.ResponseWriter, err error) {
+	if errors.Is(err, billing.ErrTooFewPayOptions) {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeCoreError(w, err)
+}
+
 // --- contacts handlers ---
 
 func createContact(w http.ResponseWriter, r *http.Request, d Deps) {
@@ -312,7 +293,7 @@ func listContacts(w http.ResponseWriter, r *http.Request, d Deps) {
 
 // --- invoice handlers ---
 
-func createInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+func createInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 	var body invoiceRequest
 	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -353,7 +334,7 @@ func createInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(s
 		return
 	}
 
-	resp, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -362,7 +343,7 @@ func createInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(s
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-func getInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+func getInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 	id, ok := pathID(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -376,7 +357,7 @@ func getInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(stri
 		return
 	}
 
-	resp, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -385,7 +366,7 @@ func getInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(stri
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func listInvoices(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+func listInvoices(w http.ResponseWriter, r *http.Request, d Deps) {
 	p := auth.From(r.Context())
 	invoices, err := core.ListInvoices(r.Context(), d.Pool, p.OrgID, r.URL.Query().Get("status"))
 	if err != nil {
@@ -396,7 +377,7 @@ func listInvoices(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 
 	resp := make([]invoiceResponse, len(invoices))
 	for i, inv := range invoices {
-		ir, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+		ir, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 		if err != nil {
 			slog.Error("building invoice response failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
@@ -407,11 +388,11 @@ func listInvoices(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// minPayOptionsForDeposit is the QLD rule: a rent or bond invoice needs at
-// least this many ways to pay before it can be issued.
-const minPayOptionsForDeposit = 2
-
-func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+// issueInvoice handles POST .../invoices/{id}/issue: it enforces the QLD
+// pay-options rule, assigns the invoice number and makes a best-effort
+// attempt to send the invoice to the org's payment provider. See
+// billing.Service.Issue for the money-safety details.
+func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 	id, ok := pathID(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -419,45 +400,14 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 	}
 
 	p := auth.From(r.Context())
-	orgSlug := r.PathValue("org")
-	var inv core.Invoice
-	err := runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
-		existing, err := core.GetInvoice(r.Context(), tx, p.OrgID, id)
-		if err != nil {
-			return err
-		}
-
-		if existing.Source == "rent" || existing.Source == "bond" {
-			opts, err := payOptionsFor(r.Context(), tx, getenv, p.OrgID)
-			if err != nil {
-				return err
-			}
-			if len(opts) < minPayOptionsForDeposit {
-				return fmt.Errorf("%w: %s invoices need at least %d pay options", core.ErrInvalidInput, existing.Source, minPayOptionsForDeposit)
-			}
-		}
-
-		inv, err = core.IssueInvoice(r.Context(), tx, p.OrgID, id, time.Now().In(d.Cfg.Location))
-		if err != nil {
-			return err
-		}
-		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "invoice", inv.ID, "issue", map[string]any{"number": inv.Number})
-	})
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	inv, err := d.Billing.Issue(ctx, p.OrgID, r.PathValue("org"), id)
 	if err != nil {
-		writeCoreError(w, err)
+		writeBillingError(w, err)
 		return
 	}
 
-	// Issuing has committed: the number is burned and won't move even if
-	// sending now fails. Keep the invoice open with no provider_ref;
-	// POST .../send retries it.
-	// Detached from the request: a client disconnect mid-send must not
-	// abandon a provider call (or the commit recording it) half-done.
-	if err := sendToProvider(context.WithoutCancel(r.Context()), d, getenv, p.OrgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
-		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
-	}
-
-	resp, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -466,80 +416,10 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// sendToProvider resolves orgSlug's payments.Provider, ensures the
-// invoice's contact has a provider customer ref (creating one if needed),
-// sends the invoice, and stores the returned provider_ref/provider_url.
-// inv is updated in place on success. Returns payments.ErrNoProvider
-// unchanged when the org has no provider configured, so callers can treat
-// that as "nothing to do" rather than a failure.
-//
-// It re-reads and locks the invoice row (FOR UPDATE) before sending and
-// re-checks provider_ref there, returning core.ErrInvalidState if another
-// call already sent it: the caller's own pre-check (e.g. sendInvoice's) is
-// only a fast path, since two concurrent sends (an explicit retry racing
-// the issue route's automatic attempt, or two retries) could otherwise both
-// pass it and double-send to the provider.
-func sendToProvider(ctx context.Context, d Deps, getenv func(string) string, orgID int64, orgSlug string, inv *core.Invoice) error {
-	provider, err := d.Payments(orgSlug)
-	if err != nil {
-		return err
-	}
-
-	return runInTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		var providerRef string
-		var contactID int64
-		if err := tx.QueryRow(ctx,
-			`SELECT contact_id, coalesce(provider_ref,'') FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
-			orgID, inv.ID,
-		).Scan(&contactID, &providerRef); err != nil {
-			return err
-		}
-		if providerRef != "" {
-			return core.ErrInvalidState
-		}
-
-		contact, err := core.GetContact(ctx, tx, orgID, contactID)
-		if err != nil {
-			return err
-		}
-
-		custRef := contact.ProviderCustomerRef
-		if custRef == "" {
-			custRef, err = provider.EnsureCustomer(ctx, contact)
-			if err != nil {
-				return fmt.Errorf("ensuring provider customer: %w", err)
-			}
-			if _, err := tx.Exec(ctx,
-				`UPDATE contacts SET provider_customer_ref = $1 WHERE org_id = $2 AND id = $3`,
-				custRef, orgID, contact.ID,
-			); err != nil {
-				return err
-			}
-		}
-
-		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef)
-		if err != nil {
-			return fmt.Errorf("sending invoice: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE invoices SET provider_ref = $1, provider_url = $2 WHERE org_id = $3 AND id = $4`,
-			ref, hostedURL, orgID, inv.ID,
-		); err != nil {
-			return err
-		}
-
-		inv.ProviderRef = ref
-		inv.ProviderURL = hostedURL
-		return nil
-	})
-}
-
 // sendInvoice handles POST .../invoices/{id}/send: it retries sending an
 // issued invoice to the org's payment provider after a previous attempt
-// failed. Only an 'open' invoice with no provider_ref yet can be sent; a
-// previously-sent invoice (provider_ref already set) returns 409 rather
-// than sending a second time.
-func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+// failed. See billing.Service.Send.
+func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 	id, ok := pathID(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -547,20 +427,8 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 	}
 
 	p := auth.From(r.Context())
-	orgSlug := r.PathValue("org")
-
-	inv, err := core.GetInvoice(r.Context(), d.Pool, p.OrgID, id)
+	inv, err := d.Billing.Send(r.Context(), p.OrgID, r.PathValue("org"), id)
 	if err != nil {
-		writeCoreError(w, err)
-		return
-	}
-	if inv.Status != "open" || inv.ProviderRef != "" {
-		writeCoreError(w, core.ErrInvalidState)
-		return
-	}
-
-	// Detached from the request, as in issueInvoice.
-	if err := sendToProvider(context.WithoutCancel(r.Context()), d, getenv, p.OrgID, orgSlug, &inv); err != nil {
 		if errors.Is(err, payments.ErrNoProvider) {
 			writeError(w, http.StatusUnprocessableEntity, "no payment provider configured")
 			return
@@ -569,12 +437,12 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 			writeCoreError(w, err)
 			return
 		}
-		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
+		slog.Error("sending invoice to provider failed", "invoice_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	resp, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -583,7 +451,10 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+// voidInvoice handles POST .../invoices/{id}/void: it voids the invoice
+// locally and, if it was already sent to a payment provider, voids it
+// there too. See billing.Service.Void.
+func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 	id, ok := pathID(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -591,47 +462,11 @@ func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 	}
 
 	p := auth.From(r.Context())
-	orgSlug := r.PathValue("org")
-	// Detached from the request: once the provider void is under way, a
-	// client disconnect must not roll back the local void and leave the
-	// two sides disagreeing.
-	ctx := context.WithoutCancel(r.Context())
-	var inv core.Invoice
-	var providerErr error
-	err := runInTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		var err error
-		inv, err = core.VoidInvoice(ctx, tx, p.OrgID, id)
-		if err != nil {
-			return err
-		}
-		if err := core.Audit(ctx, tx, p.OrgID, &p.UserID, "invoice", inv.ID, "void", nil); err != nil {
-			return err
-		}
-
-		// A shigoto void with no corresponding provider void would leave
-		// the invoice payable on the provider's side. If the invoice was
-		// never sent (no provider_ref), there's nothing to void remotely.
-		// Otherwise the provider call happens here, before commit: if it
-		// fails, the whole transaction (including the local void) rolls
-		// back, so shigoto and the provider never disagree about whether
-		// the invoice is void.
-		if inv.ProviderRef == "" {
-			return nil
-		}
-		provider, err := d.Payments(orgSlug)
-		if err != nil {
-			providerErr = err
-			return err
-		}
-		if err := provider.VoidInvoice(ctx, inv.ProviderRef); err != nil {
-			providerErr = err
-			return err
-		}
-		return nil
-	})
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	inv, err := d.Billing.Void(ctx, p.OrgID, r.PathValue("org"), id)
 	if err != nil {
-		if providerErr != nil {
-			slog.Error("voiding invoice with provider failed", "invoice_id", id, "error", providerErr)
+		if errors.Is(err, billing.ErrProviderVoidFailed) {
+			slog.Error("voiding invoice with provider failed", "invoice_id", id, "error", err)
 			writeError(w, http.StatusBadGateway, "failed to void invoice with payment provider")
 			return
 		}
@@ -639,7 +474,7 @@ func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 		return
 	}
 
-	resp, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

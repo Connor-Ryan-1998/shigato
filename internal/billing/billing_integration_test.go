@@ -1,0 +1,138 @@
+//go:build integration
+
+package billing_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"shigoto/internal/billing"
+	"shigoto/internal/core"
+	"shigoto/internal/db"
+	"shigoto/internal/payments"
+)
+
+func testOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
+	t.Helper()
+	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
+	if err != nil {
+		t.Fatalf("CreateOrg(%s): %v", slug, err)
+	}
+	return org
+}
+
+func testContact(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
+	t.Helper()
+	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: "tenant", Name: "Test Tenant"})
+	if err != nil {
+		t.Fatalf("CreateContact: %v", err)
+	}
+	return c.ID
+}
+
+// testDraft creates a one-line draft invoice whose line totals to exactly
+// totalCents (GST-free), with the given source and a 14-day term.
+func testDraft(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, source string, totalCents int64) int64 {
+	t.Helper()
+	inv, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    source,
+		DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+	return inv.ID
+}
+
+// noProvider is a billing.Service.Payments func that reports every org has
+// no payment provider configured, so Issue's best-effort send is a no-op.
+func noProvider(string) (payments.Provider, error) {
+	return nil, payments.ErrNoProvider
+}
+
+func TestServiceIssueEnforcesPayOptions(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := testContact(t, pool, org.ID)
+
+	// A BSB and account number alone is only one pay option (bank
+	// transfer); a rent invoice needs at least two.
+	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2 WHERE id=$3", "062-000", "12345678", org.ID); err != nil {
+		t.Fatalf("setting org bank details: %v", err)
+	}
+
+	draftID := testDraft(t, pool, org.ID, contactID, "rent", 1000)
+
+	svc := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noProvider, Location: time.UTC}
+	_, err := svc.Issue(ctx, org.ID, "acme", draftID)
+	if !errors.Is(err, billing.ErrTooFewPayOptions) {
+		t.Fatalf("Issue error = %v, want ErrTooFewPayOptions", err)
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "draft" {
+		t.Fatalf("status = %s, want draft (rejected issue must not change it)", inv.Status)
+	}
+	if inv.Number != nil {
+		t.Fatalf("number = %v, want nil (rejected issue must not burn a number)", *inv.Number)
+	}
+}
+
+func TestPayOptionsStripeNeedsBothKeys(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+
+	getenv := func(key string) string {
+		if key == "SHIGOTO_STRIPE_ACME_SECRET_KEY" {
+			return "sk_test_dummy"
+		}
+		return ""
+	}
+	svc := &billing.Service{Pool: pool, GetEnv: getenv, Payments: noProvider, Location: time.UTC}
+
+	opts, err := svc.PayOptions(ctx, pool, org.ID)
+	if err != nil {
+		t.Fatalf("PayOptions: %v", err)
+	}
+	for _, o := range opts {
+		if o == "stripe" {
+			t.Fatalf("pay options = %v, want no stripe with only the secret key set", opts)
+		}
+	}
+}
+
+func TestServiceIssueNoActorAudits(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := testContact(t, pool, org.ID)
+	draftID := testDraft(t, pool, org.ID, contactID, "manual", 1000)
+
+	svc := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noProvider, Location: time.UTC}
+	if _, err := svc.Issue(ctx, org.ID, "acme", draftID); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	var n int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM audit_log WHERE org_id=$1 AND action='issue' AND actor_user_id IS NULL", org.ID,
+	).Scan(&n); err != nil {
+		t.Fatalf("counting audit_log: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("audit_log rows with actor_user_id IS NULL = %d, want 1", n)
+	}
+}

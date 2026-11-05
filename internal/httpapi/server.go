@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
+	"shigoto/internal/billing"
 	"shigoto/internal/config"
 	"shigoto/internal/payments"
 	"shigoto/internal/payments/stripe"
@@ -37,6 +38,10 @@ type Deps struct {
 	// returning payments.ErrNoProvider when the org has no Stripe
 	// credentials. Tests inject a func returning a *payments.Fake.
 	Payments func(orgSlug string) (payments.Provider, error)
+	// Billing issues, sends and voids invoices. It defaults to a
+	// *billing.Service built from Pool, GetEnv, Payments and
+	// Cfg.Location.
+	Billing *billing.Service
 }
 
 // modules lists the feature modules available to mount. Plans 2, 3 and 4
@@ -63,6 +68,14 @@ func New(d Deps) http.Handler {
 				return nil, payments.ErrNoProvider
 			}
 			return stripe.New(org.SecretKey, org.WebhookSecret), nil
+		}
+	}
+	if d.Billing == nil {
+		d.Billing = &billing.Service{
+			Pool:     d.Pool,
+			GetEnv:   d.GetEnv,
+			Payments: d.Payments,
+			Location: d.Cfg.Location,
 		}
 	}
 
