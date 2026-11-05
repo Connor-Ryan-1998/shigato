@@ -695,7 +695,7 @@ func runBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, billingRunResponse{
+	module.WriteJSON(w, http.StatusCreated, billingRunResponse{
 		Invoice: invResp, EntryCount: result.EntryCount, TotalMinutes: result.TotalMinutes,
 	})
 }

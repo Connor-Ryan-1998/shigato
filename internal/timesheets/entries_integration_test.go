@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,90 @@ func TestCreateEntryValidation(t *testing.T) {
 				t.Fatalf("CreateEntry: err = %v, want ErrInvalidInput", err)
 			}
 		})
+	}
+}
+
+// TestCreateEntryNoteRuneLimit covers Ruling 29: the note length limit is
+// counted in runes (utf8.RuneCountInString), not bytes, so a 1000-rune
+// multibyte note (2000+ bytes) is accepted, and 1001 runes is rejected.
+func TestCreateEntryNoteRuneLimit(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	client := testContact(t, pool, org.ID, "client", "A Client")
+	proj := testProject(t, pool, org.ID, client)
+	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	userID := testUser(t, pool, "note-limit@example.com")
+	today := mustParseDate(t, "2026-11-05")
+
+	note1000 := strings.Repeat("é", 1000) // 2 bytes per rune, 1000 runes.
+	if _, err := timesheets.CreateEntry(ctx, pool, org.ID, userID, timesheets.Entry{
+		TaskID: task.ID, WorkDate: today, Minutes: 60, Note: note1000,
+	}, today); err != nil {
+		t.Fatalf("CreateEntry with 1000-rune multibyte note: %v", err)
+	}
+
+	note1001 := strings.Repeat("é", 1001)
+	if _, err := timesheets.CreateEntry(ctx, pool, org.ID, userID, timesheets.Entry{
+		TaskID: task.ID, WorkDate: today, Minutes: 60, Note: note1001,
+	}, today); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("CreateEntry with 1001-rune note: err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestUpdateEntrySameTaskSkipsTaskCheck covers Ruling 29: UpdateEntry only
+// re-validates the task/project when task_id actually changes, so editing
+// an unbilled entry's minutes still works once its project has since been
+// deactivated (as long as the entry's task_id isn't moving).
+func TestUpdateEntrySameTaskSkipsTaskCheck(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	client := testContact(t, pool, org.ID, "client", "A Client")
+	proj := testProject(t, pool, org.ID, client)
+	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	userID := testUser(t, pool, "update-same-task@example.com")
+	today := mustParseDate(t, "2026-11-05")
+
+	entry, err := timesheets.CreateEntry(ctx, pool, org.ID, userID, timesheets.Entry{
+		TaskID: task.ID, WorkDate: today, Minutes: 30,
+	}, today)
+	if err != nil {
+		t.Fatalf("CreateEntry: %v", err)
+	}
+
+	if _, err := timesheets.UpdateProject(ctx, pool, org.ID, proj.ID, timesheets.Project{
+		Name: proj.Name, HourlyRate: proj.HourlyRate, GSTCode: proj.GSTCode, Active: false,
+	}); err != nil {
+		t.Fatalf("UpdateProject(deactivate): %v", err)
+	}
+
+	actor := auth.Principal{UserID: userID, OrgID: org.ID, Role: auth.Owner}
+	updated, err := timesheets.UpdateEntry(ctx, pool, org.ID, actor, entry.ID, timesheets.Entry{
+		TaskID: task.ID, WorkDate: today, Minutes: 90, Note: "revised",
+	}, today)
+	if err != nil {
+		t.Fatalf("UpdateEntry on deactivated project's task (same task_id): %v", err)
+	}
+	if updated.Minutes != 90 {
+		t.Fatalf("Minutes = %d, want 90", updated.Minutes)
+	}
+
+	// Moving it to a different (also now-inactive) task still fails.
+	otherTask, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Other"})
+	if err != nil {
+		t.Fatalf("CreateTask(otherTask): %v", err)
+	}
+	if _, err := timesheets.UpdateEntry(ctx, pool, org.ID, actor, entry.ID, timesheets.Entry{
+		TaskID: otherTask.ID, WorkDate: today, Minutes: 90, Note: "revised",
+	}, today); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("UpdateEntry moving to a task in an inactive project: err = %v, want ErrInvalidInput", err)
 	}
 }
 

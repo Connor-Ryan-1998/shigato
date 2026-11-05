@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -41,7 +42,7 @@ func validateEntryFields(e Entry, today time.Time) error {
 	if e.Minutes < 1 || e.Minutes > 1440 {
 		return fmt.Errorf("%w: minutes must be between 1 and 1440", core.ErrInvalidInput)
 	}
-	if len(e.Note) > 1000 {
+	if utf8.RuneCountInString(e.Note) > 1000 {
 		return fmt.Errorf("%w: note must be at most 1000 characters", core.ErrInvalidInput)
 	}
 	if e.WorkDate.After(today) {
@@ -132,8 +133,11 @@ func checkOwnership(e Entry, actor auth.Principal) error {
 // entry's user_id never changes. A billed entry gives core.ErrInvalidState
 // (409). An entry the actor doesn't own gives core.ErrForbidden (403),
 // unless the actor's role holds auth.PermTimesheetsAdmin. Moving the entry
-// to e.TaskID requires the same task rules as CreateEntry. today is the
-// caller's current calendar date, as in CreateEntry.
+// to e.TaskID (task_id actually changing) requires the same task rules as
+// CreateEntry; leaving it unchanged does not re-check the task/project, so
+// editing minutes or the note on an unbilled entry still works once its
+// project has since been deactivated. today is the caller's current
+// calendar date, as in CreateEntry.
 func UpdateEntry(ctx context.Context, q core.Querier, orgID int64, actor auth.Principal, id int64, e Entry, today time.Time) (Entry, error) {
 	existing, err := lockEntry(ctx, q, orgID, id)
 	if err != nil {
@@ -145,8 +149,10 @@ func UpdateEntry(ctx context.Context, q core.Querier, orgID int64, actor auth.Pr
 	if err := validateEntryFields(e, today); err != nil {
 		return Entry{}, err
 	}
-	if err := checkTaskForEntry(ctx, q, orgID, e.TaskID); err != nil {
-		return Entry{}, err
+	if e.TaskID != existing.TaskID {
+		if err := checkTaskForEntry(ctx, q, orgID, e.TaskID); err != nil {
+			return Entry{}, err
+		}
 	}
 
 	row := q.QueryRow(ctx, `
