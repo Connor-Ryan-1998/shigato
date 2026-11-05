@@ -618,7 +618,8 @@ func getLedger(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 func runRent(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	p := auth.From(r.Context())
-	result, err := RunRent(r.Context(), d.Billing, p.OrgID, r.PathValue("org"), today(d))
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	result, err := RunRent(ctx, d.Billing, p.OrgID, r.PathValue("org"), today(d))
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return

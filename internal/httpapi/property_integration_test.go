@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -201,5 +203,44 @@ func TestPropertyModuleDisabled404(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRentRunAuditsActor covers finding 7: invoices auto-issued by a
+// user-triggered POST /rent-run are audited against that user.
+func TestRentRunAuditsActor(t *testing.T) {
+	pool, handler, token, orgID, propertyID := propertyTestSetup(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx,
+		"UPDATE orgs SET invoice_lead_days = 0, auto_send_rent = true, bank_bsb = '062-000', bank_account = '12345678', payid = 'a@example.com' WHERE id = $1",
+		orgID,
+	); err != nil {
+		t.Fatalf("configuring org: %v", err)
+	}
+	tenantID := propertyTestContact(t, pool, orgID, "tenant", "Tenant")
+	if rr := postLease(handler, token, map[string]any{
+		"property_id": propertyID, "start_date": time.Now().UTC().Format("2006-01-02"),
+		"frequency": "weekly", "rent_amount": 50000,
+		"tenants": []map[string]any{{"contact_id": tenantID, "primary": true}},
+	}); rr.Code != http.StatusCreated {
+		t.Fatalf("create lease: status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/rent-run", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"issued":1`) {
+		t.Fatalf("rent-run: status = %d body=%s, want 200 with issued 1", rr.Code, rr.Body.String())
+	}
+
+	var withActor int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM audit_log WHERE org_id = $1 AND action = 'issue' AND actor_user_id IS NOT NULL", orgID,
+	).Scan(&withActor); err != nil {
+		t.Fatalf("counting audit_log: %v", err)
+	}
+	if withActor != 1 {
+		t.Fatalf("issue audit rows with an actor = %d, want 1", withActor)
 	}
 }

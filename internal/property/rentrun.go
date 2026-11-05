@@ -147,6 +147,7 @@ func runRentForLease(ctx context.Context, b *billing.Service, orgID int64, orgSl
 	// so this shouldn't happen; guard anyway rather than invoice a lease
 	// with nowhere to send the bill.
 	if !hasPrimary {
+		slog.Error("rent run: lease has no primary tenant", "org_id", orgID, "lease_id", leaseID)
 		result.Failed += len(periods)
 		return nil
 	}

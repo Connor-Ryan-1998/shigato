@@ -80,6 +80,12 @@ func (j Jobs) Tick(ctx context.Context, now time.Time) error {
 	defer func() {
 		if _, err := conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockID); err != nil {
 			slog.Error("releasing scheduler lock", "error", err)
+			// A session-level advisory lock lives as long as its
+			// connection: close it so the deferred Release destroys it
+			// rather than returning a lock-holding connection to the pool.
+			if err := conn.Conn().Close(context.Background()); err != nil {
+				slog.Error("closing scheduler lock connection", "error", err)
+			}
 		}
 	}()
 
