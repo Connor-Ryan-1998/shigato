@@ -26,38 +26,51 @@ const (
 	PermReconWrite    Perm = "recon_write"
 	PermPropertyWrite Perm = "property_write"
 	PermPropertyRead  Perm = "property_read"
+	// PermTimesheetsWrite lets a user write their own time entries.
+	PermTimesheetsWrite Perm = "timesheets_write"
+	// PermTimesheetsRead lets a user read timesheets/projects data.
+	PermTimesheetsRead Perm = "timesheets_read"
+	// PermTimesheetsAdmin covers editing anyone's time entries and
+	// writing projects/tasks; owner only.
+	PermTimesheetsAdmin Perm = "timesheets_admin"
 )
 
 // rolePerms is the single source of truth for Can. Owner holds every
 // permission; Tenant and Client hold none (portal access arrives in Plan 5).
 var rolePerms = map[Role]map[Perm]bool{
 	Owner: {
-		PermOrgAdmin:      true,
-		PermContactsWrite: true,
-		PermInvoicesWrite: true,
-		PermInvoicesRead:  true,
-		PermPaymentsWrite: true,
-		PermReportsRead:   true,
-		PermReconWrite:    true,
-		PermPropertyWrite: true,
-		PermPropertyRead:  true,
+		PermOrgAdmin:        true,
+		PermContactsWrite:   true,
+		PermInvoicesWrite:   true,
+		PermInvoicesRead:    true,
+		PermPaymentsWrite:   true,
+		PermReportsRead:     true,
+		PermReconWrite:      true,
+		PermPropertyWrite:   true,
+		PermPropertyRead:    true,
+		PermTimesheetsWrite: true,
+		PermTimesheetsRead:  true,
+		PermTimesheetsAdmin: true,
 	},
 	Staff: {
-		PermContactsWrite: true,
-		PermInvoicesWrite: true,
-		PermInvoicesRead:  true,
-		PermPaymentsWrite: true,
-		PermReportsRead:   true,
-		PermReconWrite:    true,
-		PermPropertyWrite: true,
-		PermPropertyRead:  true,
+		PermContactsWrite:   true,
+		PermInvoicesWrite:   true,
+		PermInvoicesRead:    true,
+		PermPaymentsWrite:   true,
+		PermReportsRead:     true,
+		PermReconWrite:      true,
+		PermPropertyWrite:   true,
+		PermPropertyRead:    true,
+		PermTimesheetsWrite: true,
+		PermTimesheetsRead:  true,
 	},
 	Bookkeeper: {
-		PermInvoicesRead:  true,
-		PermReportsRead:   true,
-		PermReconWrite:    true,
-		PermPaymentsWrite: true,
-		PermPropertyRead:  true,
+		PermInvoicesRead:   true,
+		PermReportsRead:    true,
+		PermReconWrite:     true,
+		PermPaymentsWrite:  true,
+		PermPropertyRead:   true,
+		PermTimesheetsRead: true,
 	},
 	Tenant: {},
 	Client: {},

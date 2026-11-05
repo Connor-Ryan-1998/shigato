@@ -11,22 +11,28 @@ func TestCanMatrix(t *testing.T) {
 		PermPaymentsWrite,
 		PermReportsRead,
 		PermReconWrite,
+		PermTimesheetsWrite,
+		PermTimesheetsRead,
+		PermTimesheetsAdmin,
 	}
 
 	staffPerms := map[Perm]bool{
-		PermContactsWrite: true,
-		PermInvoicesWrite: true,
-		PermInvoicesRead:  true,
-		PermPaymentsWrite: true,
-		PermReportsRead:   true,
-		PermReconWrite:    true,
+		PermContactsWrite:   true,
+		PermInvoicesWrite:   true,
+		PermInvoicesRead:    true,
+		PermPaymentsWrite:   true,
+		PermReportsRead:     true,
+		PermReconWrite:      true,
+		PermTimesheetsWrite: true,
+		PermTimesheetsRead:  true,
 	}
 
 	bookkeeperPerms := map[Perm]bool{
-		PermInvoicesRead:  true,
-		PermReportsRead:   true,
-		PermReconWrite:    true,
-		PermPaymentsWrite: true,
+		PermInvoicesRead:   true,
+		PermReportsRead:    true,
+		PermReconWrite:     true,
+		PermPaymentsWrite:  true,
+		PermTimesheetsRead: true,
 	}
 
 	tests := []struct {
