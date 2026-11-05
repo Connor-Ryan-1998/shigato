@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"shigoto/internal/config"
+	"shigoto/internal/db"
 )
 
 func main() {
@@ -37,8 +38,24 @@ func serve() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	ctx := context.Background()
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer pool.Close()
+
+	if err := db.Migrate(ctx, pool); err != nil {
+		return fmt.Errorf("migrating database: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		if err := pool.Ping(r.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "unavailable")
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
