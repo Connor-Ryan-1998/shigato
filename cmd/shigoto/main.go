@@ -23,6 +23,7 @@ import (
 	"shigoto/internal/config"
 	"shigoto/internal/core"
 	"shigoto/internal/db"
+	"shigoto/internal/httpapi"
 )
 
 func main() {
@@ -173,20 +174,12 @@ func serve() error {
 		return fmt.Errorf("migrating database: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := pool.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, "unavailable")
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
+	a := auth.New(pool, strings.HasPrefix(cfg.BaseURL, "https://"))
+	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: cfg})
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
