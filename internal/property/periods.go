@@ -135,11 +135,40 @@ func chargeLines(t LeaseTerms, pStart, pEnd time.Time, truncated bool) []ChargeL
 	return lines
 }
 
+// validPeriodEnd reports whether candidate is a valid paid_to_date for a
+// lease starting start at frequency freq: either start-1 day (nothing paid
+// yet) or periodStart(n)-1 day (a period's natural last day) for some
+// n >= 1. periodStart(n)-1 day is strictly increasing in n, so the loop
+// below terminates as soon as it passes candidate.
+func validPeriodEnd(start time.Time, freq Frequency, candidate time.Time) bool {
+	if candidate.Equal(start.AddDate(0, 0, -1)) {
+		return true
+	}
+	terms := LeaseTerms{Start: start, Frequency: freq}
+	for n := 1; ; n++ {
+		end := periodStart(terms, n).AddDate(0, 0, -1)
+		if end.Equal(candidate) {
+			return true
+		}
+		if end.After(candidate) {
+			return false
+		}
+	}
+}
+
 // PeriodsToInvoice returns every rent period of t whose Start is after
 // PaidTo (or every period from Start if PaidTo is nil) and whose Start is on
 // or before asOf+leadDays, stopping once a period's Start would fall after
 // t.End. It is pure and deterministic: no DB access, no wall clock.
 func PeriodsToInvoice(t LeaseTerms, asOf time.Time, leadDays int) []Period {
+	// Normalise asOf to its calendar date at UTC midnight: asOf.Date() reads
+	// the date in asOf's own location (e.g. Brisbane), so this is the
+	// caller's "today", not a UTC-shifted one. Comparing raw instants
+	// instead (e.g. 2026-11-02T00:00+10:00, which is 2026-11-01T14:00 UTC)
+	// would drop a period starting at that same UTC midnight.
+	y, m, dd := asOf.Date()
+	asOf = time.Date(y, m, dd, 0, 0, 0, 0, time.UTC)
+
 	cutoff := asOf.AddDate(0, 0, leadDays)
 
 	var periods []Period

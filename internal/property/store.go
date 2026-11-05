@@ -8,9 +8,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"shigoto/internal/core"
 )
+
+// isUniqueViolation reports whether err is a Postgres unique_violation
+// (SQLSTATE 23505). Used as a defensive, concurrency-safe backstop behind a
+// pre-insert check for the same condition (e.g. two concurrent requests
+// racing to insert the same lease_rent_changes effective_date).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 // ParseFrequency validates s as a Frequency.
 func ParseFrequency(s string) (Frequency, error) {
@@ -109,16 +119,33 @@ func CreateLease(ctx context.Context, q core.Querier, orgID int64, in NewLease) 
 		return Lease{}, fmt.Errorf("%w: a lease needs at least one tenant", core.ErrInvalidInput)
 	}
 	primaries := 0
+	seenContacts := make(map[int64]bool, len(in.Tenants))
 	for _, t := range in.Tenants {
 		if t.Primary {
 			primaries++
 		}
+		if seenContacts[t.ContactID] {
+			return Lease{}, fmt.Errorf("%w: contact_id %d listed more than once in tenants", core.ErrInvalidInput, t.ContactID)
+		}
+		seenContacts[t.ContactID] = true
 	}
 	if primaries != 1 {
 		return Lease{}, fmt.Errorf("%w: a lease needs exactly one primary tenant", core.ErrInvalidInput)
 	}
 	if in.RentAmount <= 0 {
 		return Lease{}, fmt.Errorf("%w: rent_amount must be positive", core.ErrInvalidInput)
+	}
+	if in.EndDate != nil && in.EndDate.Before(in.StartDate) {
+		return Lease{}, fmt.Errorf("%w: end_date must not be before start_date", core.ErrInvalidInput)
+	}
+	if in.OpeningArrears < 0 {
+		return Lease{}, fmt.Errorf("%w: opening_arrears must not be negative", core.ErrInvalidInput)
+	}
+	if in.BondAmount < 0 {
+		return Lease{}, fmt.Errorf("%w: bond_amount must not be negative", core.ErrInvalidInput)
+	}
+	if in.PaidToDate != nil && !validPeriodEnd(in.StartDate, in.Frequency, *in.PaidToDate) {
+		return Lease{}, fmt.Errorf("%w: paid_to_date must be the last day of a rent period", core.ErrInvalidInput)
 	}
 	if _, err := GetProperty(ctx, q, orgID, in.PropertyID); err != nil {
 		if errors.Is(err, core.ErrNotFound) {
@@ -301,10 +328,11 @@ func rentChangeWarnings(existing []LeaseRentChange, startDate, newEff time.Time,
 		first = false
 	}
 
-	if newAmount > currentRate && lastIncrease != nil {
-		if newEff.Sub(*lastIncrease).Hours()/24 <= 365 {
-			return []string{warnMoreThanOneIncreaseWithin12Months}
-		}
+	// newEff.Before(lastIncrease + 1 year) rather than a 365-day cutoff: an
+	// exact one-year anniversary is not "within 12 months" (it's the
+	// boundary itself), so it must not warn.
+	if newAmount > currentRate && lastIncrease != nil && newEff.Before(lastIncrease.AddDate(1, 0, 0)) {
+		return []string{warnMoreThanOneIncreaseWithin12Months}
 	}
 	return nil
 }
@@ -320,6 +348,11 @@ func CreateRentChange(ctx context.Context, q core.Querier, orgID, leaseID int64,
 	if err != nil {
 		return LeaseRentChange{}, nil, err
 	}
+	for _, c := range lease.RentChanges {
+		if c.EffectiveDate.Equal(effective) {
+			return LeaseRentChange{}, nil, fmt.Errorf("%w: a rent change already exists for effective_date %s", core.ErrInvalidInput, effective.Format(dateLayout))
+		}
+	}
 
 	warnings := rentChangeWarnings(lease.RentChanges, lease.StartDate, effective, amount)
 
@@ -331,6 +364,12 @@ func CreateRentChange(ctx context.Context, q core.Querier, orgID, leaseID int64,
 		leaseID, effective, int64(amount),
 	).Scan(&created.ID, &created.EffectiveDate, &created.Amount)
 	if err != nil {
+		// A concurrent request may have inserted the same effective_date
+		// between the check above and this insert; map that race the same
+		// way as the pre-check, rather than surfacing a raw DB error.
+		if isUniqueViolation(err) {
+			return LeaseRentChange{}, nil, fmt.Errorf("%w: a rent change already exists for effective_date %s", core.ErrInvalidInput, effective.Format(dateLayout))
+		}
 		return LeaseRentChange{}, nil, err
 	}
 	return created, warnings, nil
@@ -373,6 +412,9 @@ func CreateCharge(ctx context.Context, q core.Querier, orgID, leaseID int64, in 
 	if in.Amount <= 0 {
 		return LeaseCharge{}, fmt.Errorf("%w: amount must be positive", core.ErrInvalidInput)
 	}
+	if in.EndDate != nil && in.EndDate.Before(in.StartDate) {
+		return LeaseCharge{}, fmt.Errorf("%w: end_date must not be before start_date", core.ErrInvalidInput)
+	}
 	if _, err := GetLease(ctx, q, orgID, leaseID); err != nil {
 		return LeaseCharge{}, err
 	}
@@ -392,12 +434,16 @@ func CreateCharge(ctx context.Context, q core.Querier, orgID, leaseID int64, in 
 // TerminateLease sets a lease's termination_date, scoped to orgID. It
 // returns core.ErrNotFound if no such lease exists in that org.
 func TerminateLease(ctx context.Context, q core.Querier, orgID, leaseID int64, terminationDate time.Time) (Lease, error) {
-	tag, err := q.Exec(ctx, `UPDATE leases SET termination_date = $1 WHERE org_id = $2 AND id = $3`, terminationDate, orgID, leaseID)
+	lease, err := GetLease(ctx, q, orgID, leaseID)
 	if err != nil {
 		return Lease{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return Lease{}, core.ErrNotFound
+	if terminationDate.Before(lease.StartDate) {
+		return Lease{}, fmt.Errorf("%w: termination_date must not be before start_date", core.ErrInvalidInput)
+	}
+
+	if _, err := q.Exec(ctx, `UPDATE leases SET termination_date = $1 WHERE org_id = $2 AND id = $3`, terminationDate, orgID, leaseID); err != nil {
+		return Lease{}, err
 	}
 	return GetLease(ctx, q, orgID, leaseID)
 }

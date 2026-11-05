@@ -17,14 +17,16 @@ CREATE TABLE leases (
     start_date          date NOT NULL,
     end_date            date,
     termination_date    date,
-    frequency           text CHECK (frequency IN ('weekly', 'fortnightly', 'monthly')),
+    frequency           text NOT NULL CHECK (frequency IN ('weekly', 'fortnightly', 'monthly')),
     paid_to_date        date,
-    opening_arrears     bigint NOT NULL DEFAULT 0,
-    bond_amount         bigint NOT NULL DEFAULT 0,
+    opening_arrears     bigint NOT NULL DEFAULT 0 CHECK (opening_arrears >= 0),
+    bond_amount         bigint NOT NULL DEFAULT 0 CHECK (bond_amount >= 0),
     bond_invoice_id     bigint REFERENCES invoices,
     rta_lodgement_ref   text,
     bond_lodged_on      date,
-    created_at          timestamptz NOT NULL DEFAULT now()
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    CHECK (end_date IS NULL OR end_date >= start_date),
+    CHECK (termination_date IS NULL OR termination_date >= start_date)
 );
 
 CREATE TABLE lease_tenants (
@@ -50,7 +52,8 @@ CREATE TABLE lease_charges (
     description     text NOT NULL,
     amount          bigint NOT NULL CHECK (amount > 0),
     start_date      date NOT NULL,
-    end_date        date
+    end_date        date,
+    CHECK (end_date IS NULL OR end_date >= start_date)
 );
 
 CREATE TABLE rent_periods (

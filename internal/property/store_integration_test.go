@@ -243,6 +243,206 @@ func TestCreateChargeAndTerminateLease(t *testing.T) {
 	}
 }
 
+func TestCreateLeasePaidToDateAlignment(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	base := func() NewLease {
+		return NewLease{
+			PropertyID: testProperty(t, pool, org.ID), StartDate: mustDate(t, "2026-11-02"),
+			Frequency: Weekly, RentAmount: 50000,
+			Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+		}
+	}
+
+	// Accepted: start-1 (nothing paid yet).
+	in := base()
+	notPaid := mustDate(t, "2026-11-01")
+	in.PaidToDate = &notPaid
+	if _, err := CreateLease(ctx, pool, org.ID, in); err != nil {
+		t.Fatalf("paid_to_date = start-1: err = %v, want nil", err)
+	}
+
+	// Accepted: a period's natural last day.
+	in = base()
+	periodEnd := mustDate(t, "2026-11-15") // end of the 2nd weekly period.
+	in.PaidToDate = &periodEnd
+	if _, err := CreateLease(ctx, pool, org.ID, in); err != nil {
+		t.Fatalf("paid_to_date = period end: err = %v, want nil", err)
+	}
+
+	// Rejected: a misaligned, mid-period date.
+	in = base()
+	misaligned := mustDate(t, "2026-11-10")
+	in.PaidToDate = &misaligned
+	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("misaligned paid_to_date: err = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateLeaseRejectsDuplicateTenant(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	in := NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
+		Frequency: Weekly, RentAmount: 50000,
+		Tenants: []NewLeaseTenant{
+			{ContactID: tenantID, Primary: true},
+			{ContactID: tenantID, Primary: false},
+		},
+	}
+	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("duplicate tenant contact_id: err = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateLeaseRejectsEndBeforeStartAndNegativeAmounts(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	base := func() NewLease {
+		return NewLease{
+			PropertyID: testProperty(t, pool, org.ID), StartDate: mustDate(t, "2026-11-02"),
+			Frequency: Weekly, RentAmount: 50000,
+			Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+		}
+	}
+
+	in := base()
+	end := mustDate(t, "2026-11-01")
+	in.EndDate = &end
+	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("end_date before start_date: err = %v, want ErrInvalidInput", err)
+	}
+
+	in = base()
+	in.OpeningArrears = -1
+	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("negative opening_arrears: err = %v, want ErrInvalidInput", err)
+	}
+
+	in = base()
+	in.BondAmount = -1
+	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("negative bond_amount: err = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateRentChangeRejectsDuplicateEffectiveDate(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
+		Frequency: Weekly, RentAmount: 50000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	// Same effective_date as the initial rent row.
+	if _, _, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-11-02"), 60000); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("duplicate effective_date (initial): err = %v, want ErrInvalidInput", err)
+	}
+
+	if _, _, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-12-01"), 60000); err != nil {
+		t.Fatalf("first distinct rent change: %v", err)
+	}
+	if _, _, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-12-01"), 70000); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("duplicate effective_date (repeat): err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestRentChangeWarningExactAnniversaryNoWarning covers the ruling that an
+// increase exactly 365/366 days (one calendar year) after the prior
+// increase is the boundary itself, not "within 12 months", so it must not
+// warn.
+func TestRentChangeWarningExactAnniversaryNoWarning(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2024-01-01"),
+		Frequency: Weekly, RentAmount: 50000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	if _, warnings, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2024-03-01"), 55000); err != nil || len(warnings) != 0 {
+		t.Fatalf("first increase: err = %v, warnings = %v, want nil, none", err, warnings)
+	}
+	_, warnings, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2025-03-01"), 60000)
+	if err != nil {
+		t.Fatalf("anniversary increase: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("anniversary increase (exactly 1 year later) warnings = %v, want none", warnings)
+	}
+}
+
+func TestCreateChargeRejectsEndBeforeStart(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
+		Frequency: Weekly, RentAmount: 50000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	end := mustDate(t, "2026-11-01")
+	_, err = CreateCharge(ctx, pool, org.ID, lease.ID, NewCharge{
+		Description: "Water", Amount: 2000, StartDate: mustDate(t, "2026-11-09"), EndDate: &end,
+	})
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("charge end_date before start_date: err = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestTerminateLeaseRejectsTerminationBeforeStart(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	ctx := context.Background()
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
+		Frequency: Weekly, RentAmount: 50000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	if _, err := TerminateLease(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-11-01")); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("termination_date before start_date: err = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestListLeasesByProperty(t *testing.T) {
 	pool := db.TestPool(t)
 	org := testOrg(t, pool, "acme")
