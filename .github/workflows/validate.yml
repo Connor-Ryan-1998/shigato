@@ -1,0 +1,29 @@
+name: Validate shigoto
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: go-task/setup-task@v1
+      - run: task lint
+      - run: task test
+      - run: task test SUITE=integration
+      - name: Build container image
+        run: docker build -t shigoto:ci .
