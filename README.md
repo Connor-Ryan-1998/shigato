@@ -38,3 +38,7 @@ The server is configured by environment variables, all prefixed `SHIGOTO_`:
 ```bash
 bin/shigoto serve   # start the server (default)
 ```
+
+## Money and GST rounding
+
+All money is represented in cents as `int64`. GST is calculated per invoice or expense line and rounded half away from zero to the cent. The rounding rule for n/d is: for n≥0, use (2n+d)/(2d); for n<0, negate, compute, and negate the result. This ensures that 0.5 cents rounds away from zero in both directions.
