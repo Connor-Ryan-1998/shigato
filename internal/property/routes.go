@@ -1,6 +1,7 @@
 package property
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"shigoto/internal/auth"
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/module"
 )
@@ -66,6 +68,14 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 	mux.Handle("POST /api/v1/orgs/{org}/rent-run",
 		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			runRent(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/leases/{id}/bond-invoice",
+		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createBondInvoiceHandler(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/leases/{id}/bond-lodgement",
+		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createBondLodgementHandler(w, r, d)
 		})))
 }
 
@@ -151,16 +161,24 @@ type leaseResponse struct {
 	BondAmount      int64                 `json:"bond_amount"`
 	RTALodgementRef string                `json:"rta_lodgement_ref,omitempty"`
 	BondLodgedOn    *string               `json:"bond_lodged_on,omitempty"`
+	BondStatus      string                `json:"bond_status"`
+	Warnings        []string              `json:"warnings,omitempty"`
 	Tenants         []leaseTenantResponse `json:"tenants"`
 	RentChanges     []rentChangeResponse  `json:"rent_changes"`
 	Charges         []chargeResponse      `json:"charges"`
 }
 
-func leaseToResponse(l Lease) leaseResponse {
+// leaseToResponse builds l's JSON response. bondStatus and warnings come
+// from BondInfo, which needs DB access leaseToResponse itself doesn't have;
+// callers compute them first and merge them in here rather than duplicating
+// a warnings field.
+func leaseToResponse(l Lease, bondStatus string, warnings []string) leaseResponse {
 	resp := leaseResponse{
 		ID: l.ID, PropertyID: l.PropertyID, StartDate: l.StartDate.Format(dateLayout),
 		Frequency: string(l.Frequency), OpeningArrears: int64(l.OpeningArrears), BondAmount: int64(l.BondAmount),
 		RTALodgementRef: l.RTALodgementRef,
+		BondStatus:      bondStatus,
+		Warnings:        warnings,
 		Tenants:         make([]leaseTenantResponse, len(l.Tenants)),
 		RentChanges:     make([]rentChangeResponse, len(l.RentChanges)),
 		Charges:         make([]chargeResponse, len(l.Charges)),
@@ -196,6 +214,15 @@ func leaseToResponse(l Lease) leaseResponse {
 // parseDate parses an RFC 3339 date (YYYY-MM-DD) as UTC midnight.
 func parseDate(s string) (time.Time, error) {
 	return time.ParseInLocation(dateLayout, s, time.UTC)
+}
+
+// today returns now in d.Cfg.Location, defaulting to UTC when unset.
+func today(d module.Deps) time.Time {
+	loc := d.Cfg.Location
+	if loc == nil {
+		loc = time.UTC
+	}
+	return time.Now().In(loc)
 }
 
 // --- properties handlers ---
@@ -322,7 +349,12 @@ func createLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusCreated, leaseToResponse(created))
+	status, warnings, err := BondInfo(r.Context(), d.Pool, p.OrgID, created, today(d))
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, leaseToResponse(created, status, warnings))
 }
 
 func getLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -337,7 +369,12 @@ func getLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, leaseToResponse(l))
+	status, warnings, err := BondInfo(r.Context(), d.Pool, p.OrgID, l, today(d))
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, leaseToResponse(l, status, warnings))
 }
 
 func listLeases(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -354,9 +391,15 @@ func listLeases(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
+	now := today(d)
 	resp := make([]leaseResponse, len(leases))
 	for i, l := range leases {
-		resp[i] = leaseToResponse(l)
+		status, warnings, err := BondInfo(r.Context(), d.Pool, p.OrgID, l, now)
+		if err != nil {
+			module.WriteCoreError(w, err)
+			return
+		}
+		resp[i] = leaseToResponse(l, status, warnings)
 	}
 	module.WriteJSON(w, http.StatusOK, resp)
 }
@@ -496,7 +539,12 @@ func terminateLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated))
+	status, warnings, err := BondInfo(r.Context(), d.Pool, p.OrgID, updated, today(d))
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings))
 }
 
 // --- ledger handler ---
@@ -552,16 +600,80 @@ func getLedger(w http.ResponseWriter, r *http.Request, d module.Deps) {
 // --- rent-run handler ---
 
 func runRent(w http.ResponseWriter, r *http.Request, d module.Deps) {
-	loc := d.Cfg.Location
-	if loc == nil {
-		loc = time.UTC
-	}
-
 	p := auth.From(r.Context())
-	result, err := RunRent(r.Context(), d.Billing, p.OrgID, r.PathValue("org"), time.Now().In(loc))
+	result, err := RunRent(r.Context(), d.Billing, p.OrgID, r.PathValue("org"), today(d))
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return
 	}
 	module.WriteJSON(w, http.StatusOK, result)
+}
+
+// --- bond handlers ---
+
+type bondInvoiceResponse struct {
+	InvoiceID int64 `json:"invoice_id"`
+	Total     int64 `json:"total"`
+}
+
+func createBondInvoiceHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	leaseID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	inv, err := CreateBondInvoice(ctx, d.Billing, p.OrgID, r.PathValue("org"), leaseID)
+	if err != nil {
+		if errors.Is(err, billing.ErrTooFewPayOptions) {
+			module.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, bondInvoiceResponse{InvoiceID: inv.ID, Total: int64(inv.Total)})
+}
+
+type bondLodgementRequest struct {
+	RTARef   string `json:"rta_ref"`
+	LodgedOn string `json:"lodged_on"`
+}
+
+func createBondLodgementHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	leaseID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body bondLodgementRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	lodgedOn, err := parseDate(body.LodgedOn)
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "lodged_on must be an RFC 3339 date (YYYY-MM-DD)")
+		return
+	}
+
+	now := today(d)
+	p := auth.From(r.Context())
+	var updated Lease
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		updated, err = LodgeBond(r.Context(), tx, p.OrgID, &p.UserID, leaseID, body.RTARef, lodgedOn, now)
+		return err
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	status, warnings, err := BondInfo(r.Context(), d.Pool, p.OrgID, updated, now)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings))
 }
