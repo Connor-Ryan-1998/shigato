@@ -216,13 +216,26 @@ func parseDate(s string) (time.Time, error) {
 	return time.ParseInLocation(dateLayout, s, time.UTC)
 }
 
-// today returns now in d.Cfg.Location, defaulting to UTC when unset.
+// clockNow is time.Now, overridable by tests so they can pin "today" to a
+// specific instant (e.g. an early-morning hour in a +10:00 zone) and assert
+// on the calendar date today(d) derives from it.
+var clockNow = time.Now
+
+// today returns today's calendar date in d.Cfg.Location (defaulting to
+// UTC), as a UTC midnight - the same units parseDate produces. Deriving the
+// date this way, rather than returning the instant itself, matters: for a
+// location ahead of UTC (e.g. Australia/Brisbane, +10:00), the hours
+// between UTC midnight and local midnight would otherwise compare as
+// "yesterday" against a parsed date, rejecting same-day input (e.g. a bond
+// lodgement dated today, submitted before 10am Brisbane time) and shifting
+// BondWarnings' 10-day boundary by a day.
 func today(d module.Deps) time.Time {
 	loc := d.Cfg.Location
 	if loc == nil {
 		loc = time.UTC
 	}
-	return time.Now().In(loc)
+	y, m, dd := clockNow().In(loc).Date()
+	return time.Date(y, m, dd, 0, 0, 0, 0, time.UTC)
 }
 
 // --- properties handlers ---
