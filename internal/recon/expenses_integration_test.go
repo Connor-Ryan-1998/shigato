@@ -147,34 +147,43 @@ func TestExpenseSplitLinesGST(t *testing.T) {
 
 // TestExpenseResidentialForcedINP covers a line tagged to a residential
 // property: it's stored as INP with zero GST regardless of the category's
-// own default, and the response carries the input-taxed warning.
+// own default, and the response carries the input-taxed warning exactly
+// once even when more than one line is residential.
 func TestExpenseResidentialForcedINP(t *testing.T) {
+	const wantWarning = "residential property expenses are input-taxed; GST credit not claimed"
+
 	pool := db.TestPool(t)
 	ctx := context.Background()
 	org := testOrg(t, pool, "acme")
 	setGSTRegistered(t, pool, org.ID, true)
 	propertyID := testResidentialProperty(t, pool, org.ID)
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
+	water := categoryByName(t, pool, org.ID, "Water")
 
 	exp, warnings, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
 		SpentOn:     mustDate(t, "2026-11-01"),
-		Description: "Plumber",
+		Description: "Plumber + water, both residential",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: repairs.ID, Amount: 11000, PropertyID: &propertyID},
+			{CategoryID: water.ID, Amount: 5500, PropertyID: &propertyID},
 		},
 	})
 	if err != nil {
 		t.Fatalf("CreateExpense: %v", err)
 	}
 	if len(warnings) != 1 {
-		t.Fatalf("warnings = %v, want exactly one", warnings)
+		t.Fatalf("warnings = %v, want exactly one even with two residential lines", warnings)
 	}
-	line := exp.Lines[0]
-	if line.GSTCode != core.INP {
-		t.Errorf("gst_code = %s, want INP", line.GSTCode)
+	if warnings[0] != wantWarning {
+		t.Errorf("warnings[0] = %q, want %q", warnings[0], wantWarning)
 	}
-	if line.GSTAmount != 0 {
-		t.Errorf("gst_amount = %d, want 0", line.GSTAmount)
+	for i, line := range exp.Lines {
+		if line.GSTCode != core.INP {
+			t.Errorf("line %d gst_code = %s, want INP", i, line.GSTCode)
+		}
+		if line.GSTAmount != 0 {
+			t.Errorf("line %d gst_amount = %d, want 0", i, line.GSTAmount)
+		}
 	}
 }
 
@@ -219,6 +228,37 @@ func TestExpenseCrossOrgCategory422(t *testing.T) {
 	})
 	if !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("err = %v, want core.ErrInvalidInput", err)
+	}
+}
+
+// TestExpenseLineNoDefaultGSTCode422 covers a line whose category has no
+// default_gst_code and no explicit override: CreateCategory/UpdateCategory
+// reject an empty default going forward, but a category created before
+// that rule (or some other write path) could still have one, so
+// CreateExpense itself must still reject the resulting empty gst_code
+// rather than storing it.
+func TestExpenseLineNoDefaultGSTCode422(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+
+	var categoryID int64
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO categories (org_id, name, type, default_gst_code) VALUES ($1, $2, 'expense', NULL) RETURNING id",
+		org.ID, "Legacy no-default",
+	).Scan(&categoryID); err != nil {
+		t.Fatalf("inserting legacy category: %v", err)
+	}
+
+	_, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
+		SpentOn:     mustDate(t, "2026-11-01"),
+		Description: "Something",
+		Lines: []recon.NewExpenseLine{
+			{CategoryID: categoryID, Amount: 11000},
+		},
+	})
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("err = %v, want core.ErrInvalidInput (422)", err)
 	}
 }
 
@@ -331,6 +371,42 @@ func TestFileUploadSniffAndDedupe(t *testing.T) {
 	rr = uploadFile(handler, token, []byte("not an image"), "notes.txt")
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("text upload: status = %d, want 422, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestFileDownloadOwnFileHeaders covers the download response's security
+// headers and the sanitized Content-Disposition filename: the upload's
+// original name carries a quote (which sanitizeFilename must strip) to
+// prove the full upload-then-download round trip sanitizes it, not just
+// the unit-level sanitizeFilename cases in routes_test.go.
+func TestFileDownloadOwnFileHeaders(t *testing.T) {
+	_, handler, token, _ := reconTestSetup(t)
+
+	rr := uploadFile(handler, token, pngBytes, `My "Receipt".png`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("upload: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var uploaded fileResponseBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &uploaded); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/files/%d", uploaded.ID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("download: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	want := `attachment; filename="My Receipt.png"`
+	if got := rr.Header().Get("Content-Disposition"); got != want {
+		t.Errorf("Content-Disposition = %q, want %q", got, want)
+	}
+	if rr.Body.Len() != len(pngBytes) {
+		t.Errorf("downloaded %d bytes, want %d", rr.Body.Len(), len(pngBytes))
 	}
 }
 

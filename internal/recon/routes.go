@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
@@ -386,13 +387,17 @@ func updateCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps
 
 // sanitizeFilename strips characters that would break or hijack the
 // Content-Disposition header (quotes, CR/LF header injection, and path
-// separators, in case a client ever reads this value as a path), falling
-// back to "receipt" if nothing usable remains.
+// separators, in case a client ever reads this value as a path), plus any
+// other Unicode control rune (NUL, TAB, DEL/0x7f, etc.) that could confuse
+// a header parser or terminal even without matching one of those specific
+// cases. Falls back to "receipt" if nothing usable remains.
 func sanitizeFilename(name string) string {
 	var b strings.Builder
 	for _, r := range name {
-		switch r {
-		case '"', '\r', '\n', '/', '\\':
+		switch {
+		case r == '"' || r == '/' || r == '\\':
+			continue
+		case unicode.IsControl(r):
 			continue
 		default:
 			b.WriteRune(r)

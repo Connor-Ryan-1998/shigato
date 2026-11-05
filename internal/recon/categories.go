@@ -36,8 +36,13 @@ func scanCategory(row pgx.Row) (Category, error) {
 }
 
 // validateCategory checks name, typ and gst against the category rules
-// shared by create and the strict-PUT update. An empty gst means "no
-// default" (allowed for either type).
+// shared by create and the strict-PUT update. default_gst_code is required
+// and must be a valid core.GSTCode: an expense line whose category has no
+// default (and no explicit override) can't be given a GST treatment, so
+// CreateExpense would otherwise have to reject it at expense-creation time
+// instead of here. (Categories seeded, or updated, before this rule existed
+// may still have an empty default_gst_code; CreateExpense rejects a line
+// that resolves to one.)
 func validateCategory(name, typ string, gst core.GSTCode) error {
 	if name == "" {
 		return fmt.Errorf("%w: name is required", core.ErrInvalidInput)
@@ -47,10 +52,8 @@ func validateCategory(name, typ string, gst core.GSTCode) error {
 	default:
 		return fmt.Errorf("%w: type must be income or expense", core.ErrInvalidInput)
 	}
-	if gst != "" {
-		if _, err := core.ParseGSTCode(string(gst)); err != nil {
-			return fmt.Errorf("%w: default_gst_code: %v", core.ErrInvalidInput, err)
-		}
+	if _, err := core.ParseGSTCode(string(gst)); err != nil {
+		return fmt.Errorf("%w: default_gst_code: %v", core.ErrInvalidInput, err)
 	}
 	return nil
 }

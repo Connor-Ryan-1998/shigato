@@ -119,6 +119,7 @@ func CreateExpense(ctx context.Context, q core.Querier, orgID int64, in NewExpen
 	}
 
 	var warnings []string
+	var anyResidential bool
 	resolved := make([]ExpenseLine, len(in.Lines))
 	for i, l := range in.Lines {
 		if l.Amount <= 0 || int64(l.Amount) > maxExpenseLineAmount {
@@ -170,7 +171,10 @@ func CreateExpense(ctx context.Context, q core.Querier, orgID int64, in NewExpen
 		}
 		if residential {
 			code = core.INP
-			warnings = append(warnings, residentialGSTWarning)
+			anyResidential = true
+		}
+		if code == "" {
+			return Expense{}, nil, fmt.Errorf("%w: line %d: gst_code required; category has no default", core.ErrInvalidInput, i)
 		}
 
 		var gstAmount core.Cents
@@ -182,6 +186,12 @@ func CreateExpense(ctx context.Context, q core.Querier, orgID int64, in NewExpen
 			CategoryID: l.CategoryID, Amount: l.Amount, GSTCode: code, GSTAmount: gstAmount,
 			PropertyID: l.PropertyID, ProjectID: l.ProjectID,
 		}
+	}
+	// One warning per expense, not one per residential line, so a
+	// multi-line expense with several residential-tagged lines doesn't
+	// repeat the same text.
+	if anyResidential {
+		warnings = append(warnings, residentialGSTWarning)
 	}
 
 	exp := Expense{
