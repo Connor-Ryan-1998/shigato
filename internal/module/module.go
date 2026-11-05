@@ -96,8 +96,16 @@ func WriteCoreError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, core.ErrInvalidInput):
 		WriteError(w, http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, core.ErrInvalidState):
+	case errors.Is(err, core.ErrInvoiceHasPayments):
+		// Checked ahead of the generic ErrInvalidState case below so this
+		// one error keeps its own exact message; every other
+		// ErrInvalidState (including ones wrapped with internal detail,
+		// e.g. stripe's "invoice %d has no due date") still renders the
+		// fixed generic text, so internal error text never leaks into an
+		// API response body.
 		WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, core.ErrInvalidState):
+		WriteError(w, http.StatusConflict, "invalid state")
 	default:
 		slog.Error("request failed", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal error")

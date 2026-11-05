@@ -1,6 +1,7 @@
 package module
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"testing"
@@ -29,6 +30,42 @@ func TestWriteCoreErrorMapsErrors(t *testing.T) {
 			WriteCoreError(rr, tc.err)
 			if rr.Code != tc.want {
 				t.Fatalf("status = %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteCoreErrorInvalidStateMessages covers the 409 body text:
+// ErrInvalidState wrapped with internal detail (e.g. a payments provider's
+// error message) must still render the fixed generic "invalid state" text
+// rather than leak that detail to an API client, while
+// ErrInvoiceHasPayments - also an ErrInvalidState - keeps its own exact
+// message.
+func TestWriteCoreErrorInvalidStateMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"bare ErrInvalidState", core.ErrInvalidState, "invalid state"},
+		{"wrapped with internal detail", fmt.Errorf("stripe: invoice 7 has no due date: %w", core.ErrInvalidState), "invalid state"},
+		{"invoice has payments", core.ErrInvoiceHasPayments, "invoice has payments; record a credit note instead"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			WriteCoreError(rr, tc.err)
+			if rr.Code != 409 {
+				t.Fatalf("status = %d, want 409", rr.Code)
+			}
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decoding body: %v", err)
+			}
+			if body.Error != tc.want {
+				t.Fatalf("error = %q, want %q", body.Error, tc.want)
 			}
 		})
 	}
