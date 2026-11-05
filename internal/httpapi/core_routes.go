@@ -470,6 +470,13 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 // inv is updated in place on success. Returns payments.ErrNoProvider
 // unchanged when the org has no provider configured, so callers can treat
 // that as "nothing to do" rather than a failure.
+//
+// It re-reads and locks the invoice row (FOR UPDATE) before sending and
+// re-checks provider_ref there, returning core.ErrInvalidState if another
+// call already sent it: the caller's own pre-check (e.g. sendInvoice's) is
+// only a fast path, since two concurrent sends (an explicit retry racing
+// the issue route's automatic attempt, or two retries) could otherwise both
+// pass it and double-send to the provider.
 func sendToProvider(ctx context.Context, d Deps, getenv func(string) string, orgID int64, orgSlug string, inv *core.Invoice) error {
 	provider, err := d.Payments(orgSlug)
 	if err != nil {
@@ -477,7 +484,19 @@ func sendToProvider(ctx context.Context, d Deps, getenv func(string) string, org
 	}
 
 	return runInTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		contact, err := core.GetContact(ctx, tx, orgID, inv.ContactID)
+		var providerRef string
+		var contactID int64
+		if err := tx.QueryRow(ctx,
+			`SELECT contact_id, coalesce(provider_ref,'') FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+			orgID, inv.ID,
+		).Scan(&contactID, &providerRef); err != nil {
+			return err
+		}
+		if providerRef != "" {
+			return core.ErrInvalidState
+		}
+
+		contact, err := core.GetContact(ctx, tx, orgID, contactID)
 		if err != nil {
 			return err
 		}
@@ -515,7 +534,9 @@ func sendToProvider(ctx context.Context, d Deps, getenv func(string) string, org
 
 // sendInvoice handles POST .../invoices/{id}/send: it retries sending an
 // issued invoice to the org's payment provider after a previous attempt
-// failed. Only an 'open' invoice can be (re)sent.
+// failed. Only an 'open' invoice with no provider_ref yet can be sent; a
+// previously-sent invoice (provider_ref already set) returns 409 rather
+// than sending a second time.
 func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
 	id, ok := pathID(r)
 	if !ok {
@@ -531,7 +552,7 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 		writeCoreError(w, err)
 		return
 	}
-	if inv.Status != "open" {
+	if inv.Status != "open" || inv.ProviderRef != "" {
 		writeCoreError(w, core.ErrInvalidState)
 		return
 	}
@@ -539,6 +560,10 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 	if err := sendToProvider(r.Context(), d, getenv, p.OrgID, orgSlug, &inv); err != nil {
 		if errors.Is(err, payments.ErrNoProvider) {
 			writeError(w, http.StatusUnprocessableEntity, "no payment provider configured")
+			return
+		}
+		if errors.Is(err, core.ErrInvalidState) {
+			writeCoreError(w, err)
 			return
 		}
 		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
@@ -563,16 +588,46 @@ func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 	}
 
 	p := auth.From(r.Context())
+	orgSlug := r.PathValue("org")
 	var inv core.Invoice
+	var providerErr error
 	err := runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		inv, err = core.VoidInvoice(r.Context(), tx, p.OrgID, id)
 		if err != nil {
 			return err
 		}
-		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "invoice", inv.ID, "void", nil)
+		if err := core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "invoice", inv.ID, "void", nil); err != nil {
+			return err
+		}
+
+		// A shigoto void with no corresponding provider void would leave
+		// the invoice payable on the provider's side. If the invoice was
+		// never sent (no provider_ref), there's nothing to void remotely.
+		// Otherwise the provider call happens here, before commit: if it
+		// fails, the whole transaction (including the local void) rolls
+		// back, so shigoto and the provider never disagree about whether
+		// the invoice is void.
+		if inv.ProviderRef == "" {
+			return nil
+		}
+		provider, err := d.Payments(orgSlug)
+		if err != nil {
+			providerErr = err
+			return err
+		}
+		if err := provider.VoidInvoice(r.Context(), inv.ProviderRef); err != nil {
+			providerErr = err
+			return err
+		}
+		return nil
 	})
 	if err != nil {
+		if providerErr != nil {
+			slog.Error("voiding invoice with provider failed", "invoice_id", id, "error", providerErr)
+			writeError(w, http.StatusBadGateway, "failed to void invoice with payment provider")
+			return
+		}
 		writeCoreError(w, err)
 		return
 	}

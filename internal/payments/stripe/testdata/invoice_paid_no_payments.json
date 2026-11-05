@@ -1,0 +1,24 @@
+{
+  "id": "evt_test_invoice_paid_no_payments",
+  "object": "event",
+  "api_version": "__API_VERSION__",
+  "created": 1700000000,
+  "livemode": false,
+  "pending_webhooks": 0,
+  "type": "invoice.paid",
+  "data": {
+    "object": {
+      "id": "in_test_789",
+      "object": "invoice",
+      "amount_paid": 5000,
+      "currency": "aud",
+      "status": "paid",
+      "status_transitions": {
+        "finalized_at": 1699999000,
+        "paid_at": 1700000200,
+        "marked_uncollectible_at": null,
+        "voided_at": null
+      }
+    }
+  }
+}

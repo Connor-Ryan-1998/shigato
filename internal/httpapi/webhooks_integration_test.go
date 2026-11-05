@@ -347,3 +347,146 @@ func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
 		t.Fatalf("after retry: provider_ref is empty, want set")
 	}
 }
+
+func TestSendAlreadySentRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	contactID := webhookTestContact(t, pool, org.ID)
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
+
+	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, issueReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("issue: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	// The fake has no SendInvoiceErr, so issuing already sent successfully.
+	// A /send retry on an already-sent invoice must be rejected rather
+	// than sending a second time.
+	sendReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
+	sendReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, sendReq)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("resend: status = %d, want 409, body=%s", rr.Code, rr.Body.String())
+	}
+
+	if calls := fake.Calls(); len(calls) != 1 {
+		t.Fatalf("fake SendInvoice calls = %d, want 1 (no double-send)", len(calls))
+	}
+}
+
+func TestVoidCallsProviderVoidInvoice(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	contactID := webhookTestContact(t, pool, org.ID)
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
+
+	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, issueReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("issue: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.ProviderRef == "" {
+		t.Fatalf("precondition: provider_ref is empty, want set after a successful send")
+	}
+
+	voidReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/void", draftID), nil)
+	voidReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, voidReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("void: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	voided := fake.VoidedRefs()
+	if len(voided) != 1 || voided[0] != inv.ProviderRef {
+		t.Fatalf("fake voided = %v, want [%s]", voided, inv.ProviderRef)
+	}
+
+	inv, err = core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "void" {
+		t.Fatalf("status = %s, want void", inv.Status)
+	}
+}
+
+func TestVoidProviderFailureLeavesOpen(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	contactID := webhookTestContact(t, pool, org.ID)
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
+
+	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, issueReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("issue: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	fake.VoidInvoiceErr = fmt.Errorf("stripe is down")
+
+	voidReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/void", draftID), nil)
+	voidReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, voidReq)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("void: status = %d, want 502, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" {
+		t.Fatalf("status = %s, want open (the DB void must roll back with the failed provider void)", inv.Status)
+	}
+}

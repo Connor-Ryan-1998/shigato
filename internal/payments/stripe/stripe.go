@@ -75,6 +75,13 @@ func lineDescription(l core.InvoiceLine) string {
 // finalizes it and sends it.
 func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string) (string, string, error) {
 	invParams := &stripego.InvoiceCreateParams{
+		Params: stripego.Params{
+			// Stable per shigoto invoice: a retried Create request (e.g. a
+			// network blip between Stripe accepting the create and shigoto
+			// receiving the response) replays onto the same Stripe invoice
+			// instead of creating a duplicate draft.
+			IdempotencyKey: stripego.String(fmt.Sprintf("shigoto-invoice-%d-%d", inv.OrgID, inv.ID)),
+		},
 		Customer:         stripego.String(customerRef),
 		CollectionMethod: stripego.String(string(stripego.InvoiceCollectionMethodSendInvoice)),
 		DaysUntilDue:     stripego.Int64(int64(inv.DueInDays)),
@@ -136,42 +143,32 @@ func (s *Stripe) VoidInvoice(ctx context.Context, ref string) error {
 	return nil
 }
 
-// webhookInvoice is the subset of Stripe's invoice object ParseWebhook
-// needs from an invoice.paid event's data.object.
-type webhookInvoice struct {
-	ID                string `json:"id"`
-	AmountPaid        int64  `json:"amount_paid"`
-	StatusTransitions struct {
-		PaidAt int64 `json:"paid_at"`
-	} `json:"status_transitions"`
-	Payments struct {
-		Data []struct {
-			Payment struct {
-				Type   string `json:"type"`
-				Charge *struct {
-					ID string `json:"id"`
-				} `json:"charge"`
-				PaymentIntent *struct {
-					ID string `json:"id"`
-				} `json:"payment_intent"`
-			} `json:"payment"`
-		} `json:"data"`
-	} `json:"payments"`
-}
-
-// paymentRef returns the charge or payment intent id of the invoice's first
-// recorded payment, preferring a payment intent id (shigoto's payments use
-// collection_method=send_invoice, which attaches a PaymentIntent).
-func (inv webhookInvoice) paymentRef() string {
-	for _, p := range inv.Payments.Data {
-		if p.Payment.PaymentIntent != nil {
-			return p.Payment.PaymentIntent.ID
-		}
-		if p.Payment.Charge != nil {
-			return p.Payment.Charge.ID
+// paymentRef returns the stable provider_ref to record a webhook's payment
+// against: the payment intent (or charge) id of the invoice's first
+// recorded payment, when Stripe included one. A real invoice.paid webhook
+// typically does NOT include the `payments` list unless explicitly
+// expanded, and payment_intent is an expandable field that commonly arrives
+// as a bare string id rather than an object — stripe-go's PaymentIntent and
+// Charge types unmarshal either shape into just their ID, so this handles
+// both without extra work. When no payment info is present at all, it
+// falls back to the Stripe invoice id: invoice.paid fires once per invoice,
+// so that id is still a stable, unique idempotency key for RecordPayment's
+// provider_ref uniqueness.
+func paymentRef(inv *stripego.Invoice) string {
+	if inv.Payments != nil {
+		for _, p := range inv.Payments.Data {
+			if p.Payment == nil {
+				continue
+			}
+			if p.Payment.PaymentIntent != nil && p.Payment.PaymentIntent.ID != "" {
+				return p.Payment.PaymentIntent.ID
+			}
+			if p.Payment.Charge != nil && p.Payment.Charge.ID != "" {
+				return p.Payment.Charge.ID
+			}
 		}
 	}
-	return ""
+	return inv.ID
 }
 
 // ParseWebhook verifies payload's signature with webhook.ConstructEvent and
@@ -187,17 +184,27 @@ func (s *Stripe) ParseWebhook(payload []byte, sigHeader string) (payments.Event,
 		return payments.Event{ID: event.ID, Kind: "ignored"}, nil
 	}
 
-	var inv webhookInvoice
+	// Decoding into the library's own Invoice type (rather than a local
+	// subset struct) matters here: its expandable fields (PaymentIntent,
+	// Charge, ...) have custom UnmarshalJSON that accepts either a bare id
+	// string or the full expanded object, matching what Stripe actually
+	// sends.
+	var inv stripego.Invoice
 	if err := json.Unmarshal(event.Data.Raw, &inv); err != nil {
 		return payments.Event{}, fmt.Errorf("stripe: decoding invoice.paid payload: %w", err)
+	}
+
+	var paidAt int64
+	if inv.StatusTransitions != nil {
+		paidAt = inv.StatusTransitions.PaidAt
 	}
 
 	return payments.Event{
 		ID:         event.ID,
 		Kind:       "invoice.paid",
 		InvoiceRef: inv.ID,
-		PaymentRef: inv.paymentRef(),
+		PaymentRef: paymentRef(&inv),
 		Amount:     core.Cents(inv.AmountPaid),
-		PaidOn:     time.Unix(inv.StatusTransitions.PaidAt, 0).In(brisbane),
+		PaidOn:     time.Unix(paidAt, 0).In(brisbane),
 	}, nil
 }

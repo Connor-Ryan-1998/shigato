@@ -36,6 +36,10 @@ type Fake struct {
 	// call and then cleared, to simulate a one-off send failure.
 	SendInvoiceErr error
 
+	// VoidInvoiceErr, if set, is returned once by the next VoidInvoice
+	// call and then cleared, to simulate a one-off void failure.
+	VoidInvoiceErr error
+
 	mu          sync.Mutex
 	nextID      int
 	customers   []core.Contact
@@ -84,19 +88,44 @@ func (f *Fake) SendInvoice(_ context.Context, inv core.Invoice, lines []core.Inv
 	return ref, "https://fake.example/invoices/" + ref, nil
 }
 
-// VoidInvoice records ref as voided.
+// VoidInvoice returns VoidInvoiceErr once if set, otherwise records ref as
+// voided.
 func (f *Fake) VoidInvoice(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.VoidInvoiceErr != nil {
+		err := f.VoidInvoiceErr
+		f.VoidInvoiceErr = nil
+		return err
+	}
+
 	f.voided = append(f.voided, ref)
 	return nil
 }
 
-// Calls returns the SendInvoice calls made so far, for test assertions.
+// Calls returns the successful SendInvoice calls made so far, for test
+// assertions (e.g. that a retried send didn't double-send).
 func (f *Fake) Calls() []FakeSendInvoiceCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]FakeSendInvoiceCall(nil), f.sendInvoice...)
+}
+
+// VoidedRefs returns the provider_refs VoidInvoice has successfully voided
+// so far, for test assertions.
+func (f *Fake) VoidedRefs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.voided...)
+}
+
+// Customers returns the contacts EnsureCustomer has been called with so
+// far, for test assertions.
+func (f *Fake) Customers() []core.Contact {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]core.Contact(nil), f.customers...)
 }
 
 // Sign returns a Stripe-style "t=<unix>,v1=<hex>" header for payload, signed

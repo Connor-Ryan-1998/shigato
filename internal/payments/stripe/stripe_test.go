@@ -62,6 +62,37 @@ func TestParseWebhookInvoicePaid(t *testing.T) {
 	}
 }
 
+// TestParseWebhookInvoicePaidNoPaymentsExpanded covers a real invoice.paid
+// webhook, which typically does not include the `payments` list unless
+// explicitly expanded: PaymentRef must fall back to the stable Stripe
+// invoice id rather than come back empty (which would break RecordPayment's
+// provider_ref idempotency) or fail to decode.
+func TestParseWebhookInvoicePaidNoPaymentsExpanded(t *testing.T) {
+	payload := loadFixture(t, "invoice_paid_no_payments.json")
+	const secret = "whsec_test_secret"
+
+	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
+		Payload: payload,
+		Secret:  secret,
+	})
+
+	s := New("sk_test_dummy", secret)
+	event, err := s.ParseWebhook(signed.Payload, signed.Header)
+	if err != nil {
+		t.Fatalf("ParseWebhook: %v", err)
+	}
+
+	if event.InvoiceRef != "in_test_789" {
+		t.Errorf("InvoiceRef = %q, want in_test_789", event.InvoiceRef)
+	}
+	if event.PaymentRef != "in_test_789" {
+		t.Errorf("PaymentRef = %q, want in_test_789 (falls back to invoice id)", event.PaymentRef)
+	}
+	if event.Amount != 5000 {
+		t.Errorf("Amount = %d, want 5000", event.Amount)
+	}
+}
+
 func TestParseWebhookBadSignature(t *testing.T) {
 	payload := loadFixture(t, "invoice_paid.json")
 

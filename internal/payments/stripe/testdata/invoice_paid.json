@@ -28,10 +28,7 @@
             "status": "paid",
             "payment": {
               "type": "payment_intent",
-              "payment_intent": {
-                "id": "pi_test_456",
-                "object": "payment_intent"
-              }
+              "payment_intent": "pi_test_456"
             }
           }
         ]
