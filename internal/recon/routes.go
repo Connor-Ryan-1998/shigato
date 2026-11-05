@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"shigoto/internal/auth"
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/importers"
 	"shigoto/internal/module"
@@ -93,6 +94,35 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 	mux.Handle("DELETE /api/v1/orgs/{org}/expenses/{id}",
 		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			deleteExpenseHandler(w, r, d)
+		})))
+
+	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/match-invoice",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			matchInvoiceHandler(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/match-expense",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			matchExpenseHandler(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/expense",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createExpenseFromLineHandler(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/ignore",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ignoreHandler(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/unmatch",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			unmatchHandler(w, r, d)
+		})))
+	mux.Handle("GET /api/v1/orgs/{org}/bank-lines/{id}/suggestions",
+		d.Auth.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			suggestionsHandler(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/reconcile/auto",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			autoMatchHandler(w, r, d)
 		})))
 }
 
@@ -717,4 +747,253 @@ func deleteExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- matching ---
+
+type matchInvoiceRequest struct {
+	InvoiceID int64  `json:"invoice_id"`
+	Method    string `json:"method"`
+}
+
+func matchInvoiceHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body matchInvoiceRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	var invResp billing.InvoiceResponse
+	err := module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		if _, err := MatchInvoice(ctx, tx, p.OrgID, lineID, body.InvoiceID, body.Method); err != nil {
+			return err
+		}
+		inv, err := core.GetInvoice(ctx, tx, p.OrgID, body.InvoiceID)
+		if err != nil {
+			return err
+		}
+		invResp, err = d.Billing.InvoiceJSON(ctx, tx, inv)
+		return err
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, invResp)
+}
+
+type matchExpenseRequest struct {
+	ExpenseID int64 `json:"expense_id"`
+}
+
+func matchExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body matchExpenseRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	var updated Expense
+	err := module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		if err := MatchExpense(ctx, tx, p.OrgID, lineID, body.ExpenseID); err != nil {
+			return err
+		}
+		var err error
+		updated, err = GetExpense(ctx, tx, p.OrgID, body.ExpenseID)
+		return err
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, expenseToResponse(updated))
+}
+
+// expenseFromLineRequest is the POST .../expense body: the same shape as
+// expenseRequest, except SpentOn is optional - CreateExpenseFromLine
+// defaults it to the bank line's posted_on when omitted.
+type expenseFromLineRequest struct {
+	SpentOn           *string              `json:"spent_on,omitempty"`
+	SupplierContactID *int64               `json:"supplier_contact_id,omitempty"`
+	Description       string               `json:"description"`
+	ReceiptFileID     *int64               `json:"receipt_file_id,omitempty"`
+	Lines             []expenseLineRequest `json:"lines"`
+}
+
+func (body expenseFromLineRequest) toNewExpense() (NewExpense, error) {
+	var spentOn time.Time
+	if body.SpentOn != nil {
+		t, err := parseDate(*body.SpentOn)
+		if err != nil {
+			return NewExpense{}, fmt.Errorf("%w: spent_on must be YYYY-MM-DD", core.ErrInvalidInput)
+		}
+		spentOn = t
+	}
+
+	lines := make([]NewExpenseLine, len(body.Lines))
+	for i, l := range body.Lines {
+		var code *core.GSTCode
+		if l.GSTCode != nil {
+			parsed, err := core.ParseGSTCode(*l.GSTCode)
+			if err != nil {
+				return NewExpense{}, fmt.Errorf("%w: line %d: %v", core.ErrInvalidInput, i, err)
+			}
+			code = &parsed
+		}
+		lines[i] = NewExpenseLine{
+			CategoryID: l.CategoryID, Amount: core.Cents(l.Amount), GSTCode: code,
+			PropertyID: l.PropertyID, ProjectID: l.ProjectID,
+		}
+	}
+
+	return NewExpense{
+		SpentOn: spentOn, SupplierContactID: body.SupplierContactID,
+		Description: body.Description, ReceiptFileID: body.ReceiptFileID, Lines: lines,
+	}, nil
+}
+
+func createExpenseFromLineHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body expenseFromLineRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	in, err := body.toNewExpense()
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	var created Expense
+	var warnings []string
+	err = module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		var err error
+		created, warnings, err = CreateExpenseFromLine(ctx, tx, p.OrgID, lineID, in)
+		return err
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, createExpenseResponse{expenseResponse: expenseToResponse(created), Warnings: warnings})
+}
+
+type ignoreRequest struct {
+	Reason string `json:"reason"`
+}
+
+func ignoreHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body ignoreRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	var updated BankLine
+	err := module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		if err := Ignore(ctx, tx, p.OrgID, lineID, body.Reason); err != nil {
+			return err
+		}
+		var err error
+		updated, err = getBankLine(ctx, tx, p.OrgID, lineID)
+		return err
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, bankLineToResponse(updated))
+}
+
+func unmatchHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	var updated BankLine
+	err := module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		if err := Unmatch(ctx, tx, p.OrgID, lineID); err != nil {
+			return err
+		}
+		var err error
+		updated, err = getBankLine(ctx, tx, p.OrgID, lineID)
+		return err
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, bankLineToResponse(updated))
+}
+
+type suggestionResponse struct {
+	Kind   string `json:"kind"`
+	ID     int64  `json:"id"`
+	Score  int    `json:"score"`
+	Reason string `json:"reason"`
+}
+
+func suggestionsHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	suggestions, err := Suggest(r.Context(), d.Pool, p.OrgID, lineID)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	resp := make([]suggestionResponse, len(suggestions))
+	for i, s := range suggestions {
+		resp[i] = suggestionResponse{Kind: s.Kind, ID: s.ID, Score: s.Score, Reason: s.Reason}
+	}
+	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+type autoMatchResponse struct {
+	Matched int `json:"matched"`
+}
+
+func autoMatchHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	p := auth.From(r.Context())
+	matched, err := AutoMatch(r.Context(), d.Pool, p.OrgID)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, autoMatchResponse{Matched: matched})
 }
