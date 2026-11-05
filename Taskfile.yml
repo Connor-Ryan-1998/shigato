@@ -1,0 +1,44 @@
+version: "3"
+
+vars:
+  SUITE: '{{.SUITE | default "unit"}}'
+
+tasks:
+  test:
+    desc: Run tests. SUITE=unit (default) or SUITE=integration.
+    cmds:
+      - task: test-{{.SUITE}}
+
+  test-unit:
+    internal: true
+    cmds:
+      - go test -race ./...
+
+  test-integration:
+    internal: true
+    cmds:
+      - docker compose up -d --wait db
+      - SHIGOTO_TEST_DATABASE_URL=postgres://shigoto:shigoto@localhost:5432/shigoto_test?sslmode=disable go test -race -tags integration -count=1 ./...
+
+  build:
+    desc: Build the shigoto binary.
+    cmds:
+      - go build -trimpath -o bin/shigoto ./cmd/shigoto
+
+  dev:
+    desc: Run the server locally against a running db.
+    cmds:
+      - docker compose up -d --wait db
+      - SHIGOTO_DATABASE_URL=postgres://shigoto:shigoto@localhost:5432/shigoto?sslmode=disable SHIGOTO_BASE_URL=http://localhost:8080 go run ./cmd/shigoto serve
+
+  lint:
+    desc: Check formatting and vet the code.
+    cmds:
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "$unformatted"
+          echo "gofmt: files need formatting" >&2
+          exit 1
+        fi
+      - go vet ./...

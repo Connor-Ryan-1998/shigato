@@ -222,7 +222,7 @@ apps/shigoto/                      (own local repo; submodule later)
 
 ## Verification (definition of done for v1)
 
-- `uv run --locked task test` and `task test SUITE=integration` pass locally in `apps/shigoto`. Requirements are the same as `apps/monitoring`: Docker plus uv, with Go and Node on the host. Postgres runs in Docker.
+- `task test` and `task test SUITE=integration` pass locally in `apps/shigoto`. Requirements are the same as `apps/monitoring`: Docker plus go-task, with Go and Node on the host. Postgres runs in Docker.
 - A rent invoice shows Stripe, bank transfer and PayID options. A bank-transfer payment imported through CSV marks the invoice paid.
 - A bond paid in the app is held, then marked lodged when the RTA transfer is matched, and never appears in the P&L.
 - `docker compose up` gives a working app at `localhost`, where:

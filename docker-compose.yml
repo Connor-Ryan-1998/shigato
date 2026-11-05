@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: shigoto
+      POSTGRES_PASSWORD: shigoto
+      POSTGRES_DB: shigoto
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shigoto -d shigoto"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SHIGOTO_LISTEN: ":8080"
+      SHIGOTO_DATABASE_URL: "postgres://shigoto:shigoto@db:5432/shigoto?sslmode=disable"
+      SHIGOTO_BASE_URL: "http://localhost:8080"
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
