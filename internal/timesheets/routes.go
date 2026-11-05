@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"shigoto/internal/auth"
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/module"
 )
@@ -89,6 +90,10 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 	mux.Handle("GET /api/v1/orgs/{org}/time-entries",
 		d.Auth.RequireOrg(auth.PermTimesheetsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			listEntries(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/billing-runs",
+		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			runBilling(w, r, d)
 		})))
 }
 
@@ -604,4 +609,51 @@ func listEntries(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		resp.TotalMinutes += e.Minutes
 	}
 	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+// --- billing runs handler ---
+
+type billingRunRequest struct {
+	ClientContactID int64  `json:"client_contact_id"`
+	From            string `json:"from"`
+	To              string `json:"to"`
+	DueInDays       int    `json:"due_in_days"`
+	Issue           bool   `json:"issue"`
+}
+
+type billingRunResponse struct {
+	Invoice      core.Invoice `json:"invoice"`
+	EntryCount   int          `json:"entry_count"`
+	TotalMinutes int          `json:"total_minutes"`
+}
+
+func runBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	var body billingRunRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	from, err := parseDate(body.From)
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "from must be YYYY-MM-DD")
+		return
+	}
+	to, err := parseDate(body.To)
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "to must be YYYY-MM-DD")
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	result, err := RunBilling(ctx, d.Billing, p.OrgID, r.PathValue("org"), RunInput{
+		ClientContactID: body.ClientContactID, From: from, To: to, DueInDays: body.DueInDays, Issue: body.Issue,
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, billingRunResponse{
+		Invoice: result.Invoice, EntryCount: result.EntryCount, TotalMinutes: result.TotalMinutes,
+	})
 }

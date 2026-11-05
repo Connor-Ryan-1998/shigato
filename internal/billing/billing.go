@@ -319,6 +319,16 @@ func (s *Service) Void(ctx context.Context, orgID int64, orgSlug string, invoice
 		if err != nil {
 			return err
 		}
+		// Unlock any time entries this invoice's lines had billed, in the
+		// same tx as the void itself (and before the provider call below),
+		// so a provider failure rolling the transaction back also leaves
+		// the entries locked, matching the invoice staying open.
+		if _, err := tx.Exec(ctx,
+			`UPDATE time_entries SET invoice_line_id = NULL WHERE org_id = $1 AND invoice_line_id IN (SELECT id FROM invoice_lines WHERE org_id = $1 AND invoice_id = $2)`,
+			orgID, inv.ID,
+		); err != nil {
+			return err
+		}
 		if err := core.Audit(ctx, tx, orgID, actor, "invoice", inv.ID, "void", nil); err != nil {
 			return err
 		}

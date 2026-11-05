@@ -31,6 +31,9 @@ type NewLine struct {
 	// lease-charge line). Nil for lines with no property (most manual
 	// invoices).
 	PropertyID *int64
+	// ProjectID attributes the line to a timesheets project (a billing-run
+	// line). Nil for lines with no project.
+	ProjectID *int64
 }
 
 // NewInvoice describes a draft invoice to create.
@@ -243,9 +246,9 @@ func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoi
 		amount := LineAmount(l.QuantityMilli, l.UnitAmount)
 		gstAmount := GSTOnExclusive(amount, codes[i])
 		_, err := q.Exec(ctx, `
-			INSERT INTO invoice_lines (invoice_id, org_id, description, quantity_milli, unit_amount, gst_code, gst_amount, amount, property_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			invoiceID, orgID, l.Description, l.QuantityMilli, int64(l.UnitAmount), string(codes[i]), int64(gstAmount), int64(amount), l.PropertyID,
+			INSERT INTO invoice_lines (invoice_id, org_id, description, quantity_milli, unit_amount, gst_code, gst_amount, amount, property_id, project_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			invoiceID, orgID, l.Description, l.QuantityMilli, int64(l.UnitAmount), string(codes[i]), int64(gstAmount), int64(amount), l.PropertyID, l.ProjectID,
 		)
 		if err != nil {
 			return Invoice{}, err
