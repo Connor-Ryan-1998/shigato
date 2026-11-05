@@ -38,8 +38,7 @@ CREATE TABLE time_entries (
     created_at          timestamptz NOT NULL DEFAULT now()
 );
 
--- Finds an entry's lease-period-equivalent "still unbilled" rows fast: the
--- billing run scans unbilled entries for a task/date range.
+-- Lets the billing run find a task's still-unbilled entries fast.
 CREATE INDEX time_entries_unbilled ON time_entries (org_id, task_id, work_date) WHERE invoice_line_id IS NULL;
 
 ALTER TABLE invoice_lines

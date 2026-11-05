@@ -217,7 +217,10 @@ func CreateTask(ctx context.Context, q core.Querier, orgID, projectID int64, t T
 	}
 
 	var exists bool
-	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM project_tasks WHERE project_id = $1 AND name = $2)`, projectID, t.Name).Scan(&exists); err != nil {
+	if err := q.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM project_tasks WHERE org_id = $1 AND project_id = $2 AND name = $3)`,
+		orgID, projectID, t.Name,
+	).Scan(&exists); err != nil {
 		return Task{}, err
 	}
 	if exists {
@@ -299,8 +302,8 @@ func UpdateTask(ctx context.Context, q core.Querier, orgID, id int64, t Task) (T
 
 	var exists bool
 	if err := q.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM project_tasks WHERE project_id = $1 AND name = $2 AND id != $3)`,
-		existing.ProjectID, t.Name, id,
+		`SELECT EXISTS(SELECT 1 FROM project_tasks WHERE org_id = $1 AND project_id = $2 AND name = $3 AND id != $4)`,
+		orgID, existing.ProjectID, t.Name, id,
 	).Scan(&exists); err != nil {
 		return Task{}, err
 	}

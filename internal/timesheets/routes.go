@@ -1,6 +1,7 @@
 package timesheets
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -55,7 +56,16 @@ type projectRequest struct {
 	ClientContactID int64  `json:"client_contact_id"`
 	HourlyRate      int64  `json:"hourly_rate"`
 	GSTCode         string `json:"gst_code,omitempty"`
-	Active          *bool  `json:"active,omitempty"`
+}
+
+// projectUpdateRequest is a full replace: every field must be present, so
+// pointers detect an omitted key (handled as a 422, never silently
+// defaulted - unlike projectRequest's create-only gst_code default).
+type projectUpdateRequest struct {
+	Name       *string `json:"name"`
+	HourlyRate *int64  `json:"hourly_rate"`
+	GSTCode    *string `json:"gst_code"`
+	Active     *bool   `json:"active"`
 }
 
 type projectResponse struct {
@@ -76,8 +86,19 @@ func projectToResponse(p Project) projectResponse {
 
 type taskRequest struct {
 	Name       string `json:"name"`
-	HourlyRate *int64 `json:"hourly_rate"`
-	Active     *bool  `json:"active,omitempty"`
+	HourlyRate *int64 `json:"hourly_rate,omitempty"`
+}
+
+// taskUpdateRequest is a full replace: Name and Active must be present
+// (pointers detect an omitted key), and HourlyRate must be present too -
+// json.RawMessage distinguishes an omitted key (nil) from an explicit
+// JSON null (the literal bytes "null", which clears the rate override)
+// from a number, which plain *int64 can't do since both "absent" and
+// "null" decode to the same nil pointer.
+type taskUpdateRequest struct {
+	Name       *string         `json:"name"`
+	HourlyRate json.RawMessage `json:"hourly_rate"`
+	Active     *bool           `json:"active"`
 }
 
 type taskResponse struct {
@@ -176,14 +197,24 @@ func updateProject(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	var body projectRequest
+	var body projectUpdateRequest
 	if err := module.ReadJSON(r, &body); err != nil {
 		module.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	active := true
-	if body.Active != nil {
-		active = *body.Active
+	switch {
+	case body.Name == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "name is required")
+		return
+	case body.HourlyRate == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "hourly_rate is required")
+		return
+	case body.GSTCode == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "gst_code is required")
+		return
+	case body.Active == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "active is required")
+		return
 	}
 
 	p := auth.From(r.Context())
@@ -191,8 +222,8 @@ func updateProject(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		updated, err = UpdateProject(r.Context(), tx, p.OrgID, id, Project{
-			Name: body.Name, HourlyRate: core.Cents(body.HourlyRate),
-			GSTCode: core.GSTCode(body.GSTCode), Active: active,
+			Name: *body.Name, HourlyRate: core.Cents(*body.HourlyRate),
+			GSTCode: core.GSTCode(*body.GSTCode), Active: *body.Active,
 		})
 		if err != nil {
 			return err
@@ -271,18 +302,31 @@ func updateTask(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	var body taskRequest
+	var body taskUpdateRequest
 	if err := module.ReadJSON(r, &body); err != nil {
 		module.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	active := true
-	if body.Active != nil {
-		active = *body.Active
+	if body.Name == nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "name is required")
+		return
+	}
+	if body.Active == nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "active is required")
+		return
+	}
+	if body.HourlyRate == nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "hourly_rate is required (use null to clear the override)")
+		return
 	}
 	var rate *core.Cents
-	if body.HourlyRate != nil {
-		c := core.Cents(*body.HourlyRate)
+	if string(body.HourlyRate) != "null" {
+		var r64 int64
+		if err := json.Unmarshal(body.HourlyRate, &r64); err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "hourly_rate must be a number or null")
+			return
+		}
+		c := core.Cents(r64)
 		rate = &c
 	}
 
@@ -291,7 +335,7 @@ func updateTask(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		updated, err = UpdateTask(r.Context(), tx, p.OrgID, id, Task{
-			Name: body.Name, HourlyRate: rate, Active: active,
+			Name: *body.Name, HourlyRate: rate, Active: *body.Active,
 		})
 		if err != nil {
 			return err
