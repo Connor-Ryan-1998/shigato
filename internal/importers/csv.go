@@ -1,6 +1,7 @@
 package importers
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/csv"
 	"fmt"
@@ -11,6 +12,22 @@ import (
 
 	"shigoto/internal/core"
 )
+
+// stripBOM returns r with a leading UTF-8 byte-order mark (EF BB BF)
+// consumed, if present. Excel commonly prepends one to exported CSVs;
+// left in place it becomes part of the first field (e.g. the first row's
+// date), which then fails to parse.
+func stripBOM(r io.Reader) io.Reader {
+	br := bufio.NewReader(r)
+	ru, _, err := br.ReadRune()
+	if err != nil {
+		return br
+	}
+	if ru != '\uFEFF' {
+		_ = br.UnreadRune()
+	}
+	return br
+}
 
 // CSVMapping describes how to read one bank's CSV export: which columns
 // hold the date, amount and description, and the date's layout. Exactly
@@ -98,7 +115,7 @@ func (s csvSource) Lines(r io.Reader) ([]Line, error) {
 		return nil, err
 	}
 
-	cr := csv.NewReader(r)
+	cr := csv.NewReader(stripBOM(r))
 	cr.FieldsPerRecord = -1
 	cr.TrimLeadingSpace = true
 	rows, err := cr.ReadAll()

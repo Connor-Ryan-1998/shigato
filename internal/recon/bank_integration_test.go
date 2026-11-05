@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -282,6 +283,53 @@ func TestCreateBankAccountViaPreset(t *testing.T) {
 	})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestImportConcurrentSameFile covers the controller's correctness
+// requirement for concurrent imports of the same file: it's the unique
+// constraint on (bank_account_id, dedupe_key), not an app-level check,
+// that decides which rows land. Two goroutines import the identical bytes
+// at the same time; across both calls, RowsNew must sum to exactly the
+// row count once - every row created by exactly one of the two imports,
+// never both, never neither.
+func TestImportConcurrentSameFile(t *testing.T) {
+	pool, _, _, orgID := reconTestSetup(t)
+	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+
+	const n = 2
+	results := make([]recon.ImportResult, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = recon.Import(context.Background(), pool, orgID, account.ID, bytes.NewReader([]byte(fixtureCSV)))
+		}(i)
+	}
+	wg.Wait()
+
+	sumNew := 0
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("Import[%d]: %v", i, errs[i])
+		}
+		if results[i].RowsTotal != 3 {
+			t.Fatalf("Import[%d].RowsTotal = %d, want 3", i, results[i].RowsTotal)
+		}
+		sumNew += results[i].RowsNew
+	}
+	if sumNew != 3 {
+		t.Fatalf("sum of RowsNew across concurrent imports = %d, want 3 (each row created exactly once)", sumNew)
+	}
+
+	lines, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	if err != nil {
+		t.Fatalf("ListBankLines: %v", err)
+	}
+	if len(lines) != 3 {
+		t.Fatalf("len(lines) = %d, want 3 (no duplicates persisted)", len(lines))
 	}
 }
 

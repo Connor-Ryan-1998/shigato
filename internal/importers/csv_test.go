@@ -53,6 +53,51 @@ func TestCommBankPresetParsesFixture(t *testing.T) {
 	}
 }
 
+func TestCommBankPresetStripsLeadingBOM(t *testing.T) {
+	csv := "\xEF\xBB\xBF" + "01/03/2026,-45.50,Coffee Shop\n" +
+		"02/03/2026,1200.00,Salary\n" +
+		"03/03/2026,-12.99,Book Store\n"
+
+	lines, err := importers.NewCSV(mustPreset(t, "commbank")).Lines(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("Lines: %v", err)
+	}
+	if len(lines) != 3 {
+		t.Fatalf("len(lines) = %d, want 3", len(lines))
+	}
+	if lines[0].Amount != -4550 || lines[0].Description != "Coffee Shop" {
+		t.Fatalf("line 0 = %+v, want amount -4550, description Coffee Shop", lines[0])
+	}
+}
+
+func TestCommBankPresetCRLFLineEndings(t *testing.T) {
+	csv := "01/03/2026,-45.50,Coffee Shop\r\n" +
+		"02/03/2026,1200.00,Salary\r\n" +
+		"03/03/2026,-12.99,Book Store\r\n"
+
+	lines, err := importers.NewCSV(mustPreset(t, "commbank")).Lines(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("Lines: %v", err)
+	}
+	if len(lines) != 3 {
+		t.Fatalf("len(lines) = %d, want 3", len(lines))
+	}
+}
+
+func TestCommBankPresetTrailingBlankLines(t *testing.T) {
+	csv := "01/03/2026,-45.50,Coffee Shop\n" +
+		"02/03/2026,1200.00,Salary\n" +
+		"\n\n"
+
+	lines, err := importers.NewCSV(mustPreset(t, "commbank")).Lines(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("Lines: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("len(lines) = %d, want 2 (trailing blank lines ignored)", len(lines))
+	}
+}
+
 func TestDebitCreditMapping(t *testing.T) {
 	debitCol, creditCol := 1, 2
 	m := importers.CSVMapping{
