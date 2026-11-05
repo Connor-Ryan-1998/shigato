@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -59,8 +60,13 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := Login(r.Context(), a.pool, body.Email, body.Password)
-	if err != nil {
+	if errors.Is(err, ErrInvalidCredentials) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		slog.Error("login failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -79,10 +85,13 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 // LogoutHandler handles POST /api/v1/auth/logout. It deletes the session
 // (if any) and clears the cookie.
 func (a *Auth) LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	var logoutErr error
 	if c, err := r.Cookie(sessionCookieName); err == nil {
-		_ = Logout(r.Context(), a.pool, c.Value)
+		logoutErr = Logout(r.Context(), a.pool, c.Value)
 	}
 
+	// Clear the cookie regardless of whether the server-side delete
+	// succeeded: the browser should stop sending a token either way.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -92,6 +101,12 @@ func (a *Auth) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.secureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	if logoutErr != nil {
+		slog.Error("logout failed", "error", logoutErr)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -112,8 +127,13 @@ func (a *Auth) RequireOrg(p Perm) func(http.Handler) http.Handler {
 
 			ctx := r.Context()
 			userID, err := userIDForToken(ctx, a.pool, c.Value)
-			if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if err != nil {
+				slog.Error("resolving session failed", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 
@@ -123,7 +143,8 @@ func (a *Auth) RequireOrg(p Perm) func(http.Handler) http.Handler {
 				return
 			}
 			if err != nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				slog.Error("resolving membership failed", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 

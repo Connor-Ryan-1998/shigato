@@ -234,3 +234,42 @@ func TestLoginHandlerSetsSecureCookieOnlyWhenConfigured(t *testing.T) {
 		t.Errorf("SameSite = %v, want Lax", cookies[0].SameSite)
 	}
 }
+
+func TestLogoutHandlerRevokesSession(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "correct-password")
+	addMembership(t, pool, userID, org.ID, Owner)
+
+	token, err := Login(ctx, pool, "staffer@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	a := New(pool, false)
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logoutReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	logoutRR := httptest.NewRecorder()
+	a.LogoutHandler(logoutRR, logoutReq)
+
+	if logoutRR.Code != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want %d, body=%s", logoutRR.Code, http.StatusNoContent, logoutRR.Body.String())
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/orgs/{org}/probe", a.RequireOrg(PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	probeReq := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/probe", nil)
+	probeReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	probeRR := httptest.NewRecorder()
+	mux.ServeHTTP(probeRR, probeReq)
+
+	if probeRR.Code != http.StatusUnauthorized {
+		t.Errorf("status after logout = %d, want %d", probeRR.Code, http.StatusUnauthorized)
+	}
+}
