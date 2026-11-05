@@ -176,6 +176,9 @@ func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoi
 	if len(in.Lines) == 0 {
 		return Invoice{}, fmt.Errorf("%w: invoice must have at least one line", ErrInvalidInput)
 	}
+	if in.DueInDays < 0 {
+		return Invoice{}, fmt.Errorf("%w: due_in_days must not be negative", ErrInvalidInput)
+	}
 
 	if _, err := GetContact(ctx, q, orgID, in.ContactID); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -244,15 +247,16 @@ func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoi
 // invoice_counters for the duration of the caller's transaction) and sets
 // issue_date, due_date (today + the draft's due_in_days) and status 'open'.
 // Only a 'draft' invoice can be issued; any other status returns
-// ErrInvalidState. Run this in the caller's transaction so a rollback also
+// ErrInvalidState, and a zero total returns ErrInvalidInput. Run this in the caller's transaction so a rollback also
 // releases the number, keeping numbering gap-free.
 func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.Time) (Invoice, error) {
 	var status string
 	var dueInDays int
+	var total int64
 	err := tx.QueryRow(ctx,
-		`SELECT status, due_in_days FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+		`SELECT status, due_in_days, total FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
 		orgID, id,
-	).Scan(&status, &dueInDays)
+	).Scan(&status, &dueInDays, &total)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Invoice{}, ErrNotFound
 	}
@@ -261,6 +265,9 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 	}
 	if status != "draft" {
 		return Invoice{}, ErrInvalidState
+	}
+	if total <= 0 {
+		return Invoice{}, fmt.Errorf("%w: cannot issue an invoice with a zero total", ErrInvalidInput)
 	}
 
 	var number int

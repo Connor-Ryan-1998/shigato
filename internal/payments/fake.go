@@ -36,6 +36,11 @@ type Fake struct {
 	// call and then cleared, to simulate a one-off send failure.
 	SendInvoiceErr error
 
+	// SendInvoiceErrAfterItems is how many invoice items that failing
+	// call creates before returning SendInvoiceErr (0: fail before any
+	// item), to simulate a partial send.
+	SendInvoiceErrAfterItems int
+
 	// VoidInvoiceErr, if set, is returned once by the next VoidInvoice
 	// call and then cleared, to simulate a one-off void failure.
 	VoidInvoiceErr error
@@ -45,6 +50,12 @@ type Fake struct {
 	customers   []core.Contact
 	sendInvoice []FakeSendInvoiceCall
 	voided      []string
+
+	// Provider-side objects keyed by idempotency key, modelling Stripe's
+	// replay of a retried write instead of creating a duplicate.
+	customerRefs map[string]string          // CustomerKey -> ref
+	invoiceRefs  map[string]string          // InvoiceKey -> ref
+	items        map[string]map[string]bool // invoice ref -> item keys
 }
 
 // fakeWebhookPayload is the JSON shape Fake.ParseWebhook decodes. It's not
@@ -57,33 +68,63 @@ type fakeWebhookPayload struct {
 	PaymentRef string `json:"payment_ref"`
 	Amount     int64  `json:"amount"`
 	PaidOn     string `json:"paid_on"`
+
+	ShigotoInvoiceID int64 `json:"shigoto_invoice_id"`
 }
 
-// EnsureCustomer returns a deterministic fake customer ref and records the
-// call.
+// EnsureCustomer records the call and returns c's fake customer ref,
+// creating it only the first time c's CustomerKey is seen.
 func (f *Fake) EnsureCustomer(_ context.Context, c core.Contact) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.customers = append(f.customers, c)
+	if f.customerRefs == nil {
+		f.customerRefs = map[string]string{}
+	}
+	key := CustomerKey(c)
+	if ref, ok := f.customerRefs[key]; ok {
+		return ref, nil
+	}
 	f.nextID++
 	ref := fmt.Sprintf("cus_fake_%d", f.nextID)
-	f.customers = append(f.customers, c)
+	f.customerRefs[key] = ref
 	return ref, nil
 }
 
-// SendInvoice returns SendInvoiceErr once if set, otherwise a deterministic
-// fake reference and hosted URL, recording the call.
+// SendInvoice models Stripe's idempotent create-invoice-then-items flow:
+// the invoice and each item are created only the first time their key is
+// seen. If SendInvoiceErr is set, it is returned once (then cleared) after
+// SendInvoiceErrAfterItems items; otherwise the call is recorded and the
+// invoice's ref and hosted URL are returned.
 func (f *Fake) SendInvoice(_ context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.SendInvoiceErr != nil {
-		err := f.SendInvoiceErr
-		f.SendInvoiceErr = nil
-		return "", "", err
+	if f.invoiceRefs == nil {
+		f.invoiceRefs = map[string]string{}
+		f.items = map[string]map[string]bool{}
+	}
+	key := InvoiceKey(inv)
+	ref, ok := f.invoiceRefs[key]
+	if !ok {
+		f.nextID++
+		ref = fmt.Sprintf("in_fake_%d", f.nextID)
+		f.invoiceRefs[key] = ref
+		f.items[ref] = map[string]bool{}
 	}
 
-	f.nextID++
-	ref := fmt.Sprintf("in_fake_%d", f.nextID)
+	failErr := f.SendInvoiceErr
+	f.SendInvoiceErr = nil
+	for i, l := range lines {
+		if failErr != nil && i == f.SendInvoiceErrAfterItems {
+			return "", "", failErr
+		}
+		f.items[ref][fmt.Sprintf("%s-item-%d", key, l.ID)] = true
+	}
+	if failErr != nil {
+		return "", "", failErr
+	}
+
 	f.sendInvoice = append(f.sendInvoice, FakeSendInvoiceCall{Invoice: inv, Lines: lines, CustomerRef: customerRef})
 	return ref, "https://fake.example/invoices/" + ref, nil
 }
@@ -118,6 +159,25 @@ func (f *Fake) VoidedRefs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.voided...)
+}
+
+// ItemCount returns how many distinct invoice items exist on the fake
+// provider invoice ref, for asserting a retried send didn't duplicate any.
+func (f *Fake) ItemCount(ref string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.items[ref])
+}
+
+// CustomerRefs returns the distinct fake provider customers created so far.
+func (f *Fake) CustomerRefs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	refs := make([]string, 0, len(f.customerRefs))
+	for _, r := range f.customerRefs {
+		refs = append(refs, r)
+	}
+	return refs
 }
 
 // Customers returns the contacts EnsureCustomer has been called with so
@@ -165,12 +225,13 @@ func (f *Fake) ParseWebhook(payload []byte, sigHeader string) (Event, error) {
 	}
 
 	return Event{
-		ID:         p.ID,
-		Kind:       p.Kind,
-		InvoiceRef: p.InvoiceRef,
-		PaymentRef: p.PaymentRef,
-		Amount:     core.Cents(p.Amount),
-		PaidOn:     paidOn,
+		ID:               p.ID,
+		Kind:             p.Kind,
+		InvoiceRef:       p.InvoiceRef,
+		PaymentRef:       p.PaymentRef,
+		Amount:           core.Cents(p.Amount),
+		PaidOn:           paidOn,
+		ShigotoInvoiceID: p.ShigotoInvoiceID,
 	}, nil
 }
 

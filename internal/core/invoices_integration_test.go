@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -509,4 +510,67 @@ func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
 	if rr := issueDraft("rent"); rr.Code != http.StatusOK {
 		t.Fatalf("issue with bank details + Stripe keys configured: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
 	}
+}
+
+// TestInvoiceValidation422 covers the invalid inputs creating and issuing
+// an invoice must reject with 422 rather than persist.
+func TestInvoiceValidation422(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	userID := createUser(t, pool, "owner@example.com", "correct-password")
+	addMembership(t, pool, userID, org.ID, auth.Owner)
+
+	getenv := func(string) string { return "" }
+	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: auth.New(pool, false), Cfg: config.Config{Modules: map[string]bool{}}, GetEnv: getenv})
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	okLine := `{"description":"x","quantity_milli":1000,"unit_amount":100,"gst_code":"GST"}`
+	cases := []struct {
+		name, lines string
+		dueInDays   int
+	}{
+		{"empty lines", ``, 14},
+		{"zero quantity", `{"description":"x","quantity_milli":0,"unit_amount":100,"gst_code":"GST"}`, 14},
+		{"negative quantity", `{"description":"x","quantity_milli":-1,"unit_amount":100,"gst_code":"GST"}`, 14},
+		{"negative unit_amount", `{"description":"x","quantity_milli":1000,"unit_amount":-1,"gst_code":"GST"}`, 14},
+		{"bad gst_code", `{"description":"x","quantity_milli":1000,"unit_amount":100,"gst_code":"VAT"}`, 14},
+		{"negative due_in_days", okLine, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"contact_id":%d,"source":"manual","due_in_days":%d,"lines":[%s]}`, contactID, tc.dueInDays, tc.lines)
+			if rr := post("/api/v1/orgs/acme/invoices", body); rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+
+	// A zero-total draft can be created but not issued: there's nothing to
+	// collect, and a provider would reject (or zero-pay) it.
+	t.Run("issue zero total", func(t *testing.T) {
+		draftID := createDraft(t, pool, org.ID, contactID, "manual", 0)
+		if rr := post(fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), ""); rr.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body.String())
+		}
+		inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+		if err != nil {
+			t.Fatalf("GetInvoice: %v", err)
+		}
+		if inv.Status != "draft" || inv.Number != nil {
+			t.Fatalf("status=%s number=%v, want draft with no number", inv.Status, inv.Number)
+		}
+	})
 }

@@ -24,8 +24,10 @@ func registerWebhookRoutes(mux *http.ServeMux, d Deps) {
 // Unknown org or org with no provider configured: 404. Bad signature: 400.
 // Otherwise, in one transaction: insert the event id (ON CONFLICT DO
 // NOTHING, so a redelivered event is a no-op), then for invoice.paid record
-// the payment. An invoice.paid event whose invoice can't be found is not an
-// error: it's audited as an orphan_event and still returns 200.
+// the payment. An invoice.paid event whose invoice can't be found, or
+// whose payment can never be recorded (non-positive amount, invoice not
+// payable), is not an error: it's audited (orphan_event or
+// payment_rejected) and still returns 200.
 func handleStripeWebhook(w http.ResponseWriter, r *http.Request, d Deps) {
 	ctx := r.Context()
 	slug := r.PathValue("org")
@@ -90,19 +92,43 @@ func handleStripeWebhook(w http.ResponseWriter, r *http.Request, d Deps) {
 			return nil
 		}
 
+		// Match on provider_ref, falling back to the shigoto id the
+		// provider echoed from metadata (scoped to this org): a send whose
+		// provider_ref was never committed can still be paid.
 		var invoiceID int64
 		err = tx.QueryRow(ctx,
 			`SELECT id FROM invoices WHERE org_id = $1 AND provider_ref = $2`,
 			org.ID, event.InvoiceRef,
 		).Scan(&invoiceID)
+		if errors.Is(err, pgx.ErrNoRows) && event.ShigotoInvoiceID != 0 {
+			err = tx.QueryRow(ctx,
+				`SELECT id FROM invoices WHERE org_id = $1 AND id = $2`,
+				org.ID, event.ShigotoInvoiceID,
+			).Scan(&invoiceID)
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return core.Audit(ctx, tx, org.ID, nil, "invoice", 0, "orphan_event", map[string]any{
-				"event_id":    event.ID,
-				"invoice_ref": event.InvoiceRef,
+				"event_id":           event.ID,
+				"invoice_ref":        event.InvoiceRef,
+				"shigoto_invoice_id": event.ShigotoInvoiceID,
 			})
 		}
 		if err != nil {
 			return err
+		}
+
+		// Rejections that a redelivery can never fix are audited and
+		// acknowledged (200), not returned as a 500 that Stripe would
+		// retry for days.
+		reject := func(reason string) error {
+			return core.Audit(ctx, tx, org.ID, nil, "invoice", invoiceID, "payment_rejected", map[string]any{
+				"event_id": event.ID,
+				"amount":   event.Amount,
+				"reason":   reason,
+			})
+		}
+		if event.Amount <= 0 {
+			return reject("non-positive amount")
 		}
 
 		payment, created, err := core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
@@ -112,6 +138,9 @@ func handleStripeWebhook(w http.ResponseWriter, r *http.Request, d Deps) {
 			Method:      "stripe",
 			ProviderRef: event.PaymentRef,
 		})
+		if errors.Is(err, core.ErrInvalidState) {
+			return reject("invoice not payable or conflicting payment ref")
+		}
 		if err != nil {
 			return err
 		}

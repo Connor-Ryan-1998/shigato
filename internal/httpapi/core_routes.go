@@ -451,7 +451,9 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 	// Issuing has committed: the number is burned and won't move even if
 	// sending now fails. Keep the invoice open with no provider_ref;
 	// POST .../send retries it.
-	if err := sendToProvider(r.Context(), d, getenv, p.OrgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
+	// Detached from the request: a client disconnect mid-send must not
+	// abandon a provider call (or the commit recording it) half-done.
+	if err := sendToProvider(context.WithoutCancel(r.Context()), d, getenv, p.OrgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
 		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
 	}
 
@@ -557,7 +559,8 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 		return
 	}
 
-	if err := sendToProvider(r.Context(), d, getenv, p.OrgID, orgSlug, &inv); err != nil {
+	// Detached from the request, as in issueInvoice.
+	if err := sendToProvider(context.WithoutCancel(r.Context()), d, getenv, p.OrgID, orgSlug, &inv); err != nil {
 		if errors.Is(err, payments.ErrNoProvider) {
 			writeError(w, http.StatusUnprocessableEntity, "no payment provider configured")
 			return
@@ -589,15 +592,19 @@ func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 
 	p := auth.From(r.Context())
 	orgSlug := r.PathValue("org")
+	// Detached from the request: once the provider void is under way, a
+	// client disconnect must not roll back the local void and leave the
+	// two sides disagreeing.
+	ctx := context.WithoutCancel(r.Context())
 	var inv core.Invoice
 	var providerErr error
-	err := runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+	err := runInTx(ctx, d.Pool, func(tx pgx.Tx) error {
 		var err error
-		inv, err = core.VoidInvoice(r.Context(), tx, p.OrgID, id)
+		inv, err = core.VoidInvoice(ctx, tx, p.OrgID, id)
 		if err != nil {
 			return err
 		}
-		if err := core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "invoice", inv.ID, "void", nil); err != nil {
+		if err := core.Audit(ctx, tx, p.OrgID, &p.UserID, "invoice", inv.ID, "void", nil); err != nil {
 			return err
 		}
 
@@ -616,7 +623,7 @@ func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(str
 			providerErr = err
 			return err
 		}
-		if err := provider.VoidInvoice(r.Context(), inv.ProviderRef); err != nil {
+		if err := provider.VoidInvoice(ctx, inv.ProviderRef); err != nil {
 			providerErr = err
 			return err
 		}

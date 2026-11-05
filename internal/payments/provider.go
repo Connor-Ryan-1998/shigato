@@ -6,6 +6,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"shigoto/internal/core"
@@ -54,4 +55,22 @@ type Event struct {
 	PaymentRef string
 	Amount     core.Cents
 	PaidOn     time.Time
+	// ShigotoInvoiceID is the shigoto invoice id the provider echoed back
+	// from metadata (0 if absent). The webhook falls back to it when
+	// InvoiceRef matches no invoice, e.g. when Stripe accepted a send but
+	// shigoto never committed the returned provider_ref.
+	ShigotoInvoiceID int64
+}
+
+// InvoiceKey is the idempotency key for creating inv on the provider.
+// Every other write for inv derives from it ("-item-<lineID>",
+// "-finalize", "-send"), so a retried send replays onto the same
+// provider objects instead of duplicating them.
+func InvoiceKey(inv core.Invoice) string {
+	return fmt.Sprintf("shigoto-invoice-%d-%d", inv.OrgID, inv.ID)
+}
+
+// CustomerKey is the idempotency key for creating c's provider customer.
+func CustomerKey(c core.Contact) string {
+	return fmt.Sprintf("shigoto-customer-%d-%d", c.OrgID, c.ID)
 }

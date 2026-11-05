@@ -12,6 +12,7 @@
       "object": "invoice",
       "amount_paid": 11000,
       "currency": "aud",
+      "metadata": {"shigoto_invoice_id": "42"},
       "status": "paid",
       "status_transitions": {
         "finalized_at": 1699999000,

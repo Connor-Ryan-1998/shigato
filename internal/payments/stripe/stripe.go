@@ -4,6 +4,7 @@ package stripe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -53,6 +54,7 @@ func (s *Stripe) EnsureCustomer(ctx context.Context, c core.Contact) (string, er
 	if c.Email != "" {
 		params.Email = stripego.String(c.Email)
 	}
+	params.SetIdempotencyKey(payments.CustomerKey(c))
 	cust, err := s.client.V1Customers.Create(ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("stripe: creating customer: %w", err)
@@ -74,14 +76,14 @@ func lineDescription(l core.InvoiceLine) string {
 // per line (amount = line amount + GST, since Stripe Tax isn't used),
 // finalizes it and sends it.
 func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string) (string, string, error) {
+	// Every write carries a key derived from shigoto ids, so a retried
+	// send (a network blip, or POST .../send after a partial failure)
+	// replays onto the same Stripe invoice and items instead of creating
+	// duplicates. ponytail: Stripe keeps idempotency keys for 24h; a retry
+	// later than that after a partial failure could still duplicate items.
+	key := payments.InvoiceKey(inv)
 	invParams := &stripego.InvoiceCreateParams{
-		Params: stripego.Params{
-			// Stable per shigoto invoice: a retried Create request (e.g. a
-			// network blip between Stripe accepting the create and shigoto
-			// receiving the response) replays onto the same Stripe invoice
-			// instead of creating a duplicate draft.
-			IdempotencyKey: stripego.String(fmt.Sprintf("shigoto-invoice-%d-%d", inv.OrgID, inv.ID)),
-		},
+		Params:           stripego.Params{IdempotencyKey: stripego.String(key)},
 		Customer:         stripego.String(customerRef),
 		CollectionMethod: stripego.String(string(stripego.InvoiceCollectionMethodSendInvoice)),
 		DaysUntilDue:     stripego.Int64(int64(inv.DueInDays)),
@@ -104,6 +106,7 @@ func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core
 		itemParams := &stripego.InvoiceItemCreateParams{
 			Customer:    stripego.String(customerRef),
 			Invoice:     stripego.String(draft.ID),
+			Params:      stripego.Params{IdempotencyKey: stripego.String(fmt.Sprintf("%s-item-%d", key, l.ID))},
 			Amount:      stripego.Int64(int64(l.Amount + l.GSTAmount)),
 			Currency:    stripego.String("aud"),
 			Description: stripego.String(lineDescription(l)),
@@ -113,11 +116,15 @@ func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core
 		}
 	}
 
-	finalized, err := s.client.V1Invoices.FinalizeInvoice(ctx, draft.ID, nil)
+	finalized, err := s.client.V1Invoices.FinalizeInvoice(ctx, draft.ID, &stripego.InvoiceFinalizeInvoiceParams{
+		Params: stripego.Params{IdempotencyKey: stripego.String(key + "-finalize")},
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("stripe: finalizing invoice: %w", err)
 	}
-	sent, err := s.client.V1Invoices.SendInvoice(ctx, finalized.ID, nil)
+	sent, err := s.client.V1Invoices.SendInvoice(ctx, finalized.ID, &stripego.InvoiceSendInvoiceParams{
+		Params: stripego.Params{IdempotencyKey: stripego.String(key + "-send")},
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("stripe: sending invoice: %w", err)
 	}
@@ -171,13 +178,22 @@ func paymentRef(inv *stripego.Invoice) string {
 	return inv.ID
 }
 
-// ParseWebhook verifies payload's signature with webhook.ConstructEvent and
-// maps invoice.paid events to payments.Event; every other event type comes
+// ParseWebhook verifies payload's signature and maps invoice.paid events to payments.Event; every other event type comes
 // back as Kind="ignored".
 func (s *Stripe) ParseWebhook(payload []byte, sigHeader string) (payments.Event, error) {
-	event, err := webhook.ConstructEvent(payload, sigHeader, s.webhookSecret)
+	// The endpoint's API version is whatever the operator configured in
+	// the Stripe dashboard, not necessarily the one stripe-go was built
+	// for. shigoto only reads stable invoice fields, so a mismatch must not
+	// reject every event.
+	event, err := webhook.ConstructEventWithOptions(payload, sigHeader, s.webhookSecret,
+		webhook.ConstructEventOptions{IgnoreAPIVersionMismatch: true})
 	if err != nil {
-		return payments.Event{}, fmt.Errorf("%w: %v", payments.ErrBadSignature, err)
+		switch {
+		case errors.Is(err, webhook.ErrInvalidHeader), errors.Is(err, webhook.ErrNoValidSignature),
+			errors.Is(err, webhook.ErrNotSigned), errors.Is(err, webhook.ErrTooOld):
+			return payments.Event{}, fmt.Errorf("%w: %v", payments.ErrBadSignature, err)
+		}
+		return payments.Event{}, fmt.Errorf("stripe: constructing webhook event: %w", err)
 	}
 
 	if event.Type != stripego.EventTypeInvoicePaid {
@@ -194,17 +210,21 @@ func (s *Stripe) ParseWebhook(payload []byte, sigHeader string) (payments.Event,
 		return payments.Event{}, fmt.Errorf("stripe: decoding invoice.paid payload: %w", err)
 	}
 
+	// A malformed or missing id just disables the metadata fallback.
+	shigotoID, _ := strconv.ParseInt(inv.Metadata["shigoto_invoice_id"], 10, 64)
+
 	var paidAt int64
 	if inv.StatusTransitions != nil {
 		paidAt = inv.StatusTransitions.PaidAt
 	}
 
 	return payments.Event{
-		ID:         event.ID,
-		Kind:       "invoice.paid",
-		InvoiceRef: inv.ID,
-		PaymentRef: paymentRef(&inv),
-		Amount:     core.Cents(inv.AmountPaid),
-		PaidOn:     time.Unix(paidAt, 0).In(brisbane),
+		ID:               event.ID,
+		Kind:             "invoice.paid",
+		InvoiceRef:       inv.ID,
+		PaymentRef:       paymentRef(&inv),
+		Amount:           core.Cents(inv.AmountPaid),
+		PaidOn:           time.Unix(paidAt, 0).In(brisbane),
+		ShigotoInvoiceID: shigotoID,
 	}, nil
 }

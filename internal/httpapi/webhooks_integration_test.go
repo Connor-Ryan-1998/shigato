@@ -299,7 +299,9 @@ func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
 	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
 	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
 
-	fake := &payments.Fake{Secret: webhookSecret, SendInvoiceErr: fmt.Errorf("stripe is down")}
+	// The first send fails part-way, after one of the two invoice items
+	// has been created provider-side.
+	fake := &payments.Fake{Secret: webhookSecret, SendInvoiceErr: fmt.Errorf("stripe is down"), SendInvoiceErrAfterItems: 1}
 	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
 
 	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
@@ -307,7 +309,17 @@ func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
 		t.Fatalf("Login: %v", err)
 	}
 
-	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
+	draft, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+		ContactID: contactID, Source: "manual", DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "a", QuantityMilli: 1000, UnitAmount: 1000, GSTCode: "N-T"},
+			{Description: "b", QuantityMilli: 1000, UnitAmount: 2000, GSTCode: "N-T"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+	draftID := draft.ID
 
 	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
@@ -345,6 +357,17 @@ func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
 	}
 	if inv.ProviderRef == "" {
 		t.Fatalf("after retry: provider_ref is empty, want set")
+	}
+	// The retry must replay onto the provider invoice and items the failed
+	// attempt already created, not add the first item a second time.
+	if n := fake.ItemCount(inv.ProviderRef); n != 2 {
+		t.Fatalf("provider invoice items = %d, want 2 (one per line, no duplicates)", n)
+	}
+	if n := len(fake.Customers()); n != 2 {
+		t.Fatalf("EnsureCustomer calls = %d, want 2 (retried after rollback)", n)
+	}
+	if refs := fake.CustomerRefs(); len(refs) != 1 {
+		t.Fatalf("provider customers = %v, want exactly 1 (no duplicate customer)", refs)
 	}
 }
 
@@ -488,5 +511,155 @@ func TestVoidProviderFailureLeavesOpen(t *testing.T) {
 	}
 	if inv.Status != "open" {
 		t.Fatalf("status = %s, want open (the DB void must roll back with the failed provider void)", inv.Status)
+	}
+}
+
+// auditCount counts audit_log rows for org with the given action.
+func auditCount(t *testing.T, pool *pgxpool.Pool, orgID int64, action string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		"SELECT count(*) FROM audit_log WHERE org_id=$1 AND action=$2 AND actor_user_id IS NULL", orgID, action,
+	).Scan(&n); err != nil {
+		t.Fatalf("counting audit_log %s: %v", action, err)
+	}
+	return n
+}
+
+func paymentCount(t *testing.T, pool *pgxpool.Pool, orgID int64) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), "SELECT count(*) FROM payments WHERE org_id=$1", orgID).Scan(&n); err != nil {
+		t.Fatalf("counting payments: %v", err)
+	}
+	return n
+}
+
+// metadataWebhookBody is fakeWebhookBody plus a shigoto_invoice_id, as if
+// the provider echoed back the invoice's metadata.
+func metadataWebhookBody(t *testing.T, id, invoiceRef string, shigotoInvoiceID, amount int64) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"id": id, "kind": "invoice.paid", "invoice_ref": invoiceRef, "payment_ref": "pi_" + id,
+		"amount": amount, "paid_on": time.Now().Format(time.RFC3339), "shigoto_invoice_id": shigotoInvoiceID,
+	})
+	if err != nil {
+		t.Fatalf("marshaling webhook body: %v", err)
+	}
+	return body
+}
+
+// TestWebhookNonRetryableRejected covers invoice.paid events that can never
+// succeed (a zero amount; a payment against a void invoice): they must be
+// audited as payment_rejected and acknowledged with 200, not 500, which
+// would make Stripe retry them for days.
+func TestWebhookNonRetryableRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	fake := &payments.Fake{Secret: webhookSecret}
+	invID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_1", 10000)
+	voidID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_void", 10000)
+	if _, err := pool.Exec(ctx, "UPDATE invoices SET status='void' WHERE id=$1", voidID); err != nil {
+		t.Fatalf("voiding: %v", err)
+	}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	zero := fakeWebhookBody(t, "evt_zero", "invoice.paid", "in_fake_1", "pi_zero", 0, time.Now())
+	if rr := postWebhook(handler, "acme", zero, fake.Sign(zero, time.Now())); rr.Code != http.StatusOK {
+		t.Fatalf("zero amount: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+	void := fakeWebhookBody(t, "evt_void", "invoice.paid", "in_fake_void", "pi_void", 10000, time.Now())
+	if rr := postWebhook(handler, "acme", void, fake.Sign(void, time.Now())); rr.Code != http.StatusOK {
+		t.Fatalf("void invoice: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	if n := paymentCount(t, pool, org.ID); n != 0 {
+		t.Fatalf("payments = %d, want 0", n)
+	}
+	if n := auditCount(t, pool, org.ID, "payment_rejected"); n != 2 {
+		t.Fatalf("payment_rejected audit rows = %d, want 2", n)
+	}
+	var events int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM webhook_events WHERE org_id=$1", org.ID).Scan(&events); err != nil {
+		t.Fatalf("counting webhook_events: %v", err)
+	}
+	if events != 2 {
+		t.Fatalf("webhook_events = %d, want 2 (both committed so redelivery is a no-op)", events)
+	}
+	inv, err := core.GetInvoice(ctx, pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" {
+		t.Fatalf("status = %s, want open", inv.Status)
+	}
+}
+
+// TestWebhookOrphanEvent covers an invoice.paid event whose provider ref
+// matches no invoice and whose metadata names no invoice in the URL's org
+// (here: another org's invoice): audited as orphan_event, 200, and the
+// other org's invoice is untouched.
+func TestWebhookOrphanEvent(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	other := webhookTestOrg(t, pool, "other")
+	otherInv := webhookContactAndInvoice(t, pool, other.ID, "in_other", 10000)
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	for _, body := range [][]byte{
+		fakeWebhookBody(t, "evt_orphan", "invoice.paid", "in_unknown", "pi_orphan", 10000, time.Now()),
+		metadataWebhookBody(t, "evt_cross", "in_unknown_2", otherInv, 10000),
+	} {
+		if rr := postWebhook(handler, "acme", body, fake.Sign(body, time.Now())); rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+		}
+	}
+
+	if n := auditCount(t, pool, org.ID, "orphan_event"); n != 2 {
+		t.Fatalf("orphan_event audit rows = %d, want 2", n)
+	}
+	if n := paymentCount(t, pool, other.ID); n != 0 {
+		t.Fatalf("other org payments = %d, want 0", n)
+	}
+	inv, err := core.GetInvoice(ctx, pool, other.ID, otherInv)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" {
+		t.Fatalf("other org invoice status = %s, want open", inv.Status)
+	}
+}
+
+// TestWebhookMetadataFallback covers Stripe accepting a send whose
+// provider_ref shigoto never committed: the paid event's InvoiceRef
+// matches nothing, so the payment is matched by metadata.shigoto_invoice_id.
+func TestWebhookMetadataFallback(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	invID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_1", 10000)
+	if _, err := pool.Exec(ctx, "UPDATE invoices SET provider_ref=NULL WHERE id=$1", invID); err != nil {
+		t.Fatalf("clearing provider_ref: %v", err)
+	}
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	body := metadataWebhookBody(t, "evt_meta", "in_never_stored", invID, 10000)
+	if rr := postWebhook(handler, "acme", body, fake.Sign(body, time.Now())); rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "paid" {
+		t.Fatalf("status = %s, want paid", inv.Status)
+	}
+	if n := auditCount(t, pool, org.ID, "orphan_event"); n != 0 {
+		t.Fatalf("orphan_event audit rows = %d, want 0", n)
 	}
 }
