@@ -409,6 +409,91 @@ func TestIssueInvoiceUsesCallersCalendarDate(t *testing.T) {
 	}
 }
 
+// TestIssueInvoiceDueOnPinsDueDate verifies NewInvoice.DueOn (e.g. a rent
+// invoice's period start) drives IssueInvoice's due_date, including when
+// issuing happens days after the draft was created - which due_in_days
+// alone would get wrong, since it's measured from issue time.
+func TestIssueInvoiceDueOnPinsDueDate(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+
+	periodStart := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+
+	newRentDraft := func() int64 {
+		inv, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+			ContactID: contactID,
+			Source:    "rent",
+			DueInDays: 0,
+			DueOn:     &periodStart,
+			Lines: []core.NewLine{
+				{Description: "Rent", QuantityMilli: 1000, UnitAmount: core.Cents(50000), GSTCode: "INP"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateDraftInvoice: %v", err)
+		}
+		return inv.ID
+	}
+
+	// Created 7 days before the period start, then issued 5 days later
+	// (still 2 days before the period start, e.g. a late manual retry of
+	// a failed auto-issue): due_date must be the period start, not
+	// issue_date+0.
+	draftID := newRentDraft()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	issued, err := core.IssueInvoice(ctx, tx, org.ID, draftID, periodStart.AddDate(0, 0, -2))
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if issued.DueDate == nil || !issued.DueDate.Equal(periodStart) {
+		t.Fatalf("due_date = %v, want period start %v", issued.DueDate, periodStart)
+	}
+
+	// Issued after the period start (a very late retry): due_date is the
+	// issue date, not the now-past period start.
+	draftID2 := newRentDraft()
+	lateIssue := periodStart.AddDate(0, 0, 5)
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	issued2, err := core.IssueInvoice(ctx, tx2, org.ID, draftID2, lateIssue)
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if issued2.DueDate == nil || !issued2.DueDate.Equal(lateIssue) {
+		t.Fatalf("due_date = %v, want issue date %v (due_on already past)", issued2.DueDate, lateIssue)
+	}
+
+	// A non-rent invoice with no DueOn is unaffected: due_date is still
+	// issue_date + due_in_days.
+	manualDraftID := createDraft(t, pool, org.ID, contactID, "manual", 1000)
+	tx3, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx3.Rollback(ctx)
+	manual, err := core.IssueInvoice(ctx, tx3, org.ID, manualDraftID, time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	wantDue := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC) // 14-day term from createDraft
+	if manual.DueDate == nil || !manual.DueDate.Equal(wantDue) {
+		t.Fatalf("due_date = %v, want %v (due_in_days unaffected by absent DueOn)", manual.DueDate, wantDue)
+	}
+}
+
 // TestCreateDraftInvoiceStoresPropertyID verifies a NewLine's PropertyID is
 // persisted on its invoice_lines row, so callers (e.g. property's rent run)
 // can attribute rent/charge lines to the property they're for.

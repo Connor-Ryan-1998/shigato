@@ -38,7 +38,14 @@ type NewInvoice struct {
 	ContactID int64
 	Source    string
 	DueInDays int
-	Lines     []NewLine
+	// DueOn, if set, pins the invoice's due date regardless of when it's
+	// issued (e.g. rent is due on the period's start date, not N days
+	// after whenever the draft happens to be issued). IssueInvoice uses
+	// max(issue_date, DueOn) so a late issue never backdates the due
+	// date. DueInDays is still stored and still drives DueDate when DueOn
+	// is nil, keeping the Stripe integration's existing term.
+	DueOn *time.Time
+	Lines []NewLine
 }
 
 // InvoiceLine is a persisted invoice line, with its computed amount and GST.
@@ -63,6 +70,7 @@ type Invoice struct {
 	IssueDate        *time.Time
 	DueDate          *time.Time
 	DueInDays        int
+	DueOn            *time.Time
 	Currency         string
 	Subtotal         Cents
 	GSTTotal         Cents
@@ -74,7 +82,7 @@ type Invoice struct {
 }
 
 const invoiceColumns = `id, org_id, contact_id, number, source, status, issue_date, due_date,
-	due_in_days, currency, subtotal, gst_total, total, payment_reference,
+	due_in_days, due_on, currency, subtotal, gst_total, total, payment_reference,
 	coalesce(provider_ref,''), coalesce(provider_url,'')`
 
 func scanInvoice(row pgx.Row) (Invoice, error) {
@@ -82,7 +90,7 @@ func scanInvoice(row pgx.Row) (Invoice, error) {
 	var number *int32
 	var subtotal, gstTotal, total int64
 	err := row.Scan(&inv.ID, &inv.OrgID, &inv.ContactID, &number, &inv.Source, &inv.Status,
-		&inv.IssueDate, &inv.DueDate, &inv.DueInDays, &inv.Currency, &subtotal, &gstTotal, &total,
+		&inv.IssueDate, &inv.DueDate, &inv.DueInDays, &inv.DueOn, &inv.Currency, &subtotal, &gstTotal, &total,
 		&inv.PaymentReference, &inv.ProviderRef, &inv.ProviderURL)
 	if err != nil {
 		return Invoice{}, err
@@ -222,10 +230,10 @@ func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoi
 	}
 	var invoiceID int64
 	err = q.QueryRow(ctx, `
-		INSERT INTO invoices (org_id, contact_id, source, status, currency, subtotal, gst_total, total, payment_reference, due_in_days)
-		VALUES ($1, $2, $3, 'draft', 'AUD', $4, $5, $6, $7, $8)
+		INSERT INTO invoices (org_id, contact_id, source, status, currency, subtotal, gst_total, total, payment_reference, due_in_days, due_on)
+		VALUES ($1, $2, $3, 'draft', 'AUD', $4, $5, $6, $7, $8, $9)
 		RETURNING id`,
-		orgID, in.ContactID, in.Source, int64(subtotal), int64(gst), int64(total), ref, in.DueInDays,
+		orgID, in.ContactID, in.Source, int64(subtotal), int64(gst), int64(total), ref, in.DueInDays, in.DueOn,
 	).Scan(&invoiceID)
 	if err != nil {
 		return Invoice{}, err
@@ -257,10 +265,11 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 	var status string
 	var dueInDays int
 	var total int64
+	var dueOn *time.Time
 	err := tx.QueryRow(ctx,
-		`SELECT status, due_in_days, total FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+		`SELECT status, due_in_days, due_on, total FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
 		orgID, id,
-	).Scan(&status, &dueInDays, &total)
+	).Scan(&status, &dueInDays, &dueOn, &total)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Invoice{}, ErrNotFound
 	}
@@ -291,7 +300,18 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 	// callers east of UTC during their morning.
 	y, m, d := today.Date()
 	issueDate := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+
+	// A pinned due_on (e.g. rent's period start) wins over the
+	// days-after-issue term, but never predates the issue date itself -
+	// an invoice issued after its "due on" date (a late manual retry of
+	// a failed auto-issue) is due immediately, not in the past.
 	dueDate := issueDate.AddDate(0, 0, dueInDays)
+	if dueOn != nil {
+		dueDate = *dueOn
+		if issueDate.After(dueDate) {
+			dueDate = issueDate
+		}
+	}
 	_, err = tx.Exec(ctx,
 		`UPDATE invoices SET number = $1, issue_date = $2, due_date = $3, status = 'open' WHERE org_id = $4 AND id = $5`,
 		number, issueDate, dueDate, orgID, id,

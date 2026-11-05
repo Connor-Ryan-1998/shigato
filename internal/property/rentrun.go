@@ -46,6 +46,13 @@ func gstCodeForRent(residential, gstRegistered bool) core.GSTCode {
 // immediately after its period's transaction commits; an issue failure
 // (e.g. too few pay options) leaves the draft in place, counts as Failed,
 // and is audited as rent_issue_failed.
+//
+// An error processing one lease (a DB error building its terms or writing
+// its periods) is logged with the lease id, counts that lease as Failed,
+// and does not stop the run: one bad lease must not block invoicing every
+// other lease in the org. Only an org-level failure (loading settings or
+// listing leases) aborts the whole run, since nothing after it could
+// proceed anyway.
 func RunRent(ctx context.Context, b *billing.Service, orgID int64, orgSlug string, asOf time.Time) (RunResult, error) {
 	settings, err := core.GetSettings(ctx, b.Pool, orgID)
 	if err != nil {
@@ -64,7 +71,9 @@ func RunRent(ctx context.Context, b *billing.Service, orgID int64, orgSlug strin
 	var result RunResult
 	for _, leaseID := range leaseIDs {
 		if err := runRentForLease(ctx, b, orgID, orgSlug, leaseID, asOf, settings, &result); err != nil {
-			return result, err
+			slog.Error("rent run failed for lease", "org_id", orgID, "lease_id", leaseID, "error", err)
+			result.Failed++
+			continue
 		}
 	}
 	return result, nil
@@ -102,7 +111,10 @@ func runRentForLease(ctx context.Context, b *billing.Service, orgID int64, orgSl
 	}
 
 	var latestEnd *time.Time
-	if err := b.Pool.QueryRow(ctx, `SELECT max(period_end) FROM rent_periods WHERE lease_id = $1`, leaseID).Scan(&latestEnd); err != nil {
+	if err := b.Pool.QueryRow(ctx,
+		`SELECT max(period_end) FROM rent_periods WHERE org_id = $1 AND lease_id = $2`,
+		orgID, leaseID,
+	).Scan(&latestEnd); err != nil {
 		return err
 	}
 	paidTo := lease.PaidToDate
@@ -228,10 +240,12 @@ func createPeriodInvoice(ctx context.Context, pool *pgxpool.Pool, orgID, leaseID
 		})
 	}
 
+	dueOn := period.Start
 	inv, err := core.CreateDraftInvoice(ctx, tx, orgID, core.NewInvoice{
 		ContactID: contactID,
 		Source:    "rent",
 		DueInDays: dueInDays,
+		DueOn:     &dueOn,
 		Lines:     lines,
 	})
 	if err != nil {
@@ -263,13 +277,19 @@ type Ledger struct {
 	Periods        []LedgerPeriod
 	OpeningArrears core.Cents
 	Arrears        core.Cents
+	// Unissued is the total amount_due of periods whose invoice is still
+	// a draft - most often a failed auto-issue (see rent_issue_failed)
+	// that needs manual attention, since it isn't counted in Arrears and
+	// would otherwise be invisible on the ledger.
+	Unissued core.Cents
 }
 
 // GetLedger builds leaseID's ledger, scoped to orgID. Arrears is the
 // lease's opening_arrears plus the outstanding balance of every period
 // whose invoice is open or paid (void and draft periods don't count), each
 // floored at 0 so a period that's been overpaid can't offset arrears owed
-// on another.
+// on another. Unissued periods (draft invoices) are reported separately,
+// not folded into Arrears, since they haven't actually been billed yet.
 func GetLedger(ctx context.Context, q core.Querier, orgID, leaseID int64) (Ledger, error) {
 	lease, err := GetLease(ctx, q, orgID, leaseID)
 	if err != nil {
@@ -304,11 +324,14 @@ func GetLedger(ctx context.Context, q core.Querier, orgID, leaseID int64) (Ledge
 		lp.Paid = core.Cents(paid)
 		ledger.Periods = append(ledger.Periods, lp)
 
-		if lp.InvoiceStatus == "open" || lp.InvoiceStatus == "paid" {
+		switch lp.InvoiceStatus {
+		case "open", "paid":
 			outstanding := lp.AmountDue - lp.Paid
 			if outstanding > 0 {
 				ledger.Arrears += outstanding
 			}
+		case "draft":
+			ledger.Unissued += lp.AmountDue
 		}
 	}
 	if err := rows.Err(); err != nil {

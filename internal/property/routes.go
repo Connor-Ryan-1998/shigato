@@ -514,6 +514,7 @@ type ledgerResponse struct {
 	Periods        []ledgerPeriodResponse `json:"periods"`
 	OpeningArrears int64                  `json:"opening_arrears"`
 	Arrears        int64                  `json:"arrears"`
+	Unissued       int64                  `json:"unissued"`
 }
 
 func ledgerToResponse(l Ledger) ledgerResponse {
@@ -521,6 +522,7 @@ func ledgerToResponse(l Ledger) ledgerResponse {
 		Periods:        make([]ledgerPeriodResponse, len(l.Periods)),
 		OpeningArrears: int64(l.OpeningArrears),
 		Arrears:        int64(l.Arrears),
+		Unissued:       int64(l.Unissued),
 	}
 	for i, p := range l.Periods {
 		resp.Periods[i] = ledgerPeriodResponse{

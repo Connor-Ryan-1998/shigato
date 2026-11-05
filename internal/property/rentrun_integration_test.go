@@ -4,6 +4,7 @@ package property
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestRunRentIdempotentConcurrent(t *testing.T) {
 	ctx := context.Background()
 	org := testOrg(t, pool, "acme")
 	propertyID := testProperty(t, pool, org.ID)
-	setOrgLeadAndAutoSend(t, pool, org.ID, 0, false)
+	setOrgLeadAndAutoSend(t, pool, org.ID, 7, false) // 2 periods per run
 
 	asOf := mustDate(t, "2026-11-05")
 	lease := testWeeklyLease(t, pool, org.ID, propertyID, asOf, 50000, nil)
@@ -170,19 +171,19 @@ func TestRunRentIdempotentConcurrent(t *testing.T) {
 			t.Fatalf("RunRent[%d]: %v", i, err)
 		}
 	}
-	if results[0].Created+results[1].Created != 1 {
-		t.Fatalf("total Created = %d, want 1 (one period, claimed exactly once)", results[0].Created+results[1].Created)
+	if results[0].Created+results[1].Created != 2 {
+		t.Fatalf("total Created = %d, want 2 (two periods, each claimed exactly once)", results[0].Created+results[1].Created)
 	}
 
 	var periodCount int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM rent_periods WHERE lease_id = $1", lease.ID).Scan(&periodCount); err != nil {
 		t.Fatalf("counting rent_periods: %v", err)
 	}
-	if periodCount != 1 {
-		t.Fatalf("rent_periods rows = %d, want 1", periodCount)
+	if periodCount != 2 {
+		t.Fatalf("rent_periods rows = %d, want 2", periodCount)
 	}
-	if got := rentInvoiceCount(t, pool, org.ID); got != 1 {
-		t.Fatalf("rent invoices = %d, want 1", got)
+	if got := rentInvoiceCount(t, pool, org.ID); got != 2 {
+		t.Fatalf("rent invoices = %d, want 2", got)
 	}
 }
 
@@ -228,7 +229,7 @@ func TestRunRentAutoSendFailsWithoutPayOptions(t *testing.T) {
 	setOrgLeadAndAutoSend(t, pool, org.ID, 0, true) // no bank details set
 
 	asOf := mustDate(t, "2026-11-05")
-	testWeeklyLease(t, pool, org.ID, propertyID, asOf, 50000, nil)
+	lease := testWeeklyLease(t, pool, org.ID, propertyID, asOf, 50000, nil)
 
 	result, err := RunRent(ctx, testService(pool), org.ID, "acme", asOf)
 	if err != nil {
@@ -247,13 +248,25 @@ func TestRunRentAutoSendFailsWithoutPayOptions(t *testing.T) {
 	}
 
 	var n int
+	var diff []byte
 	if err := pool.QueryRow(ctx,
-		"SELECT count(*) FROM audit_log WHERE org_id = $1 AND entity = 'invoice' AND action = 'rent_issue_failed'", org.ID,
-	).Scan(&n); err != nil {
+		"SELECT count(*), max(diff::text) FROM audit_log WHERE org_id = $1 AND entity = 'invoice' AND action = 'rent_issue_failed'", org.ID,
+	).Scan(&n, &diff); err != nil {
 		t.Fatalf("counting audit_log: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("rent_issue_failed audit rows = %d, want 1", n)
+	}
+	if !strings.Contains(string(diff), "too_few_pay_options") {
+		t.Fatalf("audit diff = %s, want it to contain too_few_pay_options", diff)
+	}
+
+	ledger, err := GetLedger(ctx, pool, org.ID, lease.ID)
+	if err != nil {
+		t.Fatalf("GetLedger: %v", err)
+	}
+	if ledger.Unissued <= 0 {
+		t.Fatalf("Unissued = %d, want > 0 (the failed-to-issue draft's amount_due)", ledger.Unissued)
 	}
 }
 
