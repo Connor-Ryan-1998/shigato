@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -11,6 +12,32 @@ import (
 	"shigoto/internal/core"
 	"shigoto/internal/module"
 )
+
+// dateLayout matches httpapi's own date encoding (YYYY-MM-DD).
+const dateLayout = "2006-01-02"
+
+// parseDate parses an RFC 3339 date (YYYY-MM-DD) as UTC midnight.
+func parseDate(s string) (time.Time, error) {
+	return time.ParseInLocation(dateLayout, s, time.UTC)
+}
+
+// clockNow is time.Now, overridable by tests so they can pin "today" to a
+// specific instant. See internal/property/routes.go's clockNow/today for
+// the identical pattern this mirrors; it's duplicated here (rather than
+// shared) because it's ten lines and moving it would touch property's
+// tests for no benefit to either module.
+var clockNow = time.Now
+
+// today returns today's calendar date in d.Cfg.Location (defaulting to
+// UTC), as a UTC midnight - the same units parseDate produces.
+func today(d module.Deps) time.Time {
+	loc := d.Cfg.Location
+	if loc == nil {
+		loc = time.UTC
+	}
+	y, m, dd := clockNow().In(loc).Date()
+	return time.Date(y, m, dd, 0, 0, 0, 0, time.UTC)
+}
 
 // Module returns the timesheets module: projects, tasks and (in a later
 // task) time entries, gated by config.Config.Modules["timesheets"].
@@ -46,6 +73,22 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 	mux.Handle("PUT /api/v1/orgs/{org}/tasks/{id}",
 		d.Auth.RequireOrg(auth.PermTimesheetsAdmin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			updateTask(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/time-entries",
+		d.Auth.RequireOrg(auth.PermTimesheetsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createEntry(w, r, d)
+		})))
+	mux.Handle("PUT /api/v1/orgs/{org}/time-entries/{id}",
+		d.Auth.RequireOrg(auth.PermTimesheetsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			updateEntry(w, r, d)
+		})))
+	mux.Handle("DELETE /api/v1/orgs/{org}/time-entries/{id}",
+		d.Auth.RequireOrg(auth.PermTimesheetsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			deleteEntry(w, r, d)
+		})))
+	mux.Handle("GET /api/v1/orgs/{org}/time-entries",
+		d.Auth.RequireOrg(auth.PermTimesheetsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			listEntries(w, r, d)
 		})))
 }
 
@@ -347,4 +390,218 @@ func updateTask(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		return
 	}
 	module.WriteJSON(w, http.StatusOK, taskToResponse(updated))
+}
+
+// --- time entries handlers ---
+
+type entryRequest struct {
+	TaskID   int64  `json:"task_id"`
+	WorkDate string `json:"work_date"`
+	Minutes  int    `json:"minutes"`
+	Note     string `json:"note,omitempty"`
+}
+
+// entryUpdateRequest is a full replace: every field must be present, so
+// pointers detect an omitted key (handled as a 422), following the same
+// pattern as projectUpdateRequest/taskUpdateRequest. user_id is never
+// accepted: it can't be changed.
+type entryUpdateRequest struct {
+	TaskID   *int64  `json:"task_id"`
+	WorkDate *string `json:"work_date"`
+	Minutes  *int    `json:"minutes"`
+	Note     *string `json:"note"`
+}
+
+type entryResponse struct {
+	ID            int64  `json:"id"`
+	TaskID        int64  `json:"task_id"`
+	UserID        int64  `json:"user_id"`
+	WorkDate      string `json:"work_date"`
+	Minutes       int    `json:"minutes"`
+	Note          string `json:"note"`
+	InvoiceLineID *int64 `json:"invoice_line_id,omitempty"`
+}
+
+func entryToResponse(e Entry) entryResponse {
+	return entryResponse{
+		ID: e.ID, TaskID: e.TaskID, UserID: e.UserID,
+		WorkDate: e.WorkDate.Format(dateLayout), Minutes: e.Minutes, Note: e.Note,
+		InvoiceLineID: e.InvoiceLineID,
+	}
+}
+
+func createEntry(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	var body entryRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	workDate, err := parseDate(body.WorkDate)
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "work_date must be YYYY-MM-DD")
+		return
+	}
+
+	p := auth.From(r.Context())
+	var created Entry
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		created, err = CreateEntry(r.Context(), tx, p.OrgID, p.UserID, Entry{
+			TaskID: body.TaskID, WorkDate: workDate, Minutes: body.Minutes, Note: body.Note,
+		}, today(d))
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "time_entry", created.ID, "create", body)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, entryToResponse(created))
+}
+
+func updateEntry(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body entryUpdateRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	switch {
+	case body.TaskID == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "task_id is required")
+		return
+	case body.WorkDate == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "work_date is required")
+		return
+	case body.Minutes == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "minutes is required")
+		return
+	case body.Note == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "note is required")
+		return
+	}
+	workDate, err := parseDate(*body.WorkDate)
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "work_date must be YYYY-MM-DD")
+		return
+	}
+
+	p := auth.From(r.Context())
+	var updated Entry
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		updated, err = UpdateEntry(r.Context(), tx, p.OrgID, p, id, Entry{
+			TaskID: *body.TaskID, WorkDate: workDate, Minutes: *body.Minutes, Note: *body.Note,
+		}, today(d))
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "time_entry", updated.ID, "update", body)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, entryToResponse(updated))
+}
+
+func deleteEntry(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		if err := DeleteEntry(r.Context(), tx, p.OrgID, p, id); err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "time_entry", id, "delete", nil)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type entryListResponse struct {
+	Entries      []entryResponse `json:"entries"`
+	TotalMinutes int             `json:"total_minutes"`
+}
+
+func listEntries(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	q := r.URL.Query()
+	var filter EntryFilter
+
+	parseID := func(name string) (*int64, bool) {
+		s := q.Get(name)
+		if s == "" {
+			return nil, true
+		}
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		return &id, true
+	}
+	var ok bool
+	if filter.TaskID, ok = parseID("task_id"); !ok {
+		module.WriteError(w, http.StatusUnprocessableEntity, "task_id must be an integer")
+		return
+	}
+	if filter.ProjectID, ok = parseID("project_id"); !ok {
+		module.WriteError(w, http.StatusUnprocessableEntity, "project_id must be an integer")
+		return
+	}
+	if filter.UserID, ok = parseID("user_id"); !ok {
+		module.WriteError(w, http.StatusUnprocessableEntity, "user_id must be an integer")
+		return
+	}
+	if filter.ClientID, ok = parseID("client_id"); !ok {
+		module.WriteError(w, http.StatusUnprocessableEntity, "client_id must be an integer")
+		return
+	}
+	if s := q.Get("from"); s != "" {
+		t, err := parseDate(s)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "from must be YYYY-MM-DD")
+			return
+		}
+		filter.From = &t
+	}
+	if s := q.Get("to"); s != "" {
+		t, err := parseDate(s)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "to must be YYYY-MM-DD")
+			return
+		}
+		filter.To = &t
+	}
+	if s := q.Get("unbilled"); s != "" {
+		if s != "true" {
+			module.WriteError(w, http.StatusUnprocessableEntity, "unbilled must be true")
+			return
+		}
+		filter.Unbilled = true
+	}
+
+	p := auth.From(r.Context())
+	entries, err := ListEntries(r.Context(), d.Pool, p.OrgID, filter)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	resp := entryListResponse{Entries: make([]entryResponse, len(entries))}
+	for i, e := range entries {
+		resp.Entries[i] = entryToResponse(e)
+		resp.TotalMinutes += e.Minutes
+	}
+	module.WriteJSON(w, http.StatusOK, resp)
 }

@@ -12,6 +12,11 @@ import (
 // ErrNotFound is returned by lookup functions when no matching row exists.
 var ErrNotFound = errors.New("not found")
 
+// ErrForbidden is returned when the caller is authenticated and the
+// resource exists, but the caller isn't allowed to act on it (e.g. editing
+// another user's time entry without an admin permission).
+var ErrForbidden = errors.New("forbidden")
+
 // Querier covers the subset of pgxpool.Pool and pgx.Tx used by core, so
 // callers can pass either a pool or a transaction.
 type Querier interface {

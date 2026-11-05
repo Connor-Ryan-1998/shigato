@@ -92,6 +92,8 @@ func WriteCoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, core.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, core.ErrForbidden):
+		WriteError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, core.ErrInvalidInput):
 		WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, core.ErrInvalidState):
