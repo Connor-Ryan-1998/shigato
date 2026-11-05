@@ -34,6 +34,18 @@ var ErrProviderVoidFailed = errors.New("void failed with payment provider")
 // many ways to pay before it can be issued.
 const minPayOptions = 2
 
+// detachTimeout bounds how long a detached (context.WithoutCancel) provider
+// call may run after the triggering request's context is gone, so a
+// provider outage can't hang Issue/Send/Void's goroutine forever.
+const detachTimeout = 2 * time.Minute
+
+// detach returns a context that survives ctx's cancellation (e.g. a client
+// disconnect) but is bounded by detachTimeout, for provider work that must
+// finish once started.
+func detach(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), detachTimeout)
+}
+
 // actorKey is the context key WithActor/actorFrom use to pass the acting
 // user through to an audit_log entry.
 type actorKey struct{}
@@ -66,6 +78,15 @@ type Service struct {
 	// Location is used for Issue's issue date and any other "today" the
 	// service needs.
 	Location *time.Location
+}
+
+// loc returns s.Location, defaulting to UTC so a Service built without one
+// set (e.g. a non-HTTP caller) doesn't panic calling time.Now().In(nil).
+func (s *Service) loc() *time.Location {
+	if s.Location == nil {
+		return time.UTC
+	}
+	return s.Location
 }
 
 // runInTx runs fn in a new transaction on s.Pool, committing on success and
@@ -115,8 +136,8 @@ func (s *Service) PayOptions(ctx context.Context, q core.Querier, orgID int64) (
 // otherwise), assigns the gap-free invoice number, and audits the issue -
 // all in one transaction. Once that's committed, it makes a best-effort
 // attempt to send the invoice to the org's payment provider in a detached
-// context (context.WithoutCancel): a client disconnect mid-send must not
-// abandon a provider call, or the commit recording it, half-done. A failed
+// context (see detach): a client disconnect mid-send must not abandon a
+// provider call, or the commit recording it, half-done. A failed
 // send (other than payments.ErrNoProvider) is logged, not returned: the
 // number is already burned and won't move, and the invoice stays open with
 // no provider_ref for POST .../send to retry.
@@ -140,7 +161,7 @@ func (s *Service) Issue(ctx context.Context, orgID int64, orgSlug string, invoic
 			}
 		}
 
-		inv, err = core.IssueInvoice(ctx, tx, orgID, invoiceID, time.Now().In(s.Location))
+		inv, err = core.IssueInvoice(ctx, tx, orgID, invoiceID, time.Now().In(s.loc()))
 		if err != nil {
 			return err
 		}
@@ -150,7 +171,9 @@ func (s *Service) Issue(ctx context.Context, orgID int64, orgSlug string, invoic
 		return core.Invoice{}, err
 	}
 
-	if err := s.sendToProvider(context.WithoutCancel(ctx), orgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
+	dctx, cancel := detach(ctx)
+	defer cancel()
+	if err := s.sendToProvider(dctx, orgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
 		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
 	}
 
@@ -172,7 +195,9 @@ func (s *Service) Send(ctx context.Context, orgID int64, orgSlug string, invoice
 	}
 
 	// Detached from the request, as in Issue.
-	if err := s.sendToProvider(context.WithoutCancel(ctx), orgID, orgSlug, &inv); err != nil {
+	dctx, cancel := detach(ctx)
+	defer cancel()
+	if err := s.sendToProvider(dctx, orgID, orgSlug, &inv); err != nil {
 		return core.Invoice{}, err
 	}
 	return inv, nil
@@ -229,7 +254,7 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 			}
 		}
 
-		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef)
+		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef, time.Now().In(s.loc()))
 		if err != nil {
 			return fmt.Errorf("sending invoice: %w", err)
 		}
@@ -255,12 +280,13 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 // what failed, so callers can map it to 502 rather than a local-state
 // status.
 //
-// ctx is detached from the caller's own (context.WithoutCancel) before any
-// work starts: once the provider void is under way, a client disconnect
-// must not roll back the local void and leave the two sides disagreeing.
+// ctx is detached from the caller's own (see detach) before any work
+// starts: once the provider void is under way, a client disconnect must
+// not roll back the local void and leave the two sides disagreeing.
 func (s *Service) Void(ctx context.Context, orgID int64, orgSlug string, invoiceID int64) (core.Invoice, error) {
 	actor := actorFrom(ctx)
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := detach(ctx)
+	defer cancel()
 
 	var inv core.Invoice
 	var providerErr error

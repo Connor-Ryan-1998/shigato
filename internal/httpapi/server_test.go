@@ -3,11 +3,14 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"shigoto/internal/config"
+	"shigoto/internal/payments"
 )
 
 func TestMetaListsEnabledModules(t *testing.T) {
@@ -74,6 +77,36 @@ func assertMeta(t *testing.T, rec *httptest.ResponseRecorder, want []string) {
 		if body.Modules[i] != want[i] {
 			t.Fatalf("meta modules = %v, want %v", body.Modules, want)
 		}
+	}
+}
+
+// TestDefaultPaymentsRequiresBothStripeSecrets checks the default Payments
+// resolver (used when Deps.Payments is nil) never hands back a Stripe
+// provider unless both the secret key and webhook secret are configured: a
+// secret key alone could create charges but can't verify the webhooks that
+// confirm they were paid, so an invoice must never be pushed to a Stripe
+// account shigoto can't hear back from.
+func TestDefaultPaymentsRequiresBothStripeSecrets(t *testing.T) {
+	env := map[string]string{}
+	getenv := func(k string) string { return env[k] }
+	resolve := defaultPayments(getenv, time.UTC)
+
+	if _, err := resolve("acme"); !errors.Is(err, payments.ErrNoProvider) {
+		t.Fatalf("no keys: err = %v, want ErrNoProvider", err)
+	}
+
+	env["SHIGOTO_STRIPE_ACME_SECRET_KEY"] = "sk_test_dummy"
+	if _, err := resolve("acme"); !errors.Is(err, payments.ErrNoProvider) {
+		t.Fatalf("secret key only: err = %v, want ErrNoProvider", err)
+	}
+
+	env["SHIGOTO_STRIPE_ACME_WEBHOOK_SECRET"] = "whsec_test_dummy"
+	p, err := resolve("acme")
+	if err != nil {
+		t.Fatalf("both keys: err = %v, want nil", err)
+	}
+	if p == nil {
+		t.Fatal("both keys: provider = nil, want non-nil")
 	}
 }
 

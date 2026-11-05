@@ -16,31 +16,23 @@ import (
 	"shigoto/internal/payments"
 )
 
-// brisbane is the timezone Event.PaidOn is reported in, matching
-// config.Config.Location's default.
-var brisbane = mustLoadLocation("Australia/Brisbane")
-
-func mustLoadLocation(name string) *time.Location {
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		panic(err)
-	}
-	return loc
-}
-
 var _ payments.Provider = (*Stripe)(nil)
 
 // Stripe is a payments.Provider backed by the real Stripe API.
 type Stripe struct {
 	client        *stripego.Client
 	webhookSecret string
+	// loc is the timezone Event.PaidOn is reported in.
+	loc *time.Location
 }
 
-// New builds a Stripe provider for one org's credentials.
-func New(secretKey, webhookSecret string) payments.Provider {
+// New builds a Stripe provider for one org's credentials. loc is the
+// timezone Event.PaidOn is reported in (config.Config.Location).
+func New(secretKey, webhookSecret string, loc *time.Location) payments.Provider {
 	return &Stripe{
 		client:        stripego.NewClient(secretKey),
 		webhookSecret: webhookSecret,
+		loc:           loc,
 	}
 }
 
@@ -72,10 +64,33 @@ func lineDescription(l core.InvoiceLine) string {
 	return fmt.Sprintf("%s (incl. GST)", l.Description)
 }
 
+// daysUntilDue returns the whole number of days between today and inv's due
+// date, floored at 0 (never negative): max(0, due_date − today). A retried
+// send can happen well after issue, so this is computed fresh from
+// inv.DueDate rather than reusing the due_in_days fixed at issue time. If
+// inv.DueDate is unset (shouldn't happen for an issued invoice), it falls
+// back to inv.DueInDays.
+func daysUntilDue(inv core.Invoice, today time.Time) int64 {
+	if inv.DueDate == nil {
+		if inv.DueInDays < 0 {
+			return 0
+		}
+		return int64(inv.DueInDays)
+	}
+	y, m, d := today.Date()
+	todayDate := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	days := int64(inv.DueDate.Sub(todayDate).Hours() / 24)
+	if days < 0 {
+		return 0
+	}
+	return days
+}
+
 // SendInvoice creates a draft Stripe invoice for inv, adds one invoice item
 // per line (amount = line amount + GST, since Stripe Tax isn't used),
-// finalizes it and sends it.
-func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string) (string, string, error) {
+// finalizes it and sends it. today is the caller's current date, used to
+// compute days_until_due.
+func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string, today time.Time) (string, string, error) {
 	// Every write carries a key derived from shigoto ids, so a retried
 	// send (a network blip, or POST .../send after a partial failure)
 	// replays onto the same Stripe invoice and items instead of creating
@@ -86,8 +101,13 @@ func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core
 		Params:           stripego.Params{IdempotencyKey: stripego.String(key)},
 		Customer:         stripego.String(customerRef),
 		CollectionMethod: stripego.String(string(stripego.InvoiceCollectionMethodSendInvoice)),
-		DaysUntilDue:     stripego.Int64(int64(inv.DueInDays)),
-		Currency:         stripego.String("aud"),
+		// shigoto, not Stripe, drives sending: AutoAdvance would let
+		// Stripe auto-finalize/auto-collect/auto-mark-uncollectible a
+		// draft invoice on its own clock, racing shigoto's explicit
+		// finalize+send below and any later void.
+		AutoAdvance:  stripego.Bool(false),
+		DaysUntilDue: stripego.Int64(daysUntilDue(inv, today)),
+		Currency:     stripego.String("aud"),
 		PaymentSettings: &stripego.InvoiceCreatePaymentSettingsParams{
 			PaymentMethodTypes: stripego.StringSlice([]string{"card", "au_becs_debit"}),
 		},
@@ -218,13 +238,18 @@ func (s *Stripe) ParseWebhook(payload []byte, sigHeader string) (payments.Event,
 		paidAt = inv.StatusTransitions.PaidAt
 	}
 
+	loc := s.loc
+	if loc == nil {
+		loc = time.UTC
+	}
+
 	return payments.Event{
 		ID:               event.ID,
 		Kind:             "invoice.paid",
 		InvoiceRef:       inv.ID,
 		PaymentRef:       paymentRef(&inv),
 		Amount:           core.Cents(inv.AmountPaid),
-		PaidOn:           time.Unix(paidAt, 0).In(brisbane),
+		PaidOn:           time.Unix(paidAt, 0).In(loc),
 		ShigotoInvoiceID: shigotoID,
 	}, nil
 }

@@ -96,15 +96,30 @@ func handleStripeWebhook(w http.ResponseWriter, r *http.Request, d Deps) {
 		// provider echoed from metadata (scoped to this org): a send whose
 		// provider_ref was never committed can still be paid.
 		var invoiceID int64
+		matchedBy := "provider_ref"
 		err = tx.QueryRow(ctx,
 			`SELECT id FROM invoices WHERE org_id = $1 AND provider_ref = $2`,
 			org.ID, event.InvoiceRef,
 		).Scan(&invoiceID)
 		if errors.Is(err, pgx.ErrNoRows) && event.ShigotoInvoiceID != 0 {
+			matchedBy = "metadata"
 			err = tx.QueryRow(ctx,
 				`SELECT id FROM invoices WHERE org_id = $1 AND id = $2`,
 				org.ID, event.ShigotoInvoiceID,
 			).Scan(&invoiceID)
+			if err == nil {
+				// Backfill the provider_ref shigoto never committed (e.g.
+				// a send whose response was lost after Stripe accepted
+				// it), so future webhooks for this invoice match on
+				// provider_ref directly. Guarded by provider_ref IS NULL:
+				// never overwrite one already recorded.
+				if _, err := tx.Exec(ctx,
+					`UPDATE invoices SET provider_ref=$1 WHERE id=$2 AND org_id=$3 AND provider_ref IS NULL`,
+					event.InvoiceRef, invoiceID, org.ID,
+				); err != nil {
+					return err
+				}
+			}
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return core.Audit(ctx, tx, org.ID, nil, "invoice", 0, "orphan_event", map[string]any{
@@ -150,6 +165,7 @@ func handleStripeWebhook(w http.ResponseWriter, r *http.Request, d Deps) {
 		return core.Audit(ctx, tx, org.ID, nil, "payment", payment.ID, "recorded_by_webhook", map[string]any{
 			"event_id":   event.ID,
 			"invoice_id": invoiceID,
+			"matched_by": matchedBy,
 		})
 	})
 	if err != nil {

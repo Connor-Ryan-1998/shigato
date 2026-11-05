@@ -22,6 +22,7 @@ type FakeSendInvoiceCall struct {
 	Invoice     core.Invoice
 	Lines       []core.InvoiceLine
 	CustomerRef string
+	Today       time.Time
 }
 
 // Fake is an in-memory payments.Provider for tests. ParseWebhook verifies
@@ -96,7 +97,7 @@ func (f *Fake) EnsureCustomer(_ context.Context, c core.Contact) (string, error)
 // seen. If SendInvoiceErr is set, it is returned once (then cleared) after
 // SendInvoiceErrAfterItems items; otherwise the call is recorded and the
 // invoice's ref and hosted URL are returned.
-func (f *Fake) SendInvoice(_ context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string) (string, string, error) {
+func (f *Fake) SendInvoice(_ context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string, today time.Time) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -125,7 +126,7 @@ func (f *Fake) SendInvoice(_ context.Context, inv core.Invoice, lines []core.Inv
 		return "", "", failErr
 	}
 
-	f.sendInvoice = append(f.sendInvoice, FakeSendInvoiceCall{Invoice: inv, Lines: lines, CustomerRef: customerRef})
+	f.sendInvoice = append(f.sendInvoice, FakeSendInvoiceCall{Invoice: inv, Lines: lines, CustomerRef: customerRef, Today: today})
 	return ref, "https://fake.example/invoices/" + ref, nil
 }
 

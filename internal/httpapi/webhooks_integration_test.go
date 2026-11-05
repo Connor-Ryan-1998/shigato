@@ -701,3 +701,50 @@ func TestWebhookMetadataFallback(t *testing.T) {
 		t.Fatalf("orphan_event audit rows = %d, want 0", n)
 	}
 }
+
+// TestWebhookMetadataFallbackBackfillsRef covers the same metadata-fallback
+// match as TestWebhookMetadataFallback, but additionally checks that the
+// never-committed provider_ref is backfilled from the event, and that the
+// recorded_by_webhook audit diff records how the invoice was matched.
+func TestWebhookMetadataFallbackBackfillsRef(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	invID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_1", 10000)
+	if _, err := pool.Exec(ctx, "UPDATE invoices SET provider_ref=NULL WHERE id=$1", invID); err != nil {
+		t.Fatalf("clearing provider_ref: %v", err)
+	}
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	const wantRef = "in_never_stored"
+	body := metadataWebhookBody(t, "evt_meta_backfill", wantRef, invID, 10000)
+	if rr := postWebhook(handler, "acme", body, fake.Sign(body, time.Now())); rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.ProviderRef != wantRef {
+		t.Fatalf("provider_ref = %q, want %q (backfilled from the event)", inv.ProviderRef, wantRef)
+	}
+
+	var diff []byte
+	if err := pool.QueryRow(ctx,
+		"SELECT diff FROM audit_log WHERE org_id=$1 AND action='recorded_by_webhook' AND actor_user_id IS NULL",
+		org.ID,
+	).Scan(&diff); err != nil {
+		t.Fatalf("querying recorded_by_webhook audit diff: %v", err)
+	}
+	var parsed struct {
+		MatchedBy string `json:"matched_by"`
+	}
+	if err := json.Unmarshal(diff, &parsed); err != nil {
+		t.Fatalf("decoding audit diff %s: %v", diff, err)
+	}
+	if parsed.MatchedBy != "metadata" {
+		t.Fatalf("matched_by = %q, want metadata", parsed.MatchedBy)
+	}
+}

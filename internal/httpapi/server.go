@@ -44,6 +44,22 @@ type Deps struct {
 	Billing *billing.Service
 }
 
+// defaultPayments builds the default Payments resolver: a stripe.Provider
+// from config.StripeFor, in loc. It requires both a secret key and a
+// webhook secret before returning a provider - a secret key alone can
+// create charges but can't verify the webhooks that confirm they were
+// paid, so an invoice must never be pushed to a Stripe account shigoto
+// can't hear back from. Otherwise it returns payments.ErrNoProvider.
+func defaultPayments(getenv func(string) string, loc *time.Location) func(orgSlug string) (payments.Provider, error) {
+	return func(orgSlug string) (payments.Provider, error) {
+		org, ok := config.StripeFor(getenv, orgSlug)
+		if !ok || org.SecretKey == "" || org.WebhookSecret == "" {
+			return nil, payments.ErrNoProvider
+		}
+		return stripe.New(org.SecretKey, org.WebhookSecret, loc), nil
+	}
+}
+
 // modules lists the feature modules available to mount. Plans 2, 3 and 4
 // each append one entry. It is a package-level var (not a const slice) so
 // tests can swap it out and restore it.
@@ -62,13 +78,7 @@ func New(d Deps) http.Handler {
 		d.Cfg.Location = time.UTC
 	}
 	if d.Payments == nil {
-		d.Payments = func(orgSlug string) (payments.Provider, error) {
-			org, ok := config.StripeFor(d.GetEnv, orgSlug)
-			if !ok {
-				return nil, payments.ErrNoProvider
-			}
-			return stripe.New(org.SecretKey, org.WebhookSecret), nil
-		}
+		d.Payments = defaultPayments(d.GetEnv, d.Cfg.Location)
 	}
 	if d.Billing == nil {
 		d.Billing = &billing.Service{

@@ -30,9 +30,12 @@ type Provider interface {
 	// customer for c, to be stored in contacts.provider_customer_ref.
 	EnsureCustomer(ctx context.Context, c core.Contact) (ref string, err error)
 	// SendInvoice creates, finalizes and sends a hosted invoice for inv.
-	// It returns the provider's reference (to store in
+	// today is the caller's current date (in its own timezone), used to
+	// compute the days-until-due the provider is told, since inv.DueDate
+	// was fixed at issue time and a retried send may happen later. It
+	// returns the provider's reference (to store in
 	// invoices.provider_ref) and the hosted payment page URL.
-	SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string) (ref, hostedURL string, err error)
+	SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string, today time.Time) (ref, hostedURL string, err error)
 	// VoidInvoice voids the provider-side invoice referenced by ref.
 	VoidInvoice(ctx context.Context, ref string) error
 	// ParseWebhook verifies payload's signature against sigHeader and
