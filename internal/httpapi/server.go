@@ -15,6 +15,7 @@ import (
 	"shigoto/internal/payments"
 	"shigoto/internal/payments/stripe"
 	"shigoto/internal/property"
+	"shigoto/internal/recon"
 	"shigoto/internal/timesheets"
 )
 
@@ -60,7 +61,7 @@ func defaultPayments(getenv func(string) string, loc *time.Location) func(orgSlu
 // modules lists the feature modules available to mount. Plans 2, 3 and 4
 // each append one entry. It is a package-level var (not a const slice) so
 // tests can swap it out and restore it.
-var modules = []module.Module{property.Module(), timesheets.Module()}
+var modules = []module.Module{property.Module(), timesheets.Module(), recon.Module()}
 
 // withDefaults fills in d's optional fields the way New always has:
 // GetEnv, Cfg.Location, Payments and Billing.
