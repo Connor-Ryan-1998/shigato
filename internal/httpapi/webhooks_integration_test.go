@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -410,6 +411,53 @@ func TestSendAlreadySentRejected(t *testing.T) {
 
 	if calls := fake.Calls(); len(calls) != 1 {
 		t.Fatalf("fake SendInvoice calls = %d, want 1 (no double-send)", len(calls))
+	}
+}
+
+// TestSendPastDueRejected covers finding 6: billing refuses to send an
+// invoice whose due date has passed before touching the provider at all
+// (no EnsureCustomer), and the route maps that to 409.
+func TestSendPastDueRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	contactID := webhookTestContact(t, pool, org.ID)
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	fake := &payments.Fake{Secret: webhookSecret}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	// Issued 30 days ago on a 14-day term: due 16 days ago, never sent.
+	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := core.IssueInvoice(ctx, tx, org.ID, draftID, time.Now().AddDate(0, 0, -30)); err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
+	sendReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, sendReq)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "due date has passed; void and reissue") {
+		t.Fatalf("send: status = %d body=%s, want 409 with 'due date has passed; void and reissue'", rr.Code, rr.Body.String())
+	}
+	if n := len(fake.Customers()); n != 0 {
+		t.Fatalf("EnsureCustomer calls = %d, want 0", n)
+	}
+	if n := len(fake.Calls()); n != 0 {
+		t.Fatalf("SendInvoice calls = %d, want 0", n)
 	}
 }
 

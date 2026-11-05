@@ -30,6 +30,11 @@ var ErrTooFewPayOptions = errors.New("rent and bond invoices need at least 2 pay
 // state error (409/404).
 var ErrProviderVoidFailed = errors.New("void failed with payment provider")
 
+// ErrDueDatePassed is returned when sending an invoice to the payment
+// provider after its due date: the provider would present it as already
+// overdue, so it must be voided and reissued instead.
+var ErrDueDatePassed = errors.New("due date has passed; void and reissue")
+
 // minPayOptions is the QLD rule: a rent or bond invoice needs at least this
 // many ways to pay before it can be issued.
 const minPayOptions = 2
@@ -216,7 +221,9 @@ func (s *Service) Send(ctx context.Context, orgID int64, orgSlug string, invoice
 // sends the invoice, and stores the returned provider_ref/provider_url.
 // inv is updated in place on success. Returns payments.ErrNoProvider
 // unchanged when the org has no provider configured, so callers can treat
-// that as "nothing to do" rather than a failure.
+// that as "nothing to do" rather than a failure, and ErrDueDatePassed
+// (before any provider call) once inv's due date is behind today in
+// s.Location.
 //
 // It re-reads and locks the invoice row (FOR UPDATE) before sending and
 // re-checks provider_ref there, returning core.ErrInvalidState if another
@@ -228,6 +235,14 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 	provider, err := s.Payments(orgSlug)
 	if err != nil {
 		return err
+	}
+
+	// Checked before any provider call (EnsureCustomer included); the
+	// provider's own due-date check stays as a backstop.
+	now := time.Now().In(s.loc())
+	y, m, d := now.Date()
+	if inv.DueDate != nil && inv.DueDate.Before(time.Date(y, m, d, 0, 0, 0, 0, time.UTC)) {
+		return ErrDueDatePassed
 	}
 
 	return runInTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -262,7 +277,7 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 			}
 		}
 
-		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef, time.Now().In(s.loc()))
+		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef, now)
 		if err != nil {
 			return fmt.Errorf("sending invoice: %w", err)
 		}

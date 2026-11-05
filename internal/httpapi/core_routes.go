@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -133,6 +134,17 @@ type invoiceResponse struct {
 
 const dateLayout = "2006-01-02"
 
+// invoicePayOptions narrows the org's pay options to what inv can
+// actually be paid with: an issued invoice that never reached the
+// provider (no ProviderURL) has nowhere to pay by card, so stripe is
+// dropped.
+func invoicePayOptions(inv core.Invoice, opts []string) []string {
+	if inv.Status == "draft" || inv.ProviderURL != "" {
+		return opts
+	}
+	return slices.DeleteFunc(slices.Clone(opts), func(o string) bool { return o == "stripe" })
+}
+
 func invoiceToResponse(ctx context.Context, q core.Querier, bill *billing.Service, inv core.Invoice) (invoiceResponse, error) {
 	opts, err := bill.PayOptions(ctx, q, inv.OrgID)
 	if err != nil {
@@ -142,7 +154,7 @@ func invoiceToResponse(ctx context.Context, q core.Querier, bill *billing.Servic
 	resp := invoiceResponse{
 		ID: inv.ID, ContactID: inv.ContactID, Number: inv.Number, Source: inv.Source, Status: inv.Status,
 		Currency: inv.Currency, Subtotal: int64(inv.Subtotal), GSTTotal: int64(inv.GSTTotal), Total: int64(inv.Total),
-		PaymentReference: inv.PaymentReference, PayOptions: opts, Lines: make([]lineResponse, len(inv.Lines)),
+		PaymentReference: inv.PaymentReference, PayOptions: invoicePayOptions(inv, opts), Lines: make([]lineResponse, len(inv.Lines)),
 	}
 	if inv.IssueDate != nil {
 		s := inv.IssueDate.Format(dateLayout)
@@ -208,11 +220,14 @@ func writeCoreError(w http.ResponseWriter, err error) { module.WriteCoreError(w,
 // falling back to writeCoreError for the core errors billing passes
 // through unchanged (ErrNotFound, ErrInvalidState, ...).
 func writeBillingError(w http.ResponseWriter, err error) {
-	if errors.Is(err, billing.ErrTooFewPayOptions) {
+	switch {
+	case errors.Is(err, billing.ErrTooFewPayOptions):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
-		return
+	case errors.Is(err, billing.ErrDueDatePassed):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeCoreError(w, err)
 	}
-	writeCoreError(w, err)
 }
 
 // --- contacts handlers ---
@@ -413,7 +428,7 @@ func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 			writeError(w, http.StatusUnprocessableEntity, "no payment provider configured")
 			return
 		}
-		writeCoreError(w, err)
+		writeBillingError(w, err)
 		return
 	}
 
