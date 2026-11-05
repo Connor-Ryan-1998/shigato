@@ -64,13 +64,16 @@ type Lease struct {
 	Frequency       Frequency
 	PaidToDate      *time.Time
 	OpeningArrears  core.Cents
-	BondAmount      core.Cents
-	BondInvoiceID   *int64
-	RTALodgementRef string
-	BondLodgedOn    *time.Time
-	Tenants         []LeaseTenant
-	RentChanges     []LeaseRentChange
-	Charges         []LeaseCharge
+	// OpeningArrearsInvoiceID is the draft invoice CreateLease raises for
+	// OpeningArrears, when that's positive.
+	OpeningArrearsInvoiceID *int64
+	BondAmount              core.Cents
+	BondInvoiceID           *int64
+	RTALodgementRef         string
+	BondLodgedOn            *time.Time
+	Tenants                 []LeaseTenant
+	RentChanges             []LeaseRentChange
+	Charges                 []LeaseCharge
 }
 
 // --- pure rent-period types (periods.go) ---

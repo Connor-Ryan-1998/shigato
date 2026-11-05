@@ -150,22 +150,23 @@ func chargeToResponse(c LeaseCharge) chargeResponse {
 }
 
 type leaseResponse struct {
-	ID              int64                 `json:"id"`
-	PropertyID      int64                 `json:"property_id"`
-	StartDate       string                `json:"start_date"`
-	EndDate         *string               `json:"end_date,omitempty"`
-	TerminationDate *string               `json:"termination_date,omitempty"`
-	Frequency       string                `json:"frequency"`
-	PaidToDate      *string               `json:"paid_to_date,omitempty"`
-	OpeningArrears  int64                 `json:"opening_arrears"`
-	BondAmount      int64                 `json:"bond_amount"`
-	RTALodgementRef string                `json:"rta_lodgement_ref,omitempty"`
-	BondLodgedOn    *string               `json:"bond_lodged_on,omitempty"`
-	BondStatus      string                `json:"bond_status"`
-	Warnings        []string              `json:"warnings,omitempty"`
-	Tenants         []leaseTenantResponse `json:"tenants"`
-	RentChanges     []rentChangeResponse  `json:"rent_changes"`
-	Charges         []chargeResponse      `json:"charges"`
+	ID                      int64                 `json:"id"`
+	PropertyID              int64                 `json:"property_id"`
+	StartDate               string                `json:"start_date"`
+	EndDate                 *string               `json:"end_date,omitempty"`
+	TerminationDate         *string               `json:"termination_date,omitempty"`
+	Frequency               string                `json:"frequency"`
+	PaidToDate              *string               `json:"paid_to_date,omitempty"`
+	OpeningArrears          int64                 `json:"opening_arrears"`
+	OpeningArrearsInvoiceID *int64                `json:"opening_arrears_invoice_id,omitempty"`
+	BondAmount              int64                 `json:"bond_amount"`
+	RTALodgementRef         string                `json:"rta_lodgement_ref,omitempty"`
+	BondLodgedOn            *string               `json:"bond_lodged_on,omitempty"`
+	BondStatus              string                `json:"bond_status"`
+	Warnings                []string              `json:"warnings,omitempty"`
+	Tenants                 []leaseTenantResponse `json:"tenants"`
+	RentChanges             []rentChangeResponse  `json:"rent_changes"`
+	Charges                 []chargeResponse      `json:"charges"`
 }
 
 // leaseToResponse builds l's JSON response. bondStatus and warnings come
@@ -176,12 +177,13 @@ func leaseToResponse(l Lease, bondStatus string, warnings []string) leaseRespons
 	resp := leaseResponse{
 		ID: l.ID, PropertyID: l.PropertyID, StartDate: l.StartDate.Format(dateLayout),
 		Frequency: string(l.Frequency), OpeningArrears: int64(l.OpeningArrears), BondAmount: int64(l.BondAmount),
-		RTALodgementRef: l.RTALodgementRef,
-		BondStatus:      bondStatus,
-		Warnings:        warnings,
-		Tenants:         make([]leaseTenantResponse, len(l.Tenants)),
-		RentChanges:     make([]rentChangeResponse, len(l.RentChanges)),
-		Charges:         make([]chargeResponse, len(l.Charges)),
+		OpeningArrearsInvoiceID: l.OpeningArrearsInvoiceID,
+		RTALodgementRef:         l.RTALodgementRef,
+		BondStatus:              bondStatus,
+		Warnings:                warnings,
+		Tenants:                 make([]leaseTenantResponse, len(l.Tenants)),
+		RentChanges:             make([]rentChangeResponse, len(l.RentChanges)),
+		Charges:                 make([]chargeResponse, len(l.Charges)),
 	}
 	if l.EndDate != nil {
 		s := l.EndDate.Format(dateLayout)
@@ -575,6 +577,7 @@ type ledgerResponse struct {
 	Periods        []ledgerPeriodResponse `json:"periods"`
 	OpeningArrears int64                  `json:"opening_arrears"`
 	Arrears        int64                  `json:"arrears"`
+	InvoicedNotDue int64                  `json:"invoiced_not_due"`
 	Unissued       int64                  `json:"unissued"`
 }
 
@@ -583,6 +586,7 @@ func ledgerToResponse(l Ledger) ledgerResponse {
 		Periods:        make([]ledgerPeriodResponse, len(l.Periods)),
 		OpeningArrears: int64(l.OpeningArrears),
 		Arrears:        int64(l.Arrears),
+		InvoicedNotDue: int64(l.InvoicedNotDue),
 		Unissued:       int64(l.Unissued),
 	}
 	for i, p := range l.Periods {
@@ -602,7 +606,7 @@ func getLedger(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		return
 	}
 	p := auth.From(r.Context())
-	ledger, err := GetLedger(r.Context(), d.Pool, p.OrgID, leaseID)
+	ledger, err := GetLedger(r.Context(), d.Pool, p.OrgID, leaseID, today(d))
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return

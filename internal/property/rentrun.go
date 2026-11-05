@@ -284,33 +284,73 @@ type LedgerPeriod struct {
 }
 
 // Ledger is a lease's full rent ledger: every rent period recorded against
-// it, plus the running arrears figure.
+// it, plus the running arrears figures as of a given day.
 type Ledger struct {
-	Periods        []LedgerPeriod
+	Periods []LedgerPeriod
+	// OpeningArrears is what's still outstanding on the lease's
+	// opening-arrears invoice (its total while still a draft; 0 if it has
+	// none or it was voided).
 	OpeningArrears core.Cents
-	Arrears        core.Cents
-	// Unissued is the total amount_due of periods whose invoice is still
-	// a draft - most often a failed auto-issue (see rent_issue_failed)
-	// that needs manual attention, since it isn't counted in Arrears and
-	// would otherwise be invisible on the ledger.
+	// Arrears is the outstanding balance of every issued invoice whose
+	// due date has passed.
+	Arrears core.Cents
+	// InvoicedNotDue is the outstanding balance of open invoices not yet
+	// due.
+	InvoicedNotDue core.Cents
+	// Unissued is the total of invoices still a draft - most often a
+	// failed auto-issue (see rent_issue_failed) that needs manual
+	// attention, since it isn't counted in Arrears and would otherwise be
+	// invisible on the ledger.
 	Unissued core.Cents
 }
 
-// GetLedger builds leaseID's ledger, scoped to orgID. Arrears is the
-// lease's opening_arrears plus the outstanding balance of every period
-// whose invoice is open or paid (void and draft periods don't count), each
-// floored at 0 so a period that's been overpaid can't offset arrears owed
-// on another. Unissued periods (draft invoices) are reported separately,
-// not folded into Arrears, since they haven't actually been billed yet.
-func GetLedger(ctx context.Context, q core.Querier, orgID, leaseID int64) (Ledger, error) {
+// add folds one invoice (status, due date, amount and payments against it)
+// into l's totals as of today. Outstanding is floored at 0 so an overpaid
+// invoice can't offset arrears owed on another; void invoices don't count.
+func (l *Ledger) add(status string, dueDate *time.Time, amount, paid core.Cents, today time.Time) core.Cents {
+	outstanding := max(amount-paid, 0)
+	switch {
+	case status == "draft":
+		l.Unissued += amount
+		return amount
+	case status != "open" && status != "paid":
+		return 0
+	case dueDate != nil && dueDate.Before(today):
+		l.Arrears += outstanding
+	case status == "open":
+		l.InvoicedNotDue += outstanding
+	}
+	return outstanding
+}
+
+// GetLedger builds leaseID's ledger as of today (a UTC-midnight calendar
+// date), scoped to orgID: its rent periods plus its opening-arrears
+// invoice, each classified by Ledger.add.
+func GetLedger(ctx context.Context, q core.Querier, orgID, leaseID int64, today time.Time) (Ledger, error) {
 	lease, err := GetLease(ctx, q, orgID, leaseID)
 	if err != nil {
 		return Ledger{}, err
 	}
 
+	var ledger Ledger
+	if lease.OpeningArrearsInvoiceID != nil {
+		var status string
+		var dueDate *time.Time
+		var total, paid int64
+		if err := q.QueryRow(ctx, `
+			SELECT i.status, i.due_date, i.total,
+				coalesce((SELECT sum(amount) FROM payments WHERE org_id = $1 AND invoice_id = i.id), 0)
+			FROM invoices i WHERE i.org_id = $1 AND i.id = $2`,
+			orgID, *lease.OpeningArrearsInvoiceID,
+		).Scan(&status, &dueDate, &total, &paid); err != nil {
+			return Ledger{}, err
+		}
+		ledger.OpeningArrears = ledger.add(status, dueDate, core.Cents(total), core.Cents(paid), today)
+	}
+
 	rows, err := q.Query(ctx, `
 		SELECT rp.period_start, rp.period_end, rp.amount_due, rp.invoice_id,
-			coalesce(i.status, ''), coalesce(pay.paid, 0)
+			coalesce(i.status, ''), i.due_date, coalesce(pay.paid, 0)
 		FROM rent_periods rp
 		LEFT JOIN invoices i ON i.org_id = rp.org_id AND i.id = rp.invoice_id
 		LEFT JOIN (
@@ -325,26 +365,17 @@ func GetLedger(ctx context.Context, q core.Querier, orgID, leaseID int64) (Ledge
 	}
 	defer rows.Close()
 
-	ledger := Ledger{OpeningArrears: lease.OpeningArrears, Arrears: lease.OpeningArrears}
 	for rows.Next() {
 		var lp LedgerPeriod
+		var dueDate *time.Time
 		var amountDue, paid int64
-		if err := rows.Scan(&lp.Start, &lp.End, &amountDue, &lp.InvoiceID, &lp.InvoiceStatus, &paid); err != nil {
+		if err := rows.Scan(&lp.Start, &lp.End, &amountDue, &lp.InvoiceID, &lp.InvoiceStatus, &dueDate, &paid); err != nil {
 			return Ledger{}, err
 		}
 		lp.AmountDue = core.Cents(amountDue)
 		lp.Paid = core.Cents(paid)
 		ledger.Periods = append(ledger.Periods, lp)
-
-		switch lp.InvoiceStatus {
-		case "open", "paid":
-			outstanding := lp.AmountDue - lp.Paid
-			if outstanding > 0 {
-				ledger.Arrears += outstanding
-			}
-		case "draft":
-			ledger.Unissued += lp.AmountDue
-		}
+		ledger.add(lp.InvoiceStatus, dueDate, lp.AmountDue, lp.Paid, today)
 	}
 	if err := rows.Err(); err != nil {
 		return Ledger{}, err

@@ -111,7 +111,10 @@ type NewLease struct {
 
 // CreateLease validates in (exactly one primary tenant, every tenant a
 // tenant-kind contact in orgID, a positive rent amount), then inserts the
-// lease, its tenants and the initial rent change (dated StartDate). It does
+// lease, its tenants and the initial rent change (dated StartDate). If
+// OpeningArrears is positive it also creates a draft "Opening arrears" rent
+// invoice to the primary tenant, due on StartDate, and links it as
+// opening_arrears_invoice_id; it is issued like any other draft. It does
 // not start its own transaction: pass a tx if the caller needs the inserts
 // to roll back together.
 func CreateLease(ctx context.Context, q core.Querier, orgID int64, in NewLease) (Lease, error) {
@@ -147,7 +150,8 @@ func CreateLease(ctx context.Context, q core.Querier, orgID int64, in NewLease) 
 	if in.PaidToDate != nil && !validPeriodEnd(in.StartDate, in.Frequency, *in.PaidToDate) {
 		return Lease{}, fmt.Errorf("%w: paid_to_date must be the last day of a rent period", core.ErrInvalidInput)
 	}
-	if _, err := GetProperty(ctx, q, orgID, in.PropertyID); err != nil {
+	prop, err := GetProperty(ctx, q, orgID, in.PropertyID)
+	if err != nil {
 		if errors.Is(err, core.ErrNotFound) {
 			return Lease{}, fmt.Errorf("%w: property_id not found", core.ErrInvalidInput)
 		}
@@ -167,7 +171,7 @@ func CreateLease(ctx context.Context, q core.Querier, orgID int64, in NewLease) 
 	}
 
 	var leaseID int64
-	err := q.QueryRow(ctx, `
+	err = q.QueryRow(ctx, `
 		INSERT INTO leases (org_id, property_id, start_date, end_date, frequency, paid_to_date, opening_arrears, bond_amount)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`,
@@ -194,7 +198,47 @@ func CreateLease(ctx context.Context, q core.Querier, orgID int64, in NewLease) 
 		return Lease{}, err
 	}
 
+	if in.OpeningArrears > 0 {
+		if err := createOpeningArrearsInvoice(ctx, q, orgID, leaseID, prop, in); err != nil {
+			return Lease{}, err
+		}
+	}
+
 	return GetLease(ctx, q, orgID, leaseID)
+}
+
+// createOpeningArrearsInvoice creates in's opening-arrears draft invoice
+// for leaseID (GST code per the rent rule for prop) and stamps it on the
+// lease.
+func createOpeningArrearsInvoice(ctx context.Context, q core.Querier, orgID, leaseID int64, prop Property, in NewLease) error {
+	settings, err := core.GetSettings(ctx, q, orgID)
+	if err != nil {
+		return err
+	}
+	var primaryContactID int64
+	for _, t := range in.Tenants {
+		if t.Primary {
+			primaryContactID = t.ContactID
+		}
+	}
+	dueOn := in.StartDate
+	inv, err := core.CreateDraftInvoice(ctx, q, orgID, core.NewInvoice{
+		ContactID: primaryContactID,
+		Source:    "rent",
+		DueOn:     &dueOn,
+		Lines: []core.NewLine{{
+			Description:   "Opening arrears",
+			QuantityMilli: 1000,
+			UnitAmount:    in.OpeningArrears,
+			GSTCode:       string(gstCodeForRent(prop.Residential, settings.GSTRegistered)),
+			PropertyID:    &prop.ID,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = q.Exec(ctx, `UPDATE leases SET opening_arrears_invoice_id = $1 WHERE org_id = $2 AND id = $3`, inv.ID, orgID, leaseID)
+	return err
 }
 
 // GetLease looks up a lease and its tenants, rent changes and charges by id,
@@ -205,11 +249,12 @@ func GetLease(ctx context.Context, q core.Querier, orgID, id int64) (Lease, erro
 	var frequency string
 	err := q.QueryRow(ctx, `
 		SELECT id, org_id, property_id, start_date, end_date, termination_date, frequency,
-			paid_to_date, opening_arrears, bond_amount, bond_invoice_id,
+			paid_to_date, opening_arrears, opening_arrears_invoice_id, bond_amount, bond_invoice_id,
 			coalesce(rta_lodgement_ref,''), bond_lodged_on
 		FROM leases WHERE org_id = $1 AND id = $2`, orgID, id,
 	).Scan(&l.ID, &l.OrgID, &l.PropertyID, &l.StartDate, &l.EndDate, &l.TerminationDate, &frequency,
-		&l.PaidToDate, &l.OpeningArrears, &l.BondAmount, &l.BondInvoiceID, &l.RTALodgementRef, &l.BondLodgedOn)
+		&l.PaidToDate, &l.OpeningArrears, &l.OpeningArrearsInvoiceID, &l.BondAmount, &l.BondInvoiceID,
+		&l.RTALodgementRef, &l.BondLodgedOn)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, core.ErrNotFound
 	}

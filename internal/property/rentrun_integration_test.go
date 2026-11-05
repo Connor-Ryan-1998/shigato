@@ -261,7 +261,7 @@ func TestRunRentAutoSendFailsWithoutPayOptions(t *testing.T) {
 		t.Fatalf("audit diff = %s, want it to contain too_few_pay_options", diff)
 	}
 
-	ledger, err := GetLedger(ctx, pool, org.ID, lease.ID)
+	ledger, err := GetLedger(ctx, pool, org.ID, lease.ID, asOf)
 	if err != nil {
 		t.Fatalf("GetLedger: %v", err)
 	}
@@ -270,13 +270,33 @@ func TestRunRentAutoSendFailsWithoutPayOptions(t *testing.T) {
 	}
 }
 
+// issueAt issues draft invoiceID with an explicit issue date, so a test's
+// due dates don't depend on the wall clock.
+func issueAt(t *testing.T, pool *pgxpool.Pool, orgID, invoiceID int64, on time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := core.IssueInvoice(ctx, tx, orgID, invoiceID, on); err != nil {
+		t.Fatalf("IssueInvoice(%d): %v", invoiceID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// TestLedgerArrears covers Ruling 20/21: arrears is only what's past due,
+// invoiced-but-not-yet-due is reported separately, and opening arrears is
+// a real invoice whose outstanding balance (not the static figure) counts.
 func TestLedgerArrears(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
 	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	setOrgLeadAndAutoSend(t, pool, org.ID, 7, true)
-	setOrgPayOptions(t, pool, org.ID)
+	propertyID := testProperty(t, pool, org.ID) // residential
+	setOrgLeadAndAutoSend(t, pool, org.ID, 7, false)
 
 	asOf := mustDate(t, "2026-11-05")
 	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
@@ -288,35 +308,104 @@ func TestLedgerArrears(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateLease: %v", err)
 	}
-
-	result, err := RunRent(ctx, testService(pool), org.ID, "acme", asOf)
+	if lease.OpeningArrearsInvoiceID == nil {
+		t.Fatalf("OpeningArrearsInvoiceID = nil, want a draft invoice")
+	}
+	opening, err := core.GetInvoice(ctx, pool, org.ID, *lease.OpeningArrearsInvoiceID)
 	if err != nil {
+		t.Fatalf("GetInvoice(opening): %v", err)
+	}
+	if opening.Status != "draft" || opening.Source != "rent" || opening.ContactID != tenantID ||
+		opening.DueOn == nil || !opening.DueOn.Equal(asOf) || len(opening.Lines) != 1 ||
+		opening.Lines[0].Description != "Opening arrears" || opening.Lines[0].GSTCode != core.INP || opening.Total != 10000 {
+		t.Fatalf("opening arrears invoice = %+v, want a 10000 draft rent invoice to the tenant, due on start, one INP line", opening)
+	}
+	var linePropertyID *int64
+	if err := pool.QueryRow(ctx, "SELECT property_id FROM invoice_lines WHERE org_id = $1 AND invoice_id = $2", org.ID, opening.ID).Scan(&linePropertyID); err != nil {
+		t.Fatalf("selecting line property_id: %v", err)
+	}
+	if linePropertyID == nil || *linePropertyID != propertyID {
+		t.Fatalf("line property_id = %v, want %d", linePropertyID, propertyID)
+	}
+
+	if _, err := RunRent(ctx, testService(pool), org.ID, "acme", asOf); err != nil {
 		t.Fatalf("RunRent: %v", err)
 	}
-	if result.Created != 2 || result.Issued != 2 {
-		t.Fatalf("result = %+v, want Created=2 Issued=2", result)
-	}
 
-	ledger, err := GetLedger(ctx, pool, org.ID, lease.ID)
+	ledger, err := GetLedger(ctx, pool, org.ID, lease.ID, asOf)
 	if err != nil {
 		t.Fatalf("GetLedger: %v", err)
 	}
-	if len(ledger.Periods) != 2 || ledger.Periods[0].InvoiceID == nil {
+	if len(ledger.Periods) != 2 || ledger.Periods[0].InvoiceID == nil || ledger.Periods[1].InvoiceID == nil {
 		t.Fatalf("Periods = %+v, want 2 periods each with an invoice", ledger.Periods)
 	}
+	if ledger.Arrears != 0 || ledger.Unissued != 110000 || ledger.OpeningArrears != 10000 {
+		t.Fatalf("all-draft ledger = %+v, want Arrears 0, Unissued 110000, OpeningArrears 10000", ledger)
+	}
 
+	// Issue everything on asOf: period 0 and opening arrears due 11-05,
+	// period 1 due 11-12.
+	for _, id := range []int64{*ledger.Periods[0].InvoiceID, *ledger.Periods[1].InvoiceID, opening.ID} {
+		issueAt(t, pool, org.ID, id, asOf)
+	}
 	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
 		InvoiceID: *ledger.Periods[0].InvoiceID, Amount: 50000, PaidOn: asOf, Method: "bank_transfer",
 	}); err != nil {
 		t.Fatalf("RecordPayment: %v", err)
 	}
 
-	ledger, err = GetLedger(ctx, pool, org.ID, lease.ID)
+	// On its due date nothing is in arrears yet.
+	ledger, err = GetLedger(ctx, pool, org.ID, lease.ID, asOf)
 	if err != nil {
-		t.Fatalf("GetLedger (after payment): %v", err)
+		t.Fatalf("GetLedger(due date): %v", err)
 	}
-	if ledger.Arrears != 60000 {
-		t.Fatalf("Arrears = %d, want 60000", ledger.Arrears)
+	if ledger.Arrears != 0 || ledger.InvoicedNotDue != 60000 || ledger.Unissued != 0 {
+		t.Fatalf("on due date: %+v, want Arrears 0, InvoicedNotDue 60000, Unissued 0", ledger)
+	}
+
+	// The day after: opening arrears is overdue, period 1 is not yet due.
+	notYetDue := mustDate(t, "2026-11-06")
+	ledger, err = GetLedger(ctx, pool, org.ID, lease.ID, notYetDue)
+	if err != nil {
+		t.Fatalf("GetLedger(not yet due): %v", err)
+	}
+	if ledger.Arrears != 10000 || ledger.InvoicedNotDue != 50000 {
+		t.Fatalf("not yet due: Arrears/InvoicedNotDue = %d/%d, want 10000/50000", ledger.Arrears, ledger.InvoicedNotDue)
+	}
+
+	// Paying part of the opening arrears reduces arrears.
+	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
+		InvoiceID: opening.ID, Amount: 4000, PaidOn: notYetDue, Method: "bank_transfer",
+	}); err != nil {
+		t.Fatalf("RecordPayment(opening): %v", err)
+	}
+	ledger, err = GetLedger(ctx, pool, org.ID, lease.ID, notYetDue)
+	if err != nil {
+		t.Fatalf("GetLedger(after part payment): %v", err)
+	}
+	if ledger.Arrears != 6000 || ledger.OpeningArrears != 6000 {
+		t.Fatalf("after part payment: Arrears/OpeningArrears = %d/%d, want 6000/6000", ledger.Arrears, ledger.OpeningArrears)
+	}
+
+	// Once period 1's due date passes, it's in arrears too.
+	ledger, err = GetLedger(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-11-13"))
+	if err != nil {
+		t.Fatalf("GetLedger(overdue): %v", err)
+	}
+	if ledger.Arrears != 56000 || ledger.InvoicedNotDue != 0 {
+		t.Fatalf("overdue: Arrears/InvoicedNotDue = %d/%d, want 56000/0", ledger.Arrears, ledger.InvoicedNotDue)
+	}
+}
+
+func TestCreateLeaseNoOpeningArrearsNoInvoice(t *testing.T) {
+	pool := db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+	lease := testWeeklyLease(t, pool, org.ID, testProperty(t, pool, org.ID), mustDate(t, "2026-11-05"), 50000, nil)
+	if lease.OpeningArrearsInvoiceID != nil {
+		t.Fatalf("OpeningArrearsInvoiceID = %d, want nil with no opening arrears", *lease.OpeningArrearsInvoiceID)
+	}
+	if got := rentInvoiceCount(t, pool, org.ID); got != 0 {
+		t.Fatalf("rent invoices = %d, want 0", got)
 	}
 }
 
