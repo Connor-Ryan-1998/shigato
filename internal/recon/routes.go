@@ -3,8 +3,11 @@ package recon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,6 +53,45 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 	mux.Handle("GET /api/v1/orgs/{org}/bank-lines",
 		d.Auth.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			listBankLinesHandler(w, r, d)
+		})))
+
+	mux.Handle("POST /api/v1/orgs/{org}/categories",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createCategoryHandler(w, r, d)
+		})))
+	mux.Handle("GET /api/v1/orgs/{org}/categories",
+		d.Auth.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			listCategoriesHandler(w, r, d)
+		})))
+	mux.Handle("PUT /api/v1/orgs/{org}/categories/{id}",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			updateCategoryHandler(w, r, d)
+		})))
+
+	mux.Handle("POST /api/v1/orgs/{org}/files",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			uploadFileHandler(w, r, d)
+		})))
+	mux.Handle("GET /api/v1/orgs/{org}/files/{id}",
+		d.Auth.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			downloadFileHandler(w, r, d)
+		})))
+
+	mux.Handle("POST /api/v1/orgs/{org}/expenses",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createExpenseHandler(w, r, d)
+		})))
+	mux.Handle("GET /api/v1/orgs/{org}/expenses",
+		d.Auth.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			listExpensesHandler(w, r, d)
+		})))
+	mux.Handle("GET /api/v1/orgs/{org}/expenses/{id}",
+		d.Auth.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			getExpenseHandler(w, r, d)
+		})))
+	mux.Handle("DELETE /api/v1/orgs/{org}/expenses/{id}",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			deleteExpenseHandler(w, r, d)
 		})))
 }
 
@@ -248,4 +290,426 @@ func listBankLinesHandler(w http.ResponseWriter, r *http.Request, d module.Deps)
 		resp[i] = bankLineToResponse(l)
 	}
 	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+// --- categories ---
+
+// categoryRequest is both the create body and the strict-PUT update body:
+// every field is given on every call, so a PUT fully replaces the row.
+type categoryRequest struct {
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	DefaultGSTCode string `json:"default_gst_code,omitempty"`
+	Capital        bool   `json:"capital"`
+}
+
+type categoryResponse struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	DefaultGSTCode string `json:"default_gst_code,omitempty"`
+	Capital        bool   `json:"capital"`
+}
+
+func categoryToResponse(c Category) categoryResponse {
+	return categoryResponse{ID: c.ID, Name: c.Name, Type: c.Type, DefaultGSTCode: string(c.DefaultGSTCode), Capital: c.Capital}
+}
+
+func createCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	var body categoryRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	p := auth.From(r.Context())
+	var created Category
+	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		created, err = CreateCategory(r.Context(), tx, p.OrgID, body.Name, body.Type, core.GSTCode(body.DefaultGSTCode), body.Capital)
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "category", created.ID, "create", body)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, categoryToResponse(created))
+}
+
+func listCategoriesHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	p := auth.From(r.Context())
+	categories, err := ListCategories(r.Context(), d.Pool, p.OrgID)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	resp := make([]categoryResponse, len(categories))
+	for i, c := range categories {
+		resp[i] = categoryToResponse(c)
+	}
+	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+func updateCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body categoryRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	p := auth.From(r.Context())
+	var updated Category
+	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		updated, err = UpdateCategory(r.Context(), tx, p.OrgID, id, body.Name, body.Type, core.GSTCode(body.DefaultGSTCode), body.Capital)
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "category", updated.ID, "update", body)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, categoryToResponse(updated))
+}
+
+// --- files ---
+
+// sanitizeFilename strips characters that would break or hijack the
+// Content-Disposition header (quotes, CR/LF header injection, and path
+// separators, in case a client ever reads this value as a path), falling
+// back to "receipt" if nothing usable remains.
+func sanitizeFilename(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch r {
+		case '"', '\r', '\n', '/', '\\':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	s := strings.TrimSpace(b.String())
+	if s == "" {
+		return "receipt"
+	}
+	return s
+}
+
+type fileResponse struct {
+	ID           int64  `json:"id"`
+	MIME         string `json:"mime"`
+	SizeBytes    int    `json:"size_bytes"`
+	OriginalName string `json:"original_name"`
+}
+
+func fileToResponse(f File) fileResponse {
+	return fileResponse{ID: f.ID, MIME: f.MIME, SizeBytes: f.SizeBytes, OriginalName: f.OriginalName}
+}
+
+// uploadFileHandler handles the multipart receipt upload. The request body
+// is capped at maxFileBytes via http.MaxBytesReader; exceeding it gives
+// 413, checked both at ParseMultipartForm (a declared-too-large body) and
+// around SaveFile (a streamed body that only trips the limit while being
+// read), rather than folding either into the generic 422/500 paths.
+func uploadFileHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes)
+	if err := r.ParseMultipartForm(maxFileBytes); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			module.WriteError(w, http.StatusRequestEntityTooLarge, "file too large")
+			return
+		}
+		module.WriteError(w, http.StatusBadRequest, "invalid multipart body")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "file is required")
+		return
+	}
+	defer file.Close()
+
+	p := auth.From(r.Context())
+	var created File
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		created, err = SaveFile(r.Context(), tx, p.OrgID, d.Cfg.FilesDir, header.Filename, file)
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "file", created.ID, "create", map[string]any{
+			"mime": created.MIME, "size_bytes": created.SizeBytes,
+		})
+	})
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			module.WriteError(w, http.StatusRequestEntityTooLarge, "file too large")
+			return
+		}
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, fileToResponse(created))
+}
+
+// downloadFileHandler streams the file's bytes with its stored (sniffed)
+// MIME type. X-Content-Type-Options: nosniff stops a browser from
+// second-guessing that type from the content; Content-Disposition forces a
+// download using the sanitized original name rather than the server path.
+func downloadFileHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	f, err := GetFile(r.Context(), d.Pool, p.OrgID, id)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	stored, err := os.Open(f.StoredPath(d.Cfg.FilesDir))
+	if err != nil {
+		module.WriteCoreError(w, fmt.Errorf("opening stored file: %w", err))
+		return
+	}
+	defer stored.Close()
+
+	w.Header().Set("Content-Type", f.MIME)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(f.OriginalName)+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, stored)
+}
+
+// --- expenses ---
+
+type expenseLineRequest struct {
+	CategoryID int64   `json:"category_id"`
+	Amount     int64   `json:"amount"`
+	GSTCode    *string `json:"gst_code,omitempty"`
+	PropertyID *int64  `json:"property_id,omitempty"`
+	ProjectID  *int64  `json:"project_id,omitempty"`
+}
+
+type expenseRequest struct {
+	SpentOn           string               `json:"spent_on"`
+	SupplierContactID *int64               `json:"supplier_contact_id,omitempty"`
+	Description       string               `json:"description"`
+	ReceiptFileID     *int64               `json:"receipt_file_id,omitempty"`
+	Lines             []expenseLineRequest `json:"lines"`
+}
+
+func (body expenseRequest) toNewExpense() (NewExpense, error) {
+	spentOn, err := parseDate(body.SpentOn)
+	if err != nil {
+		return NewExpense{}, fmt.Errorf("%w: spent_on must be YYYY-MM-DD", core.ErrInvalidInput)
+	}
+
+	lines := make([]NewExpenseLine, len(body.Lines))
+	for i, l := range body.Lines {
+		var code *core.GSTCode
+		if l.GSTCode != nil {
+			parsed, err := core.ParseGSTCode(*l.GSTCode)
+			if err != nil {
+				return NewExpense{}, fmt.Errorf("%w: line %d: %v", core.ErrInvalidInput, i, err)
+			}
+			code = &parsed
+		}
+		lines[i] = NewExpenseLine{
+			CategoryID: l.CategoryID, Amount: core.Cents(l.Amount), GSTCode: code,
+			PropertyID: l.PropertyID, ProjectID: l.ProjectID,
+		}
+	}
+
+	return NewExpense{
+		SpentOn: spentOn, SupplierContactID: body.SupplierContactID,
+		Description: body.Description, ReceiptFileID: body.ReceiptFileID, Lines: lines,
+	}, nil
+}
+
+type expenseLineResponse struct {
+	ID         int64  `json:"id"`
+	CategoryID int64  `json:"category_id"`
+	Amount     int64  `json:"amount"`
+	GSTCode    string `json:"gst_code"`
+	GSTAmount  int64  `json:"gst_amount"`
+	PropertyID *int64 `json:"property_id,omitempty"`
+	ProjectID  *int64 `json:"project_id,omitempty"`
+}
+
+type expenseResponse struct {
+	ID                int64                 `json:"id"`
+	SpentOn           string                `json:"spent_on"`
+	SupplierContactID *int64                `json:"supplier_contact_id,omitempty"`
+	Description       string                `json:"description"`
+	ReceiptFileID     *int64                `json:"receipt_file_id,omitempty"`
+	BankLineID        *int64                `json:"bank_line_id,omitempty"`
+	Total             int64                 `json:"total"`
+	Lines             []expenseLineResponse `json:"lines"`
+}
+
+func expenseToResponse(e Expense) expenseResponse {
+	lines := make([]expenseLineResponse, len(e.Lines))
+	var total core.Cents
+	for i, l := range e.Lines {
+		lines[i] = expenseLineResponse{
+			ID: l.ID, CategoryID: l.CategoryID, Amount: int64(l.Amount),
+			GSTCode: string(l.GSTCode), GSTAmount: int64(l.GSTAmount),
+			PropertyID: l.PropertyID, ProjectID: l.ProjectID,
+		}
+		total += l.Amount
+	}
+	return expenseResponse{
+		ID: e.ID, SpentOn: e.SpentOn.Format(dateLayout), SupplierContactID: e.SupplierContactID,
+		Description: e.Description, ReceiptFileID: e.ReceiptFileID, BankLineID: e.BankLineID,
+		Total: int64(total), Lines: lines,
+	}
+}
+
+type createExpenseResponse struct {
+	expenseResponse
+	Warnings []string `json:"warnings"`
+}
+
+func createExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	var body expenseRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	in, err := body.toNewExpense()
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+
+	p := auth.From(r.Context())
+	var created Expense
+	var warnings []string
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		created, warnings, err = CreateExpense(r.Context(), tx, p.OrgID, in)
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "expense", created.ID, "create", body)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusCreated, createExpenseResponse{expenseResponse: expenseToResponse(created), Warnings: warnings})
+}
+
+func getExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	e, err := GetExpense(r.Context(), d.Pool, p.OrgID, id)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, expenseToResponse(e))
+}
+
+func listExpensesHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	q := r.URL.Query()
+	var filter ExpenseFilter
+
+	if s := q.Get("from"); s != "" {
+		t, err := parseDate(s)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "from must be YYYY-MM-DD")
+			return
+		}
+		filter.From = &t
+	}
+	if s := q.Get("to"); s != "" {
+		t, err := parseDate(s)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "to must be YYYY-MM-DD")
+			return
+		}
+		filter.To = &t
+	}
+	if s := q.Get("category_id"); s != "" {
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "category_id must be an integer")
+			return
+		}
+		filter.CategoryID = &id
+	}
+	if s := q.Get("property_id"); s != "" {
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "property_id must be an integer")
+			return
+		}
+		filter.PropertyID = &id
+	}
+	if s := q.Get("project_id"); s != "" {
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "project_id must be an integer")
+			return
+		}
+		filter.ProjectID = &id
+	}
+	if s := q.Get("unlinked"); s != "" {
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			module.WriteError(w, http.StatusUnprocessableEntity, "unlinked must be a boolean")
+			return
+		}
+		filter.Unlinked = v
+	}
+
+	p := auth.From(r.Context())
+	expenses, err := ListExpenses(r.Context(), d.Pool, p.OrgID, filter)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	resp := make([]expenseResponse, len(expenses))
+	for i, e := range expenses {
+		resp[i] = expenseToResponse(e)
+	}
+	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+func deleteExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		if err := DeleteExpense(r.Context(), tx, p.OrgID, id); err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "expense", id, "delete", nil)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

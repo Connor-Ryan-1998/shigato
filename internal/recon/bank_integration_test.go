@@ -55,12 +55,13 @@ func testBankAccount(t *testing.T, pool *pgxpool.Pool, orgID int64, name string,
 	return a
 }
 
-func newReconTestHandler(pool *pgxpool.Pool, enabled bool) http.Handler {
+func newReconTestHandler(t *testing.T, pool *pgxpool.Pool, enabled bool) http.Handler {
+	t.Helper()
 	a := auth.New(pool, false)
 	return httpapi.New(httpapi.Deps{
 		Pool:   pool,
 		Auth:   a,
-		Cfg:    config.Config{Modules: map[string]bool{"reconciliation": enabled}},
+		Cfg:    config.Config{Modules: map[string]bool{"reconciliation": enabled}, FilesDir: t.TempDir()},
 		GetEnv: func(string) string { return "" },
 	})
 }
@@ -93,7 +94,7 @@ func reconTestSetup(t *testing.T) (pool *pgxpool.Pool, handler http.Handler, tok
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	return pool, newReconTestHandler(pool, true), token, org.ID
+	return pool, newReconTestHandler(t, pool, true), token, org.ID
 }
 
 // uploadCSV POSTs csv as a multipart "file" upload to
@@ -249,7 +250,7 @@ func TestImportTooLarge413(t *testing.T) {
 
 func TestReconModuleDisabled404(t *testing.T) {
 	pool, _, token, _ := reconTestSetup(t)
-	handler := newReconTestHandler(pool, false)
+	handler := newReconTestHandler(t, pool, false)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/bank-accounts", nil)
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()

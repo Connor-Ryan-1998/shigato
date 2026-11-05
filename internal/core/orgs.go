@@ -32,7 +32,8 @@ type Org struct {
 	Name string
 }
 
-// CreateOrg inserts a new org and returns it.
+// CreateOrg inserts a new org, seeds its default expense categories, and
+// returns it.
 func CreateOrg(ctx context.Context, q Querier, slug, name string) (Org, error) {
 	var org Org
 	err := q.QueryRow(ctx,
@@ -42,7 +43,58 @@ func CreateOrg(ctx context.Context, q Querier, slug, name string) (Org, error) {
 	if err != nil {
 		return Org{}, fmt.Errorf("creating org %q: %w", slug, err)
 	}
+	if err := SeedDefaultCategories(ctx, q, org.ID); err != nil {
+		return Org{}, fmt.Errorf("seeding default categories for org %q: %w", slug, err)
+	}
 	return org, nil
+}
+
+// defaultExpenseCategory is one row of defaultExpenseCategories.
+type defaultExpenseCategory struct {
+	Name    string
+	GSTCode GSTCode
+	Capital bool
+}
+
+// defaultExpenseCategories lists the 15 default expense categories every
+// org gets, editable afterwards. Kept here (rather than in recon, which
+// owns the Category type) so CreateOrg can seed them without recon
+// importing core, and core importing recon, forming a cycle.
+var defaultExpenseCategories = []defaultExpenseCategory{
+	{"Repairs & maintenance", GST, false},
+	{"Insurance", GST, false},
+	{"Council rates", NT, false},
+	{"Water", FRE, false},
+	{"Strata / body corporate", GST, false},
+	{"Agent & advertising fees", GST, false},
+	{"Loan interest", INP, false},
+	{"Bank fees", INP, false},
+	{"Stripe fees", GST, false},
+	{"Software & subscriptions", GST, false},
+	{"Accounting & legal", GST, false},
+	{"Travel", GST, false},
+	{"Office & supplies", GST, false},
+	{"Equipment", GST, true},
+	{"Other expenses", GST, false},
+}
+
+// SeedDefaultCategories inserts orgID's default expense categories,
+// skipping any that already exist by name (ON CONFLICT DO NOTHING), so it's
+// safe to call more than once - e.g. against orgs created before this
+// migration, from 0009_expenses.sql's own seeding SQL, and again here for
+// newly created orgs.
+func SeedDefaultCategories(ctx context.Context, q Querier, orgID int64) error {
+	for _, c := range defaultExpenseCategories {
+		if _, err := q.Exec(ctx, `
+			INSERT INTO categories (org_id, name, type, default_gst_code, capital)
+			VALUES ($1, $2, 'expense', $3, $4)
+			ON CONFLICT (org_id, name) DO NOTHING`,
+			orgID, c.Name, string(c.GSTCode), c.Capital,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // OrgBySlug looks up an org by slug. It returns ErrNotFound if no org has
