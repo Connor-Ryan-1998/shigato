@@ -517,3 +517,55 @@ func TestRunRentRebillsVoidedPeriod(t *testing.T) {
 		t.Fatalf("third run Created = %d, want 0", again.Created)
 	}
 }
+
+// TestRunRentRebillsVoidedDraftPeriod covers Ruling 28: core.VoidInvoice now
+// accepts a 'draft' invoice (not just 'open'), and a voided *draft* rent
+// invoice must stay reclaimable by RunRent, the same way a voided open one
+// already is.
+func TestRunRentRebillsVoidedDraftPeriod(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	propertyID := testProperty(t, pool, org.ID)
+	setOrgLeadAndAutoSend(t, pool, org.ID, 0, false) // one period per run, left as a draft
+
+	asOf := mustDate(t, "2026-11-05")
+	lease := testWeeklyLease(t, pool, org.ID, propertyID, asOf, 50000, nil)
+	b := testService(pool)
+
+	if _, err := RunRent(ctx, b, org.ID, "acme", asOf); err != nil {
+		t.Fatalf("RunRent: %v", err)
+	}
+	var draftID int64
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT rp.invoice_id, i.status FROM rent_periods rp JOIN invoices i ON i.org_id = rp.org_id AND i.id = rp.invoice_id WHERE rp.lease_id = $1`,
+		lease.ID,
+	).Scan(&draftID, &status); err != nil {
+		t.Fatalf("selecting period invoice: %v", err)
+	}
+	if status != "draft" {
+		t.Fatalf("precondition: period invoice status = %q, want draft", status)
+	}
+
+	if _, err := b.Void(ctx, org.ID, "acme", draftID); err != nil {
+		t.Fatalf("Void draft: %v", err)
+	}
+
+	again, err := RunRent(ctx, b, org.ID, "acme", asOf)
+	if err != nil {
+		t.Fatalf("RunRent after voiding draft: %v", err)
+	}
+	if again.Created != 1 {
+		t.Fatalf("Created after voiding draft = %d, want 1", again.Created)
+	}
+
+	var periods int
+	var newInvoiceID int64
+	if err := pool.QueryRow(ctx, "SELECT count(*), max(invoice_id) FROM rent_periods WHERE lease_id = $1", lease.ID).Scan(&periods, &newInvoiceID); err != nil {
+		t.Fatalf("selecting periods: %v", err)
+	}
+	if periods != 1 || newInvoiceID == draftID {
+		t.Fatalf("periods = %d, invoice_id = %d (old %d); want 1 period relinked to a new invoice", periods, newInvoiceID, draftID)
+	}
+}

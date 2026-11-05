@@ -326,8 +326,12 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 	return GetInvoice(ctx, tx, orgID, id)
 }
 
-// VoidInvoice voids an 'open' invoice, keeping its number. Any other status
-// returns ErrInvalidState.
+// VoidInvoice voids an 'open' or 'draft' invoice, keeping its number (an
+// 'open' invoice has one; a 'draft' never did). Any other status returns
+// ErrInvalidState. Discarding a draft this way (rather than deleting it)
+// keeps it visible for audit purposes and lets billing.Void's single code
+// path unlock its time entries and skip the provider call (a draft never
+// has a provider_ref) the same way it does for an open invoice.
 func VoidInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, error) {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&status)
@@ -337,7 +341,7 @@ func VoidInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, err
 	if err != nil {
 		return Invoice{}, err
 	}
-	if status != "open" {
+	if status != "open" && status != "draft" {
 		return Invoice{}, ErrInvalidState
 	}
 

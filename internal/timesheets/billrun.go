@@ -141,10 +141,17 @@ func RunBilling(ctx context.Context, b *billing.Service, orgID int64, orgSlug st
 		})
 
 		lines := make([]core.NewLine, len(groups))
+		var total core.Cents
+		entryIDs := []int64{}
 		for i, g := range groups {
 			lines[i] = LineFor(g.project, g.task, g.totalMinutes, in.From, in.To, settings.GSTRegistered)
+			total += lines[i].UnitAmount // QuantityMilli is always 1000, so LineAmount == UnitAmount.
 			result.EntryCount += len(g.entryIDs)
 			result.TotalMinutes += g.totalMinutes
+			entryIDs = append(entryIDs, g.entryIDs...)
+		}
+		if total == 0 {
+			return fmt.Errorf("%w: billing run total is zero", core.ErrInvalidInput)
 		}
 
 		inv, err := core.CreateDraftInvoice(ctx, tx, orgID, core.NewInvoice{
@@ -167,6 +174,13 @@ func RunBilling(ctx context.Context, b *billing.Service, orgID int64, orgSlug st
 			); err != nil {
 				return err
 			}
+		}
+
+		if err := core.Audit(ctx, tx, orgID, billing.ActorFrom(ctx), "invoice", inv.ID, "billing_run", map[string]any{
+			"client_contact_id": in.ClientContactID, "from": in.From.Format(dateLayout), "to": in.To.Format(dateLayout),
+			"entry_ids": entryIDs,
+		}); err != nil {
+			return err
 		}
 
 		result.Invoice = inv

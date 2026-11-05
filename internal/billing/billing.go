@@ -51,7 +51,7 @@ func detach(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), detachTimeout)
 }
 
-// actorKey is the context key WithActor/actorFrom use to pass the acting
+// actorKey is the context key WithActor/ActorFrom use to pass the acting
 // user through to an audit_log entry.
 type actorKey struct{}
 
@@ -62,8 +62,11 @@ func WithActor(ctx context.Context, userID int64) context.Context {
 	return context.WithValue(ctx, actorKey{}, userID)
 }
 
-// actorFrom reads the actor set by WithActor, or nil if none was set.
-func actorFrom(ctx context.Context) *int64 {
+// ActorFrom reads the actor set by WithActor, or nil if none was set.
+// Exported so other packages whose transactional work must audit under the
+// same actor (e.g. timesheets' billing runs) don't need their own copy of
+// the context key.
+func ActorFrom(ctx context.Context) *int64 {
 	if id, ok := ctx.Value(actorKey{}).(int64); ok {
 		return &id
 	}
@@ -157,7 +160,7 @@ func (s *Service) PayOptions(ctx context.Context, q core.Querier, orgID int64) (
 // number is already burned and won't move, and the invoice stays open with
 // no provider_ref for POST .../send to retry.
 func (s *Service) Issue(ctx context.Context, orgID int64, orgSlug string, invoiceID int64) (core.Invoice, error) {
-	actor := actorFrom(ctx)
+	actor := ActorFrom(ctx)
 
 	var inv core.Invoice
 	err := RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -309,7 +312,7 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 // starts: once the provider void is under way, a client disconnect must
 // not roll back the local void and leave the two sides disagreeing.
 func (s *Service) Void(ctx context.Context, orgID int64, orgSlug string, invoiceID int64) (core.Invoice, error) {
-	actor := actorFrom(ctx)
+	actor := ActorFrom(ctx)
 	ctx, cancel := detach(ctx)
 	defer cancel()
 

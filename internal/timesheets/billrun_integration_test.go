@@ -331,6 +331,127 @@ func TestVoidUnlocksEntries(t *testing.T) {
 	}
 }
 
+// TestVoidUnlocksEntriesFromDraft covers Ruling 28: voiding a billing-run
+// draft (never issued, so core.VoidInvoice must accept 'draft' as well as
+// 'open') unlocks its time entries the same way voiding an open invoice
+// does, and a later run bills them again.
+func TestVoidUnlocksEntriesFromDraft(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	userID := testUser(t, pool, "entries-void-draft@example.com")
+	client := testContact(t, pool, org.ID, "client", "A Client")
+	proj := testProject(t, pool, org.ID, client)
+	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	from := mustDate(t, "2026-11-01")
+	to := mustDate(t, "2026-11-30")
+	testEntry(t, pool, org.ID, userID, task.ID, from, 60)
+
+	b := testBillingService(pool)
+	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+		ClientContactID: client, From: from, To: to, DueInDays: 14,
+	})
+	if err != nil {
+		t.Fatalf("RunBilling: %v", err)
+	}
+	if result.Invoice.Status != "draft" {
+		t.Fatalf("Invoice.Status = %q, want draft", result.Invoice.Status)
+	}
+
+	if _, err := b.Void(ctx, org.ID, "acme", result.Invoice.ID); err != nil {
+		t.Fatalf("Void draft: %v", err)
+	}
+
+	voided, err := core.GetInvoice(ctx, pool, org.ID, result.Invoice.ID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if voided.Status != "void" {
+		t.Fatalf("Status after void = %q, want void", voided.Status)
+	}
+
+	entries, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].InvoiceLineID != nil {
+		t.Fatalf("entry still locked after voiding draft: %+v", entries)
+	}
+
+	result2, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+		ClientContactID: client, From: from, To: to, DueInDays: 14,
+	})
+	if err != nil {
+		t.Fatalf("second RunBilling: %v", err)
+	}
+	if result2.EntryCount != 1 {
+		t.Fatalf("second RunBilling EntryCount = %d, want 1", result2.EntryCount)
+	}
+}
+
+// TestRunBillingAudits covers Ruling 28: a billing run writes a
+// "billing_run" audit_log row against its created invoice, carrying the
+// actor set via billing.WithActor and a diff with client_contact_id,
+// from, to and the billed entry ids.
+func TestRunBillingAudits(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	userID := testUser(t, pool, "entries-audit@example.com")
+	ownerID := testUser(t, pool, "owner-audit@example.com")
+	client := testContact(t, pool, org.ID, "client", "A Client")
+	proj := testProject(t, pool, org.ID, client)
+	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	from := mustDate(t, "2026-11-01")
+	to := mustDate(t, "2026-11-30")
+	entry := testEntry(t, pool, org.ID, userID, task.ID, from, 60)
+
+	b := testBillingService(pool)
+	actorCtx := billing.WithActor(ctx, ownerID)
+	result, err := timesheets.RunBilling(actorCtx, b, org.ID, "acme", timesheets.RunInput{
+		ClientContactID: client, From: from, To: to, DueInDays: 14,
+	})
+	if err != nil {
+		t.Fatalf("RunBilling: %v", err)
+	}
+
+	var actor int64
+	var diff []byte
+	if err := pool.QueryRow(ctx,
+		`SELECT actor_user_id, diff FROM audit_log WHERE org_id = $1 AND entity = 'invoice' AND entity_id = $2 AND action = 'billing_run'`,
+		org.ID, result.Invoice.ID,
+	).Scan(&actor, &diff); err != nil {
+		t.Fatalf("selecting billing_run audit row: %v", err)
+	}
+	if actor != ownerID {
+		t.Fatalf("actor_user_id = %d, want %d", actor, ownerID)
+	}
+
+	var parsed struct {
+		ClientContactID int64   `json:"client_contact_id"`
+		From            string  `json:"from"`
+		To              string  `json:"to"`
+		EntryIDs        []int64 `json:"entry_ids"`
+	}
+	if err := json.Unmarshal(diff, &parsed); err != nil {
+		t.Fatalf("decoding diff: %v", err)
+	}
+	if parsed.ClientContactID != client || parsed.From != "2026-11-01" || parsed.To != "2026-11-30" {
+		t.Fatalf("diff = %+v, want client %d, from 2026-11-01, to 2026-11-30", parsed, client)
+	}
+	if len(parsed.EntryIDs) != 1 || parsed.EntryIDs[0] != entry.ID {
+		t.Fatalf("diff.EntryIDs = %v, want [%d]", parsed.EntryIDs, entry.ID)
+	}
+}
+
 func TestRunBillingIssueFlag(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
@@ -363,27 +484,36 @@ func TestRunBillingIssueFlag(t *testing.T) {
 	}
 }
 
-// TestRunBillingIssueFailureLeavesDraft covers the controller ruling that a
-// failed Issue after the billing transaction has committed must not strand
-// the caller: RunBilling returns the already-populated RunResult (the
-// invoice id, EntryCount and TotalMinutes) alongside the error, and the
-// draft invoice - with its entries still locked to it - is left in place.
+// TestRunBillingZeroTotal422 covers Ruling 28: a billing run whose summed
+// invoice total would be zero (a 1-cent rate and a 1-minute entry:
+// DivRound(1*1, 60) rounds the line to $0.00) is rejected with
+// core.ErrInvalidInput before anything is committed - no draft invoice and
+// no locked entries - rather than creating a draft core.IssueInvoice would
+// then refuse to issue.
 //
-// The timesheet billing run's invoices use Source "timesheet", which the
-// QLD pay-options rule in billing.Service.Issue does not apply to (only
-// "rent"/"bond" - see billing.go and
-// docs/superpowers/plans/2026-11-05-02-property.md), so "no pay options
-// configured" does not make Issue fail here. Instead this drives Issue's
-// other failure mode - core.IssueInvoice's zero-total guard - with a
-// 1-cent rate and a 1-minute entry: DivRound(1*1, 60) rounds the line to
-// $0.00, so the invoice totals zero and IssueInvoice refuses to issue it
-// (core.ErrInvalidInput), after the draft and its line are already
-// committed.
-func TestRunBillingIssueFailureLeavesDraft(t *testing.T) {
+// This replaces the former TestRunBillingIssueFailureLeavesDraft, which
+// used this same zero-total setup to drive a *post-commit* Issue failure;
+// now that RunBilling itself rejects a zero total before committing, that
+// trigger no longer reaches Issue at all. No other realistic trigger
+// remains for a timesheet billing run's Issue step: Source "timesheet" is
+// exempt from the QLD pay-options rule (only "rent"/"bond" are checked),
+// and core.IssueInvoice's only other failure modes (not found, not a
+// draft) aren't reachable immediately after RunBilling creates the draft
+// itself. Forcing the failure via a cancelled context isn't viable either:
+// RunBilling uses the same ctx throughout, so a context cancelled early
+// enough to fail Issue would also fail the billing transaction that must
+// create the draft in the first place. Per the controller's documented
+// fallback, the RunResult-with-error-after-commit path (RunBilling
+// returning a populated result with a non-nil error after the billing
+// transaction already committed) is left covered by
+// TestRunBillingIssueFailureLeavesDraft's git history and this comment
+// alone; see docs/superpowers/plans/2026-11-05-01-followups.md's "Plan 3
+// leftovers" section.
+func TestRunBillingZeroTotal422(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
 	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "entries-issue-fail@example.com")
+	userID := testUser(t, pool, "entries-zero-total@example.com")
 	client := testContact(t, pool, org.ID, "client", "A Client")
 	proj, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
 		ClientContactID: client, Name: "Pro bono", HourlyRate: 1, GSTCode: core.GST,
@@ -407,27 +537,24 @@ func TestRunBillingIssueFailureLeavesDraft(t *testing.T) {
 	if !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("RunBilling: err = %v, want ErrInvalidInput", err)
 	}
-	if result.Invoice.ID == 0 {
-		t.Fatalf("result.Invoice.ID = 0, want the committed draft's id")
-	}
-	if result.EntryCount != 1 || result.TotalMinutes != 1 {
-		t.Fatalf("EntryCount/TotalMinutes = %d/%d, want 1/1", result.EntryCount, result.TotalMinutes)
+	if result.Invoice.ID != 0 {
+		t.Fatalf("result.Invoice.ID = %d, want 0 (no draft committed)", result.Invoice.ID)
 	}
 
-	draft, err := core.GetInvoice(ctx, pool, org.ID, result.Invoice.ID)
+	invoices, err := core.ListInvoices(ctx, pool, org.ID, "")
 	if err != nil {
-		t.Fatalf("GetInvoice: %v", err)
+		t.Fatalf("ListInvoices: %v", err)
 	}
-	if draft.Status != "draft" {
-		t.Fatalf("draft.Status = %q, want draft", draft.Status)
+	if len(invoices) != 0 {
+		t.Fatalf("invoices = %+v, want none created", invoices)
 	}
 
 	entries, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{TaskID: &task.ID})
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
 	}
-	if len(entries) != 1 || entries[0].InvoiceLineID == nil {
-		t.Fatalf("entries = %+v, want the one entry still locked to the draft", entries)
+	if len(entries) != 1 || entries[0].InvoiceLineID != nil {
+		t.Fatalf("entries = %+v, want the one entry left unbilled", entries)
 	}
 }
 
@@ -456,8 +583,8 @@ func TestBillingRunRouteResponseShape(t *testing.T) {
 		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14,
 	}
 	rr := postJSON(handler, token, "/api/v1/orgs/acme/billing-runs", body)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rr.Code, rr.Body.String())
 	}
 
 	var resp map[string]json.RawMessage

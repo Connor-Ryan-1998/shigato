@@ -350,3 +350,61 @@ func TestBondInvoiceConcurrent(t *testing.T) {
 		t.Fatalf("bond_invoice_id = %v, want %d", l.BondInvoiceID, second.ID)
 	}
 }
+
+// TestBondInvoiceReissueAfterVoidDraft covers Ruling 28: core.VoidInvoice
+// now accepts a 'draft' invoice (not just 'open'), and a voided *draft*
+// bond invoice must allow a new bond invoice to be created, the same way
+// a voided issued one already does.
+func TestBondInvoiceReissueAfterVoidDraft(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
+	// No pay options configured: createBondDraft succeeds regardless, but
+	// Issue is never called here, so the draft is left unissued.
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
+		RentAmount: 50000, BondAmount: 140000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	b := testService(pool)
+	draftID, err := createBondDraft(ctx, b, org.ID, lease.ID)
+	if err != nil {
+		t.Fatalf("createBondDraft: %v", err)
+	}
+	draft, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if draft.Status != "draft" {
+		t.Fatalf("precondition: draft.Status = %q, want draft", draft.Status)
+	}
+
+	if _, err := b.Void(ctx, org.ID, "acme", draftID); err != nil {
+		t.Fatalf("Void draft: %v", err)
+	}
+
+	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
+	if status, _, err := BondInfo(ctx, pool, org.ID, lease, mustDate(t, "2026-11-05")); err != nil || status != "due" {
+		t.Fatalf("status after voiding draft = %q (err %v), want due", status, err)
+	}
+
+	setOrgPayOptions(t, pool, org.ID)
+	second, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	if err != nil {
+		t.Fatalf("CreateBondInvoice after voiding draft: %v", err)
+	}
+	if second.ID == draftID || second.Status != "open" {
+		t.Fatalf("second invoice = %d (%s), want a new open invoice", second.ID, second.Status)
+	}
+	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
+	if lease.BondInvoiceID == nil || *lease.BondInvoiceID != second.ID {
+		t.Fatalf("bond_invoice_id = %v, want %d", lease.BondInvoiceID, second.ID)
+	}
+}
