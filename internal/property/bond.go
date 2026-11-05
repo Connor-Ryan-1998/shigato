@@ -116,24 +116,34 @@ func createBondDraft(ctx context.Context, b *billing.Service, orgID, leaseID int
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// FOR UPDATE OF l locks only the lease row; a voided bond invoice
-	// doesn't block a new one, which re-stamps bond_invoice_id below.
 	var bondAmount int64
-	var existingStatus *string
-	err = tx.QueryRow(ctx, `
-		SELECT l.bond_amount, i.status FROM leases l
-		LEFT JOIN invoices i ON i.org_id = l.org_id AND i.id = l.bond_invoice_id
-		WHERE l.org_id = $1 AND l.id = $2 FOR UPDATE OF l`,
+	var existingInvoiceID *int64
+	err = tx.QueryRow(ctx,
+		`SELECT bond_amount, bond_invoice_id FROM leases WHERE org_id = $1 AND id = $2 FOR UPDATE`,
 		orgID, leaseID,
-	).Scan(&bondAmount, &existingStatus)
+	).Scan(&bondAmount, &existingInvoiceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, core.ErrNotFound
 	}
 	if err != nil {
 		return 0, err
 	}
-	if existingStatus != nil && *existingStatus != "void" {
-		return 0, core.ErrInvalidState
+	// The invoice status is read in its own statement, after the lock is
+	// held, so it sees a fresh snapshot: under READ COMMITTED a joined
+	// row in the locking statement isn't re-fetched when the lock wait
+	// ends, which would let a concurrent caller miss the invoice just
+	// created. A voided bond invoice doesn't block a new one, which
+	// re-stamps bond_invoice_id below.
+	if existingInvoiceID != nil {
+		var status string
+		if err := tx.QueryRow(ctx,
+			`SELECT status FROM invoices WHERE org_id = $1 AND id = $2`, orgID, *existingInvoiceID,
+		).Scan(&status); err != nil {
+			return 0, err
+		}
+		if status != "void" {
+			return 0, core.ErrInvalidState
+		}
 	}
 	if bondAmount == 0 {
 		return 0, fmt.Errorf("%w: bond_amount is 0", core.ErrInvalidInput)

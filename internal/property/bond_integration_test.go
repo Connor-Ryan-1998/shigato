@@ -5,6 +5,7 @@ package property
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -272,5 +273,80 @@ func TestBondInvoiceReissueAfterVoid(t *testing.T) {
 	}
 	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "held" {
 		t.Fatalf("status after payment = %q (err %v), want held", status, err)
+	}
+}
+
+// TestBondInvoiceConcurrent: two concurrent CreateBondInvoice calls for
+// one lease must produce exactly one bond invoice - both for the first
+// bond invoice and for the reissue after a void.
+func TestBondInvoiceConcurrent(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	propertyID := testProperty(t, pool, org.ID)
+	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
+	setOrgPayOptions(t, pool, org.ID)
+	b := testService(pool)
+
+	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
+		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
+		RentAmount: 50000, BondAmount: 140000,
+		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	race := func(t *testing.T, wantLive int) core.Invoice {
+		t.Helper()
+		var wg sync.WaitGroup
+		invs := make([]core.Invoice, 2)
+		errs := make([]error, 2)
+		for i := range 2 {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				invs[i], errs[i] = CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+			}(i)
+		}
+		wg.Wait()
+
+		var won core.Invoice
+		ok := 0
+		for i, err := range errs {
+			switch {
+			case err == nil:
+				ok++
+				won = invs[i]
+			case !errors.Is(err, core.ErrInvalidState):
+				t.Fatalf("CreateBondInvoice[%d]: %v, want nil or ErrInvalidState", i, err)
+			}
+		}
+		if ok != 1 {
+			t.Fatalf("successful calls = %d, want exactly 1", ok)
+		}
+		var live int
+		if err := pool.QueryRow(ctx,
+			"SELECT count(*) FROM invoices WHERE org_id = $1 AND source = 'bond' AND status <> 'void'", org.ID,
+		).Scan(&live); err != nil {
+			t.Fatalf("counting bond invoices: %v", err)
+		}
+		if live != wantLive {
+			t.Fatalf("live bond invoices = %d, want %d", live, wantLive)
+		}
+		return won
+	}
+
+	first := race(t, 1)
+	if _, err := b.Void(ctx, org.ID, "acme", first.ID); err != nil {
+		t.Fatalf("Void: %v", err)
+	}
+	second := race(t, 1)
+	l, err := GetLease(ctx, pool, org.ID, lease.ID)
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if l.BondInvoiceID == nil || *l.BondInvoiceID != second.ID {
+		t.Fatalf("bond_invoice_id = %v, want %d", l.BondInvoiceID, second.ID)
 	}
 }
