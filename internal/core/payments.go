@@ -32,7 +32,10 @@ type Payment struct {
 // void invoices, and inserts the payment. If ProviderRef is non-empty and
 // already recorded for this org, the insert is a no-op (ON CONFLICT DO
 // NOTHING) and the existing payment is returned with created=false, so
-// retried webhook/manual submissions are idempotent.
+// retried webhook/manual submissions are idempotent. If that existing
+// payment belongs to a different invoice or has a different amount, this
+// is not a retry but a genuine conflict (the same provider reference can't
+// mean two different payments), and ErrInvalidState is returned instead.
 //
 // After a successful insert, if the sum of the invoice's payments is at
 // least its total, the invoice is marked 'paid'.
@@ -81,6 +84,10 @@ func RecordPayment(ctx context.Context, tx Querier, orgID int64, in NewPayment) 
 		return Payment{}, false, err
 	}
 	p.Amount = Cents(amount)
+
+	if !created && (p.InvoiceID != in.InvoiceID || p.Amount != in.Amount) {
+		return Payment{}, false, ErrInvalidState
+	}
 
 	if created {
 		var sum int64

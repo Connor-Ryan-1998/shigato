@@ -16,6 +16,7 @@ import (
 	"shigoto/internal/auth"
 	"shigoto/internal/config"
 	"shigoto/internal/core"
+	"shigoto/internal/payments"
 )
 
 // registerCoreRoutes mounts the contacts, invoices and payments routes.
@@ -48,6 +49,10 @@ func registerCoreRoutes(mux *http.ServeMux, d Deps) {
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/issue",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			issueInvoice(w, r, d, getenv)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/send",
+		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sendInvoice(w, r, d, getenv)
 		})))
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/void",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +419,7 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 	}
 
 	p := auth.From(r.Context())
+	orgSlug := r.PathValue("org")
 	var inv core.Invoice
 	err := runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		existing, err := core.GetInvoice(r.Context(), tx, p.OrgID, id)
@@ -439,6 +445,104 @@ func issueInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(st
 	})
 	if err != nil {
 		writeCoreError(w, err)
+		return
+	}
+
+	// Issuing has committed: the number is burned and won't move even if
+	// sending now fails. Keep the invoice open with no provider_ref;
+	// POST .../send retries it.
+	if err := sendToProvider(r.Context(), d, getenv, p.OrgID, orgSlug, &inv); err != nil && !errors.Is(err, payments.ErrNoProvider) {
+		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
+	}
+
+	resp, err := invoiceToResponse(r.Context(), d.Pool, getenv, inv)
+	if err != nil {
+		slog.Error("building invoice response failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// sendToProvider resolves orgSlug's payments.Provider, ensures the
+// invoice's contact has a provider customer ref (creating one if needed),
+// sends the invoice, and stores the returned provider_ref/provider_url.
+// inv is updated in place on success. Returns payments.ErrNoProvider
+// unchanged when the org has no provider configured, so callers can treat
+// that as "nothing to do" rather than a failure.
+func sendToProvider(ctx context.Context, d Deps, getenv func(string) string, orgID int64, orgSlug string, inv *core.Invoice) error {
+	provider, err := d.Payments(orgSlug)
+	if err != nil {
+		return err
+	}
+
+	return runInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		contact, err := core.GetContact(ctx, tx, orgID, inv.ContactID)
+		if err != nil {
+			return err
+		}
+
+		custRef := contact.ProviderCustomerRef
+		if custRef == "" {
+			custRef, err = provider.EnsureCustomer(ctx, contact)
+			if err != nil {
+				return fmt.Errorf("ensuring provider customer: %w", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE contacts SET provider_customer_ref = $1 WHERE org_id = $2 AND id = $3`,
+				custRef, orgID, contact.ID,
+			); err != nil {
+				return err
+			}
+		}
+
+		ref, hostedURL, err := provider.SendInvoice(ctx, *inv, inv.Lines, custRef)
+		if err != nil {
+			return fmt.Errorf("sending invoice: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE invoices SET provider_ref = $1, provider_url = $2 WHERE org_id = $3 AND id = $4`,
+			ref, hostedURL, orgID, inv.ID,
+		); err != nil {
+			return err
+		}
+
+		inv.ProviderRef = ref
+		inv.ProviderURL = hostedURL
+		return nil
+	})
+}
+
+// sendInvoice handles POST .../invoices/{id}/send: it retries sending an
+// issued invoice to the org's payment provider after a previous attempt
+// failed. Only an 'open' invoice can be (re)sent.
+func sendInvoice(w http.ResponseWriter, r *http.Request, d Deps, getenv func(string) string) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	p := auth.From(r.Context())
+	orgSlug := r.PathValue("org")
+
+	inv, err := core.GetInvoice(r.Context(), d.Pool, p.OrgID, id)
+	if err != nil {
+		writeCoreError(w, err)
+		return
+	}
+	if inv.Status != "open" {
+		writeCoreError(w, core.ErrInvalidState)
+		return
+	}
+
+	if err := sendToProvider(r.Context(), d, getenv, p.OrgID, orgSlug, &inv); err != nil {
+		if errors.Is(err, payments.ErrNoProvider) {
+			writeError(w, http.StatusUnprocessableEntity, "no payment provider configured")
+			return
+		}
+		slog.Error("sending invoice to provider failed", "invoice_id", inv.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

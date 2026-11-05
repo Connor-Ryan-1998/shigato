@@ -10,6 +10,8 @@ import (
 
 	"shigoto/internal/auth"
 	"shigoto/internal/config"
+	"shigoto/internal/payments"
+	"shigoto/internal/payments/stripe"
 )
 
 // Module is a feature module that contributes routes to the API, gated by
@@ -30,6 +32,11 @@ type Deps struct {
 	// code doesn't need to set it. Threading it through here (rather
 	// than handlers calling os.Getenv directly) keeps handlers testable.
 	GetEnv func(string) string
+	// Payments resolves the payments.Provider for an org slug. It
+	// defaults to building a stripe.Provider from config.StripeFor,
+	// returning payments.ErrNoProvider when the org has no Stripe
+	// credentials. Tests inject a func returning a *payments.Fake.
+	Payments func(orgSlug string) (payments.Provider, error)
 }
 
 // modules lists the feature modules available to mount. Plans 2, 3 and 4
@@ -48,6 +55,15 @@ func New(d Deps) http.Handler {
 		// config.Load may leave this nil; fall back to UTC rather than
 		// let time.Now().In(nil) panic in the invoice-issuing handler.
 		d.Cfg.Location = time.UTC
+	}
+	if d.Payments == nil {
+		d.Payments = func(orgSlug string) (payments.Provider, error) {
+			org, ok := config.StripeFor(d.GetEnv, orgSlug)
+			if !ok {
+				return nil, payments.ErrNoProvider
+			}
+			return stripe.New(org.SecretKey, org.WebhookSecret), nil
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -69,6 +85,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", d.Auth.LogoutHandler)
 
 	registerCoreRoutes(mux, d)
+	registerWebhookRoutes(mux, d)
 
 	var enabled []string
 	for _, m := range modules {

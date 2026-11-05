@@ -1,0 +1,349 @@
+//go:build integration
+
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"shigoto/internal/auth"
+	"shigoto/internal/config"
+	"shigoto/internal/core"
+	"shigoto/internal/db"
+	"shigoto/internal/payments"
+)
+
+// sessionCookieName mirrors the unexported constant of the same name in
+// package auth (internal/auth/session.go); there's no exported way to get
+// it from here.
+const sessionCookieName = "shigoto_session"
+
+const webhookSecret = "whsec_test_secret"
+
+func webhookTestOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
+	t.Helper()
+	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
+	if err != nil {
+		t.Fatalf("CreateOrg(%s): %v", slug, err)
+	}
+	return org
+}
+
+func webhookTestContact(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
+	t.Helper()
+	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: "client", Name: "Test Contact"})
+	if err != nil {
+		t.Fatalf("CreateContact: %v", err)
+	}
+	return c.ID
+}
+
+func webhookTestUser(t *testing.T, pool *pgxpool.Pool, email, password string) int64 {
+	t.Helper()
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	var userID int64
+	err = pool.QueryRow(context.Background(),
+		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
+		email, email, hash,
+	).Scan(&userID)
+	if err != nil {
+		t.Fatalf("inserting user %s: %v", email, err)
+	}
+	return userID
+}
+
+func webhookTestAddMembership(t *testing.T, pool *pgxpool.Pool, userID, orgID int64, role auth.Role) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)",
+		userID, orgID, string(role),
+	)
+	if err != nil {
+		t.Fatalf("adding membership: %v", err)
+	}
+}
+
+// createDraft creates a one-line draft invoice whose line totals to exactly
+// totalCents (GST-free), with the given source and a 14-day term.
+func webhookTestDraft(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, source string, totalCents int64) int64 {
+	t.Helper()
+	inv, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    source,
+		DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+	return inv.ID
+}
+
+func newWebhookHandler(pool *pgxpool.Pool, fakes map[string]*payments.Fake) http.Handler {
+	a := auth.New(pool, false)
+	return New(Deps{
+		Pool: pool,
+		Auth: a,
+		Cfg:  config.Config{Modules: map[string]bool{}},
+		Payments: func(orgSlug string) (payments.Provider, error) {
+			f, ok := fakes[orgSlug]
+			if !ok {
+				return nil, payments.ErrNoProvider
+			}
+			return f, nil
+		},
+	})
+}
+
+// webhookContactAndInvoice creates a contact and an issued invoice with
+// provider_ref already set to providerRef, as if the issue route had
+// already sent it to the provider.
+func webhookContactAndInvoice(t *testing.T, pool *pgxpool.Pool, orgID int64, providerRef string, totalCents int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	contactID := webhookTestContact(t, pool, orgID)
+	draftID := webhookTestDraft(t, pool, orgID, contactID, "manual", totalCents)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	inv, err := core.IssueInvoice(ctx, tx, orgID, draftID, time.Now())
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, "UPDATE invoices SET provider_ref = $1 WHERE org_id = $2 AND id = $3", providerRef, orgID, inv.ID); err != nil {
+		t.Fatalf("setting provider_ref: %v", err)
+	}
+	return inv.ID
+}
+
+// fakeWebhookBody builds a JSON body in the shape payments.Fake.ParseWebhook
+// decodes.
+func fakeWebhookBody(t *testing.T, id, kind, invoiceRef, paymentRef string, amount int64, paidOn time.Time) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"id":          id,
+		"kind":        kind,
+		"invoice_ref": invoiceRef,
+		"payment_ref": paymentRef,
+		"amount":      amount,
+		"paid_on":     paidOn.Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("marshaling webhook body: %v", err)
+	}
+	return body
+}
+
+func postWebhook(handler http.Handler, slug string, body []byte, sigHeader string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/stripe/"+slug, bytes.NewReader(body))
+	if sigHeader != "" {
+		req.Header.Set("Stripe-Signature", sigHeader)
+	}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestWebhookPaysInvoice(t *testing.T) {
+	pool := db.TestPool(t)
+	org := webhookTestOrg(t, pool, "acme")
+	fake := &payments.Fake{Secret: webhookSecret}
+	invID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_1", 10000)
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	body := fakeWebhookBody(t, "evt_1", "invoice.paid", "in_fake_1", "pi_fake_1", 10000, time.Now())
+	rr := postWebhook(handler, "acme", body, fake.Sign(body, time.Now()))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err := core.GetInvoice(context.Background(), pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "paid" {
+		t.Fatalf("status = %s, want paid", inv.Status)
+	}
+
+	var count int
+	if err := pool.QueryRow(context.Background(), "SELECT count(*) FROM payments WHERE org_id=$1 AND invoice_id=$2", org.ID, invID).Scan(&count); err != nil {
+		t.Fatalf("counting payments: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("payment rows = %d, want 1", count)
+	}
+}
+
+func TestWebhookDuplicateDelivery(t *testing.T) {
+	pool := db.TestPool(t)
+	org := webhookTestOrg(t, pool, "acme")
+	fake := &payments.Fake{Secret: webhookSecret}
+	invID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_1", 10000)
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	body := fakeWebhookBody(t, "evt_dup", "invoice.paid", "in_fake_1", "pi_fake_1", 10000, time.Now())
+	sig := fake.Sign(body, time.Now())
+
+	// Sequential redelivery.
+	if rr := postWebhook(handler, "acme", body, sig); rr.Code != http.StatusOK {
+		t.Fatalf("first delivery: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := postWebhook(handler, "acme", body, sig); rr.Code != http.StatusOK {
+		t.Fatalf("second (sequential) delivery: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Concurrent redelivery of the same event.
+	const n = 5
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = postWebhook(handler, "acme", body, sig).Code
+		}(i)
+	}
+	wg.Wait()
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("concurrent delivery %d: status = %d, want 200", i, code)
+		}
+	}
+
+	var eventCount, paymentCount int
+	ctx := context.Background()
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM webhook_events WHERE provider='stripe' AND event_id=$1", "evt_dup").Scan(&eventCount); err != nil {
+		t.Fatalf("counting webhook_events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("webhook_events rows = %d, want 1", eventCount)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM payments WHERE org_id=$1 AND invoice_id=$2", org.ID, invID).Scan(&paymentCount); err != nil {
+		t.Fatalf("counting payments: %v", err)
+	}
+	if paymentCount != 1 {
+		t.Fatalf("payment rows = %d, want 1", paymentCount)
+	}
+}
+
+func TestWebhookBadSignature400NoChange(t *testing.T) {
+	pool := db.TestPool(t)
+	org := webhookTestOrg(t, pool, "acme")
+	fake := &payments.Fake{Secret: webhookSecret}
+	invID := webhookContactAndInvoice(t, pool, org.ID, "in_fake_1", 10000)
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	body := fakeWebhookBody(t, "evt_bad", "invoice.paid", "in_fake_1", "pi_fake_1", 10000, time.Now())
+	badSig := (&payments.Fake{Secret: "wrong_secret"}).Sign(body, time.Now())
+
+	rr := postWebhook(handler, "acme", body, badSig)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rr.Code, rr.Body.String())
+	}
+
+	ctx := context.Background()
+	inv, err := core.GetInvoice(ctx, pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" {
+		t.Fatalf("status = %s, want open (unchanged)", inv.Status)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM webhook_events").Scan(&count); err != nil {
+		t.Fatalf("counting webhook_events: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("webhook_events rows = %d, want 0", count)
+	}
+}
+
+func TestWebhookUnknownOrg404(t *testing.T) {
+	pool := db.TestPool(t)
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{})
+
+	body := fakeWebhookBody(t, "evt_1", "invoice.paid", "in_fake_1", "pi_fake_1", 10000, time.Now())
+	rr := postWebhook(handler, "no-such-org", body, "t=1,v1=deadbeef")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := webhookTestOrg(t, pool, "acme")
+	contactID := webhookTestContact(t, pool, org.ID)
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+
+	fake := &payments.Fake{Secret: webhookSecret, SendInvoiceErr: fmt.Errorf("stripe is down")}
+	handler := newWebhookHandler(pool, map[string]*payments.Fake{"acme": fake})
+
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
+
+	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, issueReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("issue: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" || inv.Number == nil || *inv.Number != 1 {
+		t.Fatalf("after failed send: status=%s number=%v, want open, 1", inv.Status, inv.Number)
+	}
+	if inv.ProviderRef != "" {
+		t.Fatalf("after failed send: provider_ref = %q, want empty", inv.ProviderRef)
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
+	sendReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, sendReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("send retry: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	inv, err = core.GetInvoice(ctx, pool, org.ID, draftID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "open" || inv.Number == nil || *inv.Number != 1 {
+		t.Fatalf("after retry: status=%s number=%v, want open, 1", inv.Status, inv.Number)
+	}
+	if inv.ProviderRef == "" {
+		t.Fatalf("after retry: provider_ref is empty, want set")
+	}
+}

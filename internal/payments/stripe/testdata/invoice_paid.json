@@ -1,0 +1,41 @@
+{
+  "id": "evt_test_invoice_paid",
+  "object": "event",
+  "api_version": "__API_VERSION__",
+  "created": 1700000000,
+  "livemode": false,
+  "pending_webhooks": 0,
+  "type": "invoice.paid",
+  "data": {
+    "object": {
+      "id": "in_test_123",
+      "object": "invoice",
+      "amount_paid": 11000,
+      "currency": "aud",
+      "status": "paid",
+      "status_transitions": {
+        "finalized_at": 1699999000,
+        "paid_at": 1700000100,
+        "marked_uncollectible_at": null,
+        "voided_at": null
+      },
+      "payments": {
+        "object": "list",
+        "data": [
+          {
+            "id": "inpay_test_1",
+            "object": "invoice_payment",
+            "status": "paid",
+            "payment": {
+              "type": "payment_intent",
+              "payment_intent": {
+                "id": "pi_test_456",
+                "object": "payment_intent"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

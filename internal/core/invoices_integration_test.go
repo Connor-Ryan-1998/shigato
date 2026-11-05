@@ -24,6 +24,7 @@ import (
 	"shigoto/internal/core"
 	"shigoto/internal/db"
 	"shigoto/internal/httpapi"
+	"shigoto/internal/payments"
 )
 
 // sessionCookieName mirrors the unexported constant of the same name in
@@ -304,6 +305,56 @@ func TestRecordPaymentIdempotentProviderRef(t *testing.T) {
 	}
 }
 
+func TestRecordPaymentConflictingProviderRef(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	inv1 := createIssuedInvoice(t, pool, org.ID, contactID, 10000)
+	inv2 := createIssuedInvoice(t, pool, org.ID, contactID, 10000)
+
+	record := func(invoiceID, amount int64) error {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx)
+		_, _, err = core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
+			InvoiceID: invoiceID, Amount: core.Cents(amount), PaidOn: time.Now(), Method: "stripe", ProviderRef: "pi_shared",
+		})
+		if err == nil {
+			if cerr := tx.Commit(ctx); cerr != nil {
+				t.Fatalf("commit: %v", cerr)
+			}
+		}
+		return err
+	}
+
+	if err := record(inv1, 5000); err != nil {
+		t.Fatalf("first RecordPayment: %v", err)
+	}
+
+	// Same provider_ref, different invoice: a genuine conflict, not a
+	// retry of the same payment.
+	if err := record(inv2, 5000); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("different invoice: err = %v, want ErrInvalidState", err)
+	}
+
+	// Same provider_ref and invoice, different amount: also a conflict.
+	if err := record(inv1, 6000); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("different amount: err = %v, want ErrInvalidState", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM payments WHERE org_id=$1 AND provider_ref=$2", org.ID, "pi_shared").Scan(&count); err != nil {
+		t.Fatalf("counting payments: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("payment rows = %d, want 1", count)
+	}
+}
+
 func TestIssueNonDraftInvalid(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
@@ -395,16 +446,19 @@ func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
 	addMembership(t, pool, userID, org.ID, auth.Owner)
 
 	a := auth.New(pool, false)
-	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: config.Config{Modules: map[string]bool{}}})
+	// getenv returns "" for everything: a nil GetEnv would fall back to
+	// os.Getenv, and a Stripe env var set in the test runner's own shell
+	// would silently change which pay-options branch this test exercises.
+	getenv := func(string) string { return "" }
+	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: config.Config{Modules: map[string]bool{}}, GetEnv: getenv})
 
 	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 
-	draftID := createDraft(t, pool, org.ID, contactID, "rent", 1000)
-
-	issue := func() *httptest.ResponseRecorder {
+	issueDraft := func(source string) *httptest.ResponseRecorder {
+		draftID := createDraft(t, pool, org.ID, contactID, source, 1000)
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
@@ -413,17 +467,46 @@ func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
 	}
 
 	// No bank, no PayID, no Stripe config: fewer than 2 pay options.
-	if rr := issue(); rr.Code != http.StatusUnprocessableEntity {
+	if rr := issueDraft("rent"); rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("issue with no pay options: status = %d, want 422, body=%s", rr.Code, rr.Body.String())
 	}
 
-	// Bank details plus a PayID: 2 pay options (Task 7 adds the Stripe case).
+	// Bank details plus a PayID: 2 pay options.
 	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2, payid=$3 WHERE id=$4",
 		"062-000", "12345678", "owner@payid.example", org.ID); err != nil {
 		t.Fatalf("updating org bank details: %v", err)
 	}
 
-	if rr := issue(); rr.Code != http.StatusOK {
+	if rr := issueDraft("rent"); rr.Code != http.StatusOK {
 		t.Fatalf("issue with bank + PayID: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Drop back to one pay option (no bank/PayID), but add Stripe keys:
+	// bank details + Stripe keys configured should also clear the bar.
+	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2, payid=NULL WHERE id=$3",
+		"062-000", "12345678", org.ID); err != nil {
+		t.Fatalf("clearing org payid: %v", err)
+	}
+	getenv = func(key string) string {
+		switch key {
+		case "SHIGOTO_STRIPE_ACME_SECRET_KEY":
+			return "sk_test_dummy"
+		case "SHIGOTO_STRIPE_ACME_WEBHOOK_SECRET":
+			return "whsec_test_dummy"
+		default:
+			return ""
+		}
+	}
+	// payOptionsFor only needs config.StripeFor (via getenv) to see
+	// Stripe credentials; the issue route's automatic send afterwards
+	// goes through Deps.Payments, which is overridden here to a Fake so
+	// this test makes no real network call to Stripe.
+	handler = httpapi.New(httpapi.Deps{
+		Pool: pool, Auth: a, Cfg: config.Config{Modules: map[string]bool{}}, GetEnv: getenv,
+		Payments: func(string) (payments.Provider, error) { return &payments.Fake{Secret: "whsec_test_dummy"}, nil },
+	})
+
+	if rr := issueDraft("rent"); rr.Code != http.StatusOK {
+		t.Fatalf("issue with bank details + Stripe keys configured: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
 	}
 }
