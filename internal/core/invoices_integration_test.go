@@ -1,0 +1,395 @@
+//go:build integration
+
+// Package core_test exercises core's invoice/payment flows, plus one test
+// that goes through the real HTTP handlers (for the cross-org 404 and the
+// QLD pay-options rule), so it needs to import httpapi and auth alongside
+// core without an import cycle.
+package core_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"shigoto/internal/auth"
+	"shigoto/internal/config"
+	"shigoto/internal/core"
+	"shigoto/internal/db"
+	"shigoto/internal/httpapi"
+)
+
+// sessionCookieName mirrors the unexported constant of the same name in
+// package auth (internal/auth/session.go); there's no exported way to get
+// it from here.
+const sessionCookieName = "shigoto_session"
+
+func createOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
+	t.Helper()
+	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
+	if err != nil {
+		t.Fatalf("CreateOrg(%s): %v", slug, err)
+	}
+	return org
+}
+
+func createContact(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
+	t.Helper()
+	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: "client", Name: "Test Contact"})
+	if err != nil {
+		t.Fatalf("CreateContact: %v", err)
+	}
+	return c.ID
+}
+
+func createUser(t *testing.T, pool *pgxpool.Pool, email, password string) int64 {
+	t.Helper()
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	var userID int64
+	err = pool.QueryRow(context.Background(),
+		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
+		email, email, hash,
+	).Scan(&userID)
+	if err != nil {
+		t.Fatalf("inserting user %s: %v", email, err)
+	}
+	return userID
+}
+
+func addMembership(t *testing.T, pool *pgxpool.Pool, userID, orgID int64, role auth.Role) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)",
+		userID, orgID, string(role),
+	)
+	if err != nil {
+		t.Fatalf("adding membership: %v", err)
+	}
+}
+
+// createDraft creates a one-line draft invoice whose line totals to
+// exactly totalCents (GST-free, so subtotal == total), with the given
+// source and a 14-day term. It returns the draft's id.
+func createDraft(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, source string, totalCents int64) int64 {
+	t.Helper()
+	inv, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    source,
+		DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+	return inv.ID
+}
+
+// createIssuedInvoice creates and issues a draft invoice totalling
+// totalCents, returning its id.
+func createIssuedInvoice(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, totalCents int64) int64 {
+	t.Helper()
+	draftID := createDraft(t, pool, orgID, contactID, "manual", totalCents)
+
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	inv, err := core.IssueInvoice(ctx, tx, orgID, draftID, time.Now())
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return inv.ID
+}
+
+func TestIssueNumbersSequentialConcurrent(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+
+	const n = 10
+	numbers := make([]int, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		draftID := createDraft(t, pool, org.ID, contactID, "manual", 1000)
+		wg.Add(1)
+		go func(i, draftID int64) {
+			defer wg.Done()
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			inv, err := core.IssueInvoice(ctx, tx, org.ID, draftID, time.Now())
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				errs[i] = err
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				errs[i] = err
+				return
+			}
+			if inv.Number == nil {
+				errs[i] = fmt.Errorf("issued invoice has no number")
+				return
+			}
+			numbers[i] = *inv.Number
+		}(int64(i), draftID)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+
+	sort.Ints(numbers)
+	for i, got := range numbers {
+		if got != i+1 {
+			t.Fatalf("numbers = %v, want {1..10}", numbers)
+		}
+	}
+}
+
+func TestIssueRollbackLeavesNoGap(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+
+	draft1 := createDraft(t, pool, org.ID, contactID, "manual", 1000)
+	tx1, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := core.IssueInvoice(ctx, tx1, org.ID, draft1, time.Now()); err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx1.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	draft2 := createDraft(t, pool, org.ID, contactID, "manual", 1000)
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx2.Rollback(ctx)
+	inv2, err := core.IssueInvoice(ctx, tx2, org.ID, draft2, time.Now())
+	if err != nil {
+		t.Fatalf("IssueInvoice: %v", err)
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if inv2.Number == nil || *inv2.Number != 1 {
+		t.Fatalf("number = %v, want 1", inv2.Number)
+	}
+}
+
+func TestPartialThenFullPayment(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	invID := createIssuedInvoice(t, pool, org.ID, contactID, 10000)
+
+	pay := func(amount int64) core.Invoice {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		_, _, err = core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
+			InvoiceID: invID, Amount: core.Cents(amount), PaidOn: time.Now(), Method: "cash",
+		})
+		if err != nil {
+			t.Fatalf("RecordPayment(%d): %v", amount, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		inv, err := core.GetInvoice(ctx, pool, org.ID, invID)
+		if err != nil {
+			t.Fatalf("GetInvoice: %v", err)
+		}
+		return inv
+	}
+
+	if inv := pay(4000); inv.Status != "open" {
+		t.Fatalf("after 4000: status = %s, want open", inv.Status)
+	}
+	if inv := pay(6000); inv.Status != "paid" {
+		t.Fatalf("after 6000 more: status = %s, want paid", inv.Status)
+	}
+	if inv := pay(500); inv.Status != "paid" {
+		t.Fatalf("after 500 more: status = %s, want paid", inv.Status)
+	}
+
+	var sum int64
+	if err := pool.QueryRow(ctx, "SELECT coalesce(sum(amount),0) FROM payments WHERE org_id=$1 AND invoice_id=$2", org.ID, invID).Scan(&sum); err != nil {
+		t.Fatalf("summing payments: %v", err)
+	}
+	if sum != 10500 {
+		t.Fatalf("sum of payments = %d, want 10500", sum)
+	}
+}
+
+func TestRecordPaymentIdempotentProviderRef(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	invID := createIssuedInvoice(t, pool, org.ID, contactID, 10000)
+
+	record := func() (core.Payment, bool) {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		p, created, err := core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
+			InvoiceID: invID, Amount: 5000, PaidOn: time.Now(), Method: "bank_transfer", ProviderRef: "ref-1",
+		})
+		if err != nil {
+			t.Fatalf("RecordPayment: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return p, created
+	}
+
+	p1, created1 := record()
+	if !created1 {
+		t.Fatal("first call: created = false, want true")
+	}
+
+	p2, created2 := record()
+	if created2 {
+		t.Fatal("second call: created = true, want false")
+	}
+	if p2.ID != p1.ID {
+		t.Fatalf("second call returned payment %d, want %d (the first one)", p2.ID, p1.ID)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM payments WHERE org_id=$1 AND invoice_id=$2", org.ID, invID).Scan(&count); err != nil {
+		t.Fatalf("counting payments: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("payment rows = %d, want 1", count)
+	}
+}
+
+func TestIssueNonDraftInvalid(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	invID := createIssuedInvoice(t, pool, org.ID, contactID, 1000)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = core.IssueInvoice(ctx, tx, org.ID, invID, time.Now())
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("err = %v, want ErrInvalidState", err)
+	}
+}
+
+func TestCrossOrgInvoice404(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	orgA := createOrg(t, pool, "org-a")
+	orgB := createOrg(t, pool, "org-b")
+	contactA := createContact(t, pool, orgA.ID)
+	invID := createIssuedInvoice(t, pool, orgA.ID, contactA, 1000)
+
+	userID := createUser(t, pool, "owner-b@example.com", "correct-password")
+	addMembership(t, pool, userID, orgB.ID, auth.Owner)
+
+	a := auth.New(pool, false)
+	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: config.Config{Modules: map[string]bool{}}})
+
+	token, err := auth.Login(ctx, pool, "owner-b@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/orgs/org-b/invoices/%d", invID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	userID := createUser(t, pool, "owner@example.com", "correct-password")
+	addMembership(t, pool, userID, org.ID, auth.Owner)
+
+	a := auth.New(pool, false)
+	handler := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: config.Config{Modules: map[string]bool{}}})
+
+	token, err := auth.Login(ctx, pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	draftID := createDraft(t, pool, org.ID, contactID, "rent", 1000)
+
+	issue := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// No bank, no PayID, no Stripe config: fewer than 2 pay options.
+	if rr := issue(); rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("issue with no pay options: status = %d, want 422, body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Bank details plus a PayID: 2 pay options (Task 7 adds the Stripe case).
+	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2, payid=$3 WHERE id=$4",
+		"062-000", "12345678", "owner@payid.example", org.ID); err != nil {
+		t.Fatalf("updating org bank details: %v", err)
+	}
+
+	if rr := issue(); rr.Code != http.StatusOK {
+		t.Fatalf("issue with bank + PayID: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+}

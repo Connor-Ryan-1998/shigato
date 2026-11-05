@@ -1,0 +1,319 @@
+package core
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base32"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// ErrInvalidState is returned when a write is attempted against an invoice
+// in a status that doesn't allow it (e.g. issuing a non-draft, or paying a
+// draft or void invoice).
+var ErrInvalidState = errors.New("invalid state")
+
+// ErrInvalidInput is returned when caller-supplied data fails validation
+// (e.g. a bad GST code, a non-positive quantity, or an invoice with no
+// lines).
+var ErrInvalidInput = errors.New("invalid input")
+
+// NewLine is one line of a draft invoice being created.
+type NewLine struct {
+	Description   string
+	QuantityMilli int64
+	UnitAmount    Cents
+	GSTCode       string
+}
+
+// NewInvoice describes a draft invoice to create.
+type NewInvoice struct {
+	ContactID int64
+	Source    string
+	DueInDays int
+	Lines     []NewLine
+}
+
+// InvoiceLine is a persisted invoice line, with its computed amount and GST.
+type InvoiceLine struct {
+	ID            int64
+	Description   string
+	QuantityMilli int64
+	UnitAmount    Cents
+	GSTCode       GSTCode
+	GSTAmount     Cents
+	Amount        Cents
+}
+
+// Invoice is a persisted invoice and its lines.
+type Invoice struct {
+	ID               int64
+	OrgID            int64
+	ContactID        int64
+	Number           *int
+	Source           string
+	Status           string
+	IssueDate        *time.Time
+	DueDate          *time.Time
+	DueInDays        int
+	Currency         string
+	Subtotal         Cents
+	GSTTotal         Cents
+	Total            Cents
+	PaymentReference string
+	ProviderRef      string
+	ProviderURL      string
+	Lines            []InvoiceLine
+}
+
+const invoiceColumns = `id, org_id, contact_id, number, source, status, issue_date, due_date,
+	due_in_days, currency, subtotal, gst_total, total, payment_reference,
+	coalesce(provider_ref,''), coalesce(provider_url,'')`
+
+func scanInvoice(row pgx.Row) (Invoice, error) {
+	var inv Invoice
+	var number *int32
+	var subtotal, gstTotal, total int64
+	err := row.Scan(&inv.ID, &inv.OrgID, &inv.ContactID, &number, &inv.Source, &inv.Status,
+		&inv.IssueDate, &inv.DueDate, &inv.DueInDays, &inv.Currency, &subtotal, &gstTotal, &total,
+		&inv.PaymentReference, &inv.ProviderRef, &inv.ProviderURL)
+	if err != nil {
+		return Invoice{}, err
+	}
+	if number != nil {
+		n := int(*number)
+		inv.Number = &n
+	}
+	inv.Subtotal = Cents(subtotal)
+	inv.GSTTotal = Cents(gstTotal)
+	inv.Total = Cents(total)
+	return inv, nil
+}
+
+// GetInvoice looks up an invoice and its lines by id, scoped to orgID. It
+// returns ErrNotFound if no such invoice exists in that org.
+func GetInvoice(ctx context.Context, q Querier, orgID, id int64) (Invoice, error) {
+	row := q.QueryRow(ctx, `SELECT `+invoiceColumns+` FROM invoices WHERE org_id = $1 AND id = $2`, orgID, id)
+	inv, err := scanInvoice(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Invoice{}, ErrNotFound
+	}
+	if err != nil {
+		return Invoice{}, err
+	}
+
+	lines, err := invoiceLines(ctx, q, orgID, id)
+	if err != nil {
+		return Invoice{}, err
+	}
+	inv.Lines = lines
+	return inv, nil
+}
+
+// ListInvoices lists an org's invoices, optionally filtered by status. An
+// empty status returns every invoice. Lines are not loaded (use GetInvoice
+// for a single invoice's lines).
+func ListInvoices(ctx context.Context, q Querier, orgID int64, status string) ([]Invoice, error) {
+	var rows pgx.Rows
+	var err error
+	if status == "" {
+		rows, err = q.Query(ctx, `SELECT `+invoiceColumns+` FROM invoices WHERE org_id = $1 ORDER BY id`, orgID)
+	} else {
+		rows, err = q.Query(ctx, `SELECT `+invoiceColumns+` FROM invoices WHERE org_id = $1 AND status = $2 ORDER BY id`, orgID, status)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	invoices := []Invoice{}
+	for rows.Next() {
+		inv, err := scanInvoice(rows)
+		if err != nil {
+			return nil, err
+		}
+		invoices = append(invoices, inv)
+	}
+	return invoices, rows.Err()
+}
+
+func invoiceLines(ctx context.Context, q Querier, orgID, invoiceID int64) ([]InvoiceLine, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, description, quantity_milli, unit_amount, gst_code, gst_amount, amount
+		FROM invoice_lines WHERE org_id = $1 AND invoice_id = $2 ORDER BY id`,
+		orgID, invoiceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	lines := []InvoiceLine{}
+	for rows.Next() {
+		var l InvoiceLine
+		var unitAmount, gstAmount, amount int64
+		var code string
+		if err := rows.Scan(&l.ID, &l.Description, &l.QuantityMilli, &unitAmount, &code, &gstAmount, &amount); err != nil {
+			return nil, err
+		}
+		l.UnitAmount = Cents(unitAmount)
+		l.GSTCode = GSTCode(code)
+		l.GSTAmount = Cents(gstAmount)
+		l.Amount = Cents(amount)
+		lines = append(lines, l)
+	}
+	return lines, rows.Err()
+}
+
+// CreateDraftInvoice validates in's lines, computes totals and a unique
+// payment reference, and inserts a new draft invoice (status 'draft', no
+// number). It does not start its own transaction: pass a tx if the caller
+// needs the insert to roll back together with other work.
+func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoice) (Invoice, error) {
+	if len(in.Lines) == 0 {
+		return Invoice{}, fmt.Errorf("%w: invoice must have at least one line", ErrInvalidInput)
+	}
+
+	if _, err := GetContact(ctx, q, orgID, in.ContactID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Invoice{}, fmt.Errorf("%w: contact_id not found", ErrInvalidInput)
+		}
+		return Invoice{}, err
+	}
+
+	codes := make([]GSTCode, len(in.Lines))
+	lines := make([]Line, len(in.Lines))
+	for i, l := range in.Lines {
+		if l.QuantityMilli <= 0 {
+			return Invoice{}, fmt.Errorf("%w: line %d: quantity_milli must be positive", ErrInvalidInput, i)
+		}
+		if l.UnitAmount < 0 {
+			return Invoice{}, fmt.Errorf("%w: line %d: unit_amount must not be negative", ErrInvalidInput, i)
+		}
+		code, err := ParseGSTCode(l.GSTCode)
+		if err != nil {
+			return Invoice{}, fmt.Errorf("%w: line %d: %v", ErrInvalidInput, i, err)
+		}
+		codes[i] = code
+		lines[i] = Line{QuantityMilli: l.QuantityMilli, Unit: l.UnitAmount, Code: code}
+	}
+	subtotal, gst, total := Totals(lines)
+
+	// ponytail: a single attempt at a random 40-bit reference, not a
+	// collision-retry loop. A collision inside the caller's transaction
+	// would abort it (Postgres requires a savepoint to recover from a
+	// failed statement), and Querier doesn't expose Begin for one. At
+	// 1-in-2^40 odds this is the right tradeoff; add a savepoint-based
+	// retry (needs a pgx.Tx, not just Querier) if collisions are ever
+	// observed.
+	ref, err := generatePaymentReference()
+	if err != nil {
+		return Invoice{}, err
+	}
+	var invoiceID int64
+	err = q.QueryRow(ctx, `
+		INSERT INTO invoices (org_id, contact_id, source, status, currency, subtotal, gst_total, total, payment_reference, due_in_days)
+		VALUES ($1, $2, $3, 'draft', 'AUD', $4, $5, $6, $7, $8)
+		RETURNING id`,
+		orgID, in.ContactID, in.Source, int64(subtotal), int64(gst), int64(total), ref, in.DueInDays,
+	).Scan(&invoiceID)
+	if err != nil {
+		return Invoice{}, err
+	}
+
+	for i, l := range in.Lines {
+		amount := LineAmount(l.QuantityMilli, l.UnitAmount)
+		gstAmount := GSTOnExclusive(amount, codes[i])
+		_, err := q.Exec(ctx, `
+			INSERT INTO invoice_lines (invoice_id, org_id, description, quantity_milli, unit_amount, gst_code, gst_amount, amount)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			invoiceID, orgID, l.Description, l.QuantityMilli, int64(l.UnitAmount), string(codes[i]), int64(gstAmount), int64(amount),
+		)
+		if err != nil {
+			return Invoice{}, err
+		}
+	}
+
+	return GetInvoice(ctx, q, orgID, invoiceID)
+}
+
+// IssueInvoice assigns the next gap-free invoice number for orgID (locking
+// invoice_counters for the duration of the caller's transaction) and sets
+// issue_date, due_date (today + the draft's due_in_days) and status 'open'.
+// Only a 'draft' invoice can be issued; any other status returns
+// ErrInvalidState. Run this in the caller's transaction so a rollback also
+// releases the number, keeping numbering gap-free.
+func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.Time) (Invoice, error) {
+	var status string
+	var dueInDays int
+	err := tx.QueryRow(ctx,
+		`SELECT status, due_in_days FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+		orgID, id,
+	).Scan(&status, &dueInDays)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Invoice{}, ErrNotFound
+	}
+	if err != nil {
+		return Invoice{}, err
+	}
+	if status != "draft" {
+		return Invoice{}, ErrInvalidState
+	}
+
+	var number int
+	err = tx.QueryRow(ctx, `
+		INSERT INTO invoice_counters (org_id, last_number) VALUES ($1, 1)
+		ON CONFLICT (org_id) DO UPDATE SET last_number = invoice_counters.last_number + 1
+		RETURNING last_number`,
+		orgID,
+	).Scan(&number)
+	if err != nil {
+		return Invoice{}, err
+	}
+
+	issueDate := today.Truncate(24 * time.Hour)
+	dueDate := issueDate.AddDate(0, 0, dueInDays)
+	_, err = tx.Exec(ctx,
+		`UPDATE invoices SET number = $1, issue_date = $2, due_date = $3, status = 'open' WHERE org_id = $4 AND id = $5`,
+		number, issueDate, dueDate, orgID, id,
+	)
+	if err != nil {
+		return Invoice{}, err
+	}
+
+	return GetInvoice(ctx, tx, orgID, id)
+}
+
+// VoidInvoice voids an 'open' invoice, keeping its number. Any other status
+// returns ErrInvalidState.
+func VoidInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, error) {
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Invoice{}, ErrNotFound
+	}
+	if err != nil {
+		return Invoice{}, err
+	}
+	if status != "open" {
+		return Invoice{}, ErrInvalidState
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE invoices SET status = 'void' WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
+		return Invoice{}, err
+	}
+	return GetInvoice(ctx, tx, orgID, id)
+}
+
+// generatePaymentReference returns "INV-" followed by the base32 (no
+// padding) encoding of 5 random bytes.
+func generatePaymentReference() (string, error) {
+	buf := make([]byte, 5)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "INV-" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf), nil
+}

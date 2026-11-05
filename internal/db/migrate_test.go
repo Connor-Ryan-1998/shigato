@@ -11,16 +11,23 @@ func TestMigrateIdempotent(t *testing.T) {
 	pool := TestPool(t)
 	ctx := context.Background()
 
+	// TestPool already ran Migrate once. A second call must not re-apply
+	// or re-record any migration, however many migration files exist.
+	var before int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&before); err != nil {
+		t.Fatalf("counting schema_migrations: %v", err)
+	}
+
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("second Migrate call failed: %v", err)
 	}
 
-	var count int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
+	var after int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&after); err != nil {
 		t.Fatalf("counting schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("schema_migrations count = %d, want 1", count)
+	if after != before {
+		t.Fatalf("schema_migrations count after second Migrate = %d, want %d (unchanged)", after, before)
 	}
 }
 

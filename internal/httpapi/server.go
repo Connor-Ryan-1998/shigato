@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"os"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +24,11 @@ type Deps struct {
 	Pool *pgxpool.Pool
 	Auth *auth.Auth
 	Cfg  config.Config
+	// GetEnv reads environment variables, e.g. for config.StripeFor. It
+	// defaults to os.Getenv so tests can inject a fake and production
+	// code doesn't need to set it. Threading it through here (rather
+	// than handlers calling os.Getenv directly) keeps handlers testable.
+	GetEnv func(string) string
 }
 
 // modules lists the feature modules available to mount. Plans 2, 3 and 4
@@ -33,6 +39,10 @@ var modules = []Module{}
 // New builds the HTTP handler: the core routes (auth, health, meta) plus
 // each module in modules whose name is enabled in d.Cfg.Modules.
 func New(d Deps) http.Handler {
+	if d.GetEnv == nil {
+		d.GetEnv = os.Getenv
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +60,8 @@ func New(d Deps) http.Handler {
 		d.Auth.LoginHandler(w, r)
 	})
 	mux.HandleFunc("POST /api/v1/auth/logout", d.Auth.LogoutHandler)
+
+	registerCoreRoutes(mux, d)
 
 	var enabled []string
 	for _, m := range modules {
