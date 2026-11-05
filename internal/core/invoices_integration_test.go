@@ -701,7 +701,7 @@ func TestInvoiceValidation422(t *testing.T) {
 }
 
 // TestCreateDraftRejectsHugeQuantity covers CreateDraftInvoice's upper
-// quantity_milli bound: one over 1,000,000,000 is rejected rather than
+// quantity_milli bound: one over 10,000,000 is rejected rather than
 // risking LineAmount's multiplication overflowing.
 func TestCreateDraftRejectsHugeQuantity(t *testing.T) {
 	pool := db.TestPool(t)
@@ -714,11 +714,46 @@ func TestCreateDraftRejectsHugeQuantity(t *testing.T) {
 		Source:    "manual",
 		DueInDays: 14,
 		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: 1_000_000_001, UnitAmount: 100, GSTCode: "N-T"},
+			{Description: "line", QuantityMilli: 10_000_001, UnitAmount: 100, GSTCode: "N-T"},
 		},
 	})
 	if !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestCreateDraftAcceptsMaxQuantityAndUnitAmount covers the max corner of
+// both bounds at once (quantity_milli 10,000,000, unit_amount
+// 100,000,000,000): LineAmount's intermediate quantityMilli*unit
+// multiplication is exactly 1e18, within int64 range, so it must compute
+// the correct amount rather than silently wrapping.
+func TestCreateDraftAcceptsMaxQuantityAndUnitAmount(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+
+	const quantityMilli = 10_000_000
+	const unitAmount = 100_000_000_000
+	// LineAmount = quantityMilli * unit / 1000 (exact, no rounding needed).
+	const wantAmount = quantityMilli * unitAmount / 1000
+
+	inv, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    "manual",
+		DueInDays: 14,
+		Lines: []core.NewLine{
+			{Description: "line", QuantityMilli: quantityMilli, UnitAmount: unitAmount, GSTCode: "N-T"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+	if len(inv.Lines) != 1 || inv.Lines[0].Amount != core.Cents(wantAmount) {
+		t.Fatalf("line amount = %v, want %d (no overflow)", inv.Lines, wantAmount)
+	}
+	if inv.Total != core.Cents(wantAmount) {
+		t.Fatalf("total = %d, want %d", inv.Total, wantAmount)
 	}
 }
 

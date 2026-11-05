@@ -229,10 +229,10 @@ func CreateDraftInvoice(ctx context.Context, q Querier, orgID int64, in NewInvoi
 	lines := make([]Line, len(in.Lines))
 	for i, l := range in.Lines {
 		// Bounds keep LineAmount's quantityMilli*int64(unit) multiplication
-		// (up to 1e9 * 1e11 = 1e20) within int64 range (~9.2e18), so
-		// LineAmount can never overflow.
-		if l.QuantityMilli < 1 || l.QuantityMilli > 1_000_000_000 {
-			return Invoice{}, fmt.Errorf("%w: line %d: quantity_milli must be from 1 to 1,000,000,000", ErrInvalidInput, i)
+		// (at most 10,000,000 * 100,000,000,000 = 1e18) within int64 range
+		// (max ~9.2e18), so LineAmount can never overflow.
+		if l.QuantityMilli < 1 || l.QuantityMilli > 10_000_000 {
+			return Invoice{}, fmt.Errorf("%w: line %d: quantity_milli must be from 1 to 10,000,000", ErrInvalidInput, i)
 		}
 		if l.UnitAmount < 0 || l.UnitAmount > 100_000_000_000 {
 			return Invoice{}, fmt.Errorf("%w: line %d: unit_amount must be from 0 to 100,000,000,000", ErrInvalidInput, i)
