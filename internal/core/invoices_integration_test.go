@@ -409,6 +409,46 @@ func TestIssueInvoiceUsesCallersCalendarDate(t *testing.T) {
 	}
 }
 
+// TestCreateDraftInvoiceStoresPropertyID verifies a NewLine's PropertyID is
+// persisted on its invoice_lines row, so callers (e.g. property's rent run)
+// can attribute rent/charge lines to the property they're for.
+func TestCreateDraftInvoiceStoresPropertyID(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := createOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+
+	var propertyID int64
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO properties (org_id, name) VALUES ($1, $2) RETURNING id",
+		org.ID, "1 Test St",
+	).Scan(&propertyID); err != nil {
+		t.Fatalf("inserting property: %v", err)
+	}
+
+	inv, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+		ContactID: contactID,
+		Source:    "rent",
+		DueInDays: 7,
+		Lines: []core.NewLine{
+			{Description: "Rent", QuantityMilli: 1000, UnitAmount: core.Cents(50000), GSTCode: "INP", PropertyID: &propertyID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+
+	var gotPropertyID *int64
+	if err := pool.QueryRow(ctx,
+		"SELECT property_id FROM invoice_lines WHERE invoice_id = $1", inv.ID,
+	).Scan(&gotPropertyID); err != nil {
+		t.Fatalf("selecting property_id: %v", err)
+	}
+	if gotPropertyID == nil || *gotPropertyID != propertyID {
+		t.Fatalf("property_id = %v, want %d", gotPropertyID, propertyID)
+	}
+}
+
 func TestCrossOrgInvoice404(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()

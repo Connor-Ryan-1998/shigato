@@ -59,6 +59,14 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			terminateLease(w, r, d)
 		})))
+	mux.Handle("GET /api/v1/orgs/{org}/leases/{id}/ledger",
+		d.Auth.RequireOrg(auth.PermPropertyRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			getLedger(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/rent-run",
+		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			runRent(w, r, d)
+		})))
 }
 
 // --- request/response shapes ---
@@ -489,4 +497,69 @@ func terminateLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		return
 	}
 	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated))
+}
+
+// --- ledger handler ---
+
+type ledgerPeriodResponse struct {
+	Start         string `json:"start"`
+	End           string `json:"end"`
+	AmountDue     int64  `json:"amount_due"`
+	InvoiceID     *int64 `json:"invoice_id,omitempty"`
+	InvoiceStatus string `json:"invoice_status,omitempty"`
+	Paid          int64  `json:"paid"`
+}
+
+type ledgerResponse struct {
+	Periods        []ledgerPeriodResponse `json:"periods"`
+	OpeningArrears int64                  `json:"opening_arrears"`
+	Arrears        int64                  `json:"arrears"`
+}
+
+func ledgerToResponse(l Ledger) ledgerResponse {
+	resp := ledgerResponse{
+		Periods:        make([]ledgerPeriodResponse, len(l.Periods)),
+		OpeningArrears: int64(l.OpeningArrears),
+		Arrears:        int64(l.Arrears),
+	}
+	for i, p := range l.Periods {
+		resp.Periods[i] = ledgerPeriodResponse{
+			Start: p.Start.Format(dateLayout), End: p.End.Format(dateLayout),
+			AmountDue: int64(p.AmountDue), InvoiceID: p.InvoiceID,
+			InvoiceStatus: p.InvoiceStatus, Paid: int64(p.Paid),
+		}
+	}
+	return resp
+}
+
+func getLedger(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	leaseID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p := auth.From(r.Context())
+	ledger, err := GetLedger(r.Context(), d.Pool, p.OrgID, leaseID)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, ledgerToResponse(ledger))
+}
+
+// --- rent-run handler ---
+
+func runRent(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	loc := d.Cfg.Location
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	p := auth.From(r.Context())
+	result, err := RunRent(r.Context(), d.Billing, p.OrgID, r.PathValue("org"), time.Now().In(loc))
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, result)
 }
