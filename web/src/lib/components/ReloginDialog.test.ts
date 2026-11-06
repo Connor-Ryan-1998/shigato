@@ -83,6 +83,31 @@ describe('ReloginDialog', () => {
 		vi.unstubAllGlobals();
 	});
 
+	it('shows a full-page SSO redirect link when sso is true', () => {
+		const assign = vi.fn();
+		Object.defineProperty(window, 'location', {
+			value: { pathname: '/acme/invoices', search: '?foo=bar', assign },
+			writable: true
+		});
+
+		render(ReloginDialog, {
+			props: { open: true, email: 'staffer@example.com', sso: true, onSuccess: vi.fn(), onCancel: vi.fn() }
+		});
+
+		const link = screen.getByRole('link', { name: /sign in with sso/i }) as HTMLAnchorElement;
+		expect(link.getAttribute('href')).toBe(
+			'/api/v1/auth/oidc/start?next=' + encodeURIComponent('/acme/invoices?foo=bar')
+		);
+	});
+
+	it('omits the SSO option when sso is false', () => {
+		render(ReloginDialog, {
+			props: { open: true, email: 'staffer@example.com', sso: false, onSuccess: vi.fn(), onCancel: vi.fn() }
+		});
+
+		expect(screen.queryByRole('link', { name: /sign in with sso/i })).toBeNull();
+	});
+
 	it('calls onCancel when the native dialog is dismissed (Escape/backdrop)', () => {
 		vi.stubGlobal('fetch', vi.fn());
 		const onCancel = vi.fn();

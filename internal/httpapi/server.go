@@ -125,6 +125,8 @@ func New(d Deps) http.Handler {
 		d.Auth.LoginHandler(w, r)
 	})
 	mux.HandleFunc("POST /api/v1/auth/logout", d.Auth.LogoutHandler)
+	mux.HandleFunc("GET /api/v1/auth/oidc/start", d.Auth.OIDCStartHandler)
+	mux.HandleFunc("GET /api/v1/auth/oidc/callback", d.Auth.OIDCCallbackHandler)
 
 	registerCoreRoutes(mux, d)
 	registerSettingsRoutes(mux, d)
@@ -149,7 +151,7 @@ func New(d Deps) http.Handler {
 	}
 
 	mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"modules": enabled})
+		writeJSON(w, http.StatusOK, map[string]any{"modules": enabled, "sso": d.Auth.OIDCEnabled()})
 	})
 
 	return csrfMiddleware(d.Cfg.BaseURL, routeWebUI(mux))

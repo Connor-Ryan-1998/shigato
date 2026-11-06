@@ -20,6 +20,7 @@ class SessionStore {
 	me = $state<MeResponse | null>(null);
 	modules = $state<string[]>([]);
 	orgSlug = $state<string | null>(null);
+	sso = $state(false);
 
 	get currentOrg(): MeOrg | null {
 		if (!this.me || !this.orgSlug) return null;
@@ -34,6 +35,10 @@ class SessionStore {
 		this.modules = modules;
 	}
 
+	setSso(sso: boolean): void {
+		this.sso = sso;
+	}
+
 	setOrg(slug: string): void {
 		this.orgSlug = slug;
 	}
@@ -42,6 +47,7 @@ class SessionStore {
 		this.me = null;
 		this.modules = [];
 		this.orgSlug = null;
+		this.sso = false;
 	}
 }
 

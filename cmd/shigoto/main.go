@@ -185,7 +185,17 @@ func serve() error {
 		return fmt.Errorf("migrating database: %w", err)
 	}
 
-	a := auth.New(pool, strings.HasPrefix(cfg.BaseURL, "https://"), auth.WithTrustedProxy(cfg.TrustedProxy))
+	authOpts := []auth.Option{auth.WithTrustedProxy(cfg.TrustedProxy)}
+	if cfg.OIDC != nil {
+		authOpts = append(authOpts, auth.WithOIDC(auth.OIDCConfig{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			Scopes:       cfg.OIDC.Scopes,
+			RedirectURL:  cfg.BaseURL + "/api/v1/auth/oidc/callback",
+		}))
+	}
+	a := auth.New(pool, strings.HasPrefix(cfg.BaseURL, "https://"), authOpts...)
 	deps := httpapi.Deps{Pool: pool, Auth: a, Cfg: cfg}
 	billingSvc := httpapi.DefaultBilling(deps)
 	deps.Billing = billingSvc

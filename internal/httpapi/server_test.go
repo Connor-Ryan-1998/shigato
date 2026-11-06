@@ -67,6 +67,7 @@ func assertMeta(t *testing.T, rec *httptest.ResponseRecorder, want []string) {
 	}
 	var body struct {
 		Modules []string `json:"modules"`
+		SSO     bool     `json:"sso"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding meta response: %v", err)
@@ -77,6 +78,30 @@ func assertMeta(t *testing.T, rec *httptest.ResponseRecorder, want []string) {
 	for i := range want {
 		if body.Modules[i] != want[i] {
 			t.Fatalf("meta modules = %v, want %v", body.Modules, want)
+		}
+	}
+	// Neither Deps in TestMetaListsEnabledModules sets Auth, so this always
+	// reports SSO disabled - OIDCEnabled's nil-receiver safety covers the
+	// httpapi tests (this package's own) that build Deps without an Auth.
+	if body.SSO {
+		t.Fatalf("meta sso = true, want false (no Auth configured)")
+	}
+}
+
+// TestOIDCRoutesDisabledWhenNotConfigured checks the two OIDC routes 404
+// rather than panicking when Deps.Auth has no OIDC configuration - the
+// nil-*Auth case other tests in this package build Deps with, and the
+// configured-but-SSO-disabled case every production deployment without an
+// IdP runs with.
+func TestOIDCRoutesDisabledWhenNotConfigured(t *testing.T) {
+	handler := New(Deps{Cfg: config.Config{Modules: map[string]bool{}}})
+
+	for _, path := range []string{"/api/v1/auth/oidc/start", "/api/v1/auth/oidc/callback"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s: got status %d, want 404", path, rec.Code)
 		}
 	}
 }

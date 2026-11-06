@@ -45,6 +45,10 @@ type Auth struct {
 	trustedProxy  *net.IPNet
 
 	limiter *Limiter
+
+	// oidc is non-nil when OIDC sign-in is configured (WithOIDC). nil
+	// means OIDCEnabled is false and both OIDC handlers 404.
+	oidc *oidcProvider
 }
 
 // Option configures optional Auth behaviour beyond New's required

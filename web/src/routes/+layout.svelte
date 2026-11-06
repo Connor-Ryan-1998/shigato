@@ -34,10 +34,11 @@
 		try {
 			const [me, meta] = await Promise.all([
 				api<MeResponse>('GET', '/api/v1/me'),
-				api<{ modules: string[] }>('GET', '/api/v1/meta')
+				api<{ modules: string[]; sso: boolean }>('GET', '/api/v1/meta')
 			]);
 			session.setMe(me);
 			session.setModules(meta.modules);
+			session.setSso(meta.sso);
 			// Only registered once there's a real session to pre-fill the
 			// dialog's email from: a 401 before this point (e.g. the /me
 			// call itself, on a cold load with an already-expired session)
@@ -103,6 +104,7 @@
 <ReloginDialog
 	bind:open={reloginOpen}
 	email={session.me?.user.email ?? ''}
+	sso={session.sso}
 	onSuccess={handleReloginSuccess}
 	onCancel={handleReloginCancel}
 />

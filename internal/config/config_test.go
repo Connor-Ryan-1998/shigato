@@ -296,6 +296,60 @@ func TestLoadTrustedProxyRejectsInvalidCIDR(t *testing.T) {
 	}
 }
 
+func TestLoadOIDCDisabledByDefault(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.OIDC != nil {
+		t.Errorf("OIDC = %+v, want nil", c.OIDC)
+	}
+}
+
+func TestLoadOIDCRequiresAllThreeTogether(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL":   "postgres://x",
+		"SHIGOTO_BASE_URL":       "http://localhost:8080",
+		"SHIGOTO_OIDC_ISSUER":    "https://idp.example.com",
+		"SHIGOTO_OIDC_CLIENT_ID": "shigoto",
+		// client secret missing
+	}))
+	if err == nil {
+		t.Fatal("expected error for partial OIDC config, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "SHIGOTO_OIDC_CLIENT_SECRET") {
+		t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_OIDC_CLIENT_SECRET")
+	}
+}
+
+func TestLoadOIDCDefaultScopes(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL":       "postgres://x",
+		"SHIGOTO_BASE_URL":           "http://localhost:8080",
+		"SHIGOTO_OIDC_ISSUER":        "https://idp.example.com",
+		"SHIGOTO_OIDC_CLIENT_ID":     "shigoto",
+		"SHIGOTO_OIDC_CLIENT_SECRET": "secret",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.OIDC == nil {
+		t.Fatal("OIDC = nil, want configured")
+	}
+	want := []string{"openid", "email", "profile"}
+	if len(c.OIDC.Scopes) != len(want) {
+		t.Fatalf("Scopes = %v, want %v", c.OIDC.Scopes, want)
+	}
+	for i := range want {
+		if c.OIDC.Scopes[i] != want[i] {
+			t.Fatalf("Scopes = %v, want %v", c.OIDC.Scopes, want)
+		}
+	}
+}
+
 func TestLoadSMTPMissingFromIsError(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"SHIGOTO_DATABASE_URL": "postgres://x",

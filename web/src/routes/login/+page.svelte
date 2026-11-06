@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, ApiError } from '../../lib/api';
@@ -6,10 +7,30 @@
 	import Field from '../../lib/components/Field.svelte';
 	import Button from '../../lib/components/Button.svelte';
 
+	// Fixed messages for the OIDC callback's error codes
+	// (/login?error=<code>). Never derived from IdP text - the backend only
+	// ever sends one of these codes, never a message. An unknown code is
+	// ignored (no error shown) rather than leaking the raw code to the user.
+	const ssoErrorMessages: Record<string, string> = {
+		sso_expired: 'Your sign-in attempt expired. Try again.',
+		sso_unavailable: 'Single sign-on is temporarily unavailable.',
+		sso_failed: 'Single sign-on failed. Try again, or sign in with your password.',
+		email_unverified: 'Your identity provider account has an unverified email address.',
+		not_invited: 'No shigoto account for this email — ask an owner to invite you.',
+		not_staff: 'This account has no staff access.',
+		sso_conflict: 'This identity is already linked to a different account.'
+	};
+
 	let email = $state('');
 	let password = $state('');
-	let error = $state('');
+	let error = $state(ssoErrorMessages[page.url.searchParams.get('error') ?? ''] ?? '');
 	let submitting = $state(false);
+	let sso = $state(false);
+
+	function oidcStartUrl(): string {
+		const next = safeNext(page.url.searchParams.get('next')) ?? '/';
+		return '/api/v1/auth/oidc/start?next=' + encodeURIComponent(next);
+	}
 
 	// Only a same-site, absolute path is a safe redirect target: a bare
 	// "//evil.com" is parsed by browsers as a protocol-relative URL (an
@@ -21,6 +42,18 @@
 		return raw;
 	}
 
+	onMount(() => {
+		api<{ modules: string[]; sso: boolean }>('GET', '/api/v1/meta')
+			.then((meta) => {
+				sso = meta.sso;
+			})
+			.catch(() => {
+				// /meta is unauthenticated and shouldn't ever fail here, but if
+				// it does, just leave the SSO option hidden rather than
+				// blocking the password form.
+			});
+	});
+
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
 		error = '';
@@ -29,10 +62,11 @@
 			await api('POST', '/api/v1/auth/login', { email, password });
 			const [me, meta] = await Promise.all([
 				api<MeResponse>('GET', '/api/v1/me'),
-				api<{ modules: string[] }>('GET', '/api/v1/meta')
+				api<{ modules: string[]; sso: boolean }>('GET', '/api/v1/meta')
 			]);
 			session.setMe(me);
 			session.setModules(meta.modules);
+			session.setSso(meta.sso);
 
 			const next = safeNext(page.url.searchParams.get('next'));
 			if (next) {
@@ -69,6 +103,9 @@
 			<p class="error" role="alert">{error}</p>
 		{/if}
 		<Button type="submit" disabled={submitting}>Sign in</Button>
+		{#if sso}
+			<p class="sso"><a href={oidcStartUrl()}>Sign in with SSO</a></p>
+		{/if}
 	</form>
 </div>
 
@@ -95,5 +132,9 @@
 	.error {
 		margin: 0;
 		color: var(--danger);
+	}
+	.sso {
+		margin: 0;
+		text-align: center;
 	}
 </style>

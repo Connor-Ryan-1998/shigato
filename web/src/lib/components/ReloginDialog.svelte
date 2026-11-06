@@ -14,6 +14,7 @@
 	let {
 		open = $bindable(false),
 		email,
+		sso = false,
 		onSuccess,
 		onCancel
 	}: {
@@ -21,6 +22,11 @@
 		// Pre-filled from the current session store, when one is available -
 		// this dialog never lets the user sign in as someone else.
 		email: string;
+		// Ruling 50: when true, shows a "Sign in with SSO" option alongside
+		// the password form - a full-page redirect to the OIDC start
+		// endpoint. Page state is lost, which is acceptable: the dialog only
+		// ever appears because the session already expired.
+		sso?: boolean;
 		onSuccess: () => void;
 		onCancel: () => void;
 	} = $props();
@@ -28,6 +34,14 @@
 	let password = $state('');
 	let error = $state('');
 	let submitting = $state(false);
+
+	// The path+query the user was on when their session expired, so SSO
+	// sends them back to it afterwards, same as the password form does via
+	// onSuccess's retry.
+	function ssoStartUrl(): string {
+		const next = window.location.pathname + window.location.search;
+		return '/api/v1/auth/oidc/start?next=' + encodeURIComponent(next);
+	}
 
 	// Re-seed on every open, so a previous attempt's error or password
 	// doesn't linger into the next time the session expires.
@@ -103,6 +117,9 @@
 				<Button type="submit" disabled={submitting}>Sign in</Button>
 			</div>
 		</form>
+		{#if sso}
+			<p class="sso"><a href={ssoStartUrl()}>Sign in with SSO</a></p>
+		{/if}
 	{/if}
 </Dialog>
 
@@ -116,6 +133,10 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: var(--space-3);
+	}
+	.sso {
+		margin: 0;
+		text-align: center;
 	}
 	.dialog-error {
 		margin: 0;
