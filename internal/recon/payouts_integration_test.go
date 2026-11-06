@@ -3,16 +3,24 @@
 package recon_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"shigoto/internal/auth"
 	"shigoto/internal/billing"
+	"shigoto/internal/config"
 	"shigoto/internal/core"
 	"shigoto/internal/db"
+	"shigoto/internal/httpapi"
 	"shigoto/internal/payments"
 	"shigoto/internal/recon"
 )
@@ -309,5 +317,407 @@ func TestUnmatchPayoutReverses(t *testing.T) {
 	}
 	if payoutRows != 0 {
 		t.Fatalf("payouts rows after unmatch = %d, want 0", payoutRows)
+	}
+}
+
+// reconTestSetupWithProvider mirrors reconTestSetup (an org with a
+// logged-in owner and the reconciliation module enabled) but wires provider
+// as every org's payments.Provider, for route-level tests of
+// MatchPayout/Suggest's HTTP surface.
+func reconTestSetupWithProvider(t *testing.T, provider payments.Provider) (pool *pgxpool.Pool, handler http.Handler, token string, orgID int64) {
+	t.Helper()
+	pool = db.TestPool(t)
+	org := testOrg(t, pool, "acme")
+
+	hash, err := auth.HashPassword("correct-password")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	var userID int64
+	if err := pool.QueryRow(context.Background(),
+		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
+		"owner@example.com", "Owner", hash,
+	).Scan(&userID); err != nil {
+		t.Fatalf("inserting user: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)",
+		userID, org.ID, string(auth.Owner),
+	); err != nil {
+		t.Fatalf("adding membership: %v", err)
+	}
+	token, err = auth.Login(context.Background(), pool, "owner@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	a := auth.New(pool, false)
+	handler = httpapi.New(httpapi.Deps{
+		Pool:   pool,
+		Auth:   a,
+		Cfg:    config.Config{Modules: map[string]bool{"reconciliation": true}, FilesDir: t.TempDir()},
+		GetEnv: func(string) string { return "" },
+		Payments: func(string) (payments.Provider, error) {
+			if provider == nil {
+				return nil, payments.ErrNoProvider
+			}
+			return provider, nil
+		},
+	})
+	return pool, handler, token, org.ID
+}
+
+// TestMatchPayoutRouteRespondsWithOffendingRefs covers the route end to
+// end: a 409 from an unmatched payout transaction must reach the client
+// with a body naming the offending transaction ref (core.PublicError routed
+// through module.WriteCoreError), not the generic "invalid state" text.
+func TestMatchPayoutRouteRespondsWithOffendingRefs(t *testing.T) {
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: 10000, ArrivalOn: mustDate(t, "2026-11-05"), Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {{Ref: "txn_unknown", Type: "charge", PaymentRef: "pi_does_not_exist", Amount: 10000, Fee: 0}},
+		},
+	}
+	pool, handler, token, orgID := reconTestSetupWithProvider(t, fake)
+	lineID := testBankLineID(t, pool, orgID, 10000, mustDate(t, "2026-11-05"), "Stripe payout")
+
+	body, _ := json.Marshal(map[string]string{"payout_ref": "po_1"})
+	url := fmt.Sprintf("/api/v1/orgs/acme/bank-lines/%d/match-payout", lineID)
+	req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
+	if resp.Error == "invalid state" {
+		t.Fatalf("error = %q, want the specific offending-ref message, not the generic text", resp.Error)
+	}
+	if !bytes.Contains([]byte(resp.Error), []byte("txn_unknown")) {
+		t.Fatalf("error = %q, want it to name txn_unknown", resp.Error)
+	}
+}
+
+// TestMatchPayoutFallsBackToInvoiceRef covers a real-world webhook payment
+// whose provider_ref is the Stripe invoice id (the fallback paymentRef uses
+// when a real invoice.paid event doesn't expand `payments`), not the
+// payment intent id: the balance transaction's PaymentRef (the PI) won't
+// match it, but its InvoiceRef must.
+func TestMatchPayoutFallsBackToInvoiceRef(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	contactID := createContact(t, pool, org.ID)
+
+	paidOn := mustDate(t, "2026-11-01")
+	_, payment1 := testStripePayment(t, pool, org.ID, contactID, 10000, paidOn, "in_test_789")
+
+	arrival := mustDate(t, "2026-11-03")
+	netAmount := int64(10000 - 110)
+	lineID := testBankLineID(t, pool, org.ID, netAmount, arrival, "Stripe payout")
+
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: core.Cents(netAmount), ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {{Ref: "txn_1", Type: "charge", PaymentRef: "pi_test_456", InvoiceRef: "in_test_789", Amount: 10000, Fee: 110}},
+		},
+	}
+	b := testBillingService(pool, fake)
+
+	result, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID, "po_1")
+	if err != nil {
+		t.Fatalf("MatchPayout: %v", err)
+	}
+	if result.PaymentsLinked != 1 {
+		t.Fatalf("PaymentsLinked = %d, want 1", result.PaymentsLinked)
+	}
+	payoutID, _, _ := paymentPayoutAndLine(t, pool, payment1)
+	if payoutID == nil {
+		t.Fatalf("payment payout_id = nil, want set (matched via InvoiceRef fallback)")
+	}
+}
+
+// TestMatchPayoutDoubleMatch409 covers that matching the same payout ref
+// twice - to a second bank line - is rejected with a 409, not a crash or a
+// duplicate payouts row, both when caught by the pre-check and (via a
+// second payout sharing the same ref/line setup) the insert's unique
+// constraint.
+func TestMatchPayoutDoubleMatch409(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	contactID := createContact(t, pool, org.ID)
+
+	_, payment1 := testStripePayment(t, pool, org.ID, contactID, 10000, mustDate(t, "2026-11-01"), "pi_1")
+	arrival := mustDate(t, "2026-11-03")
+	netAmount := int64(10000 - 110)
+	line1 := testBankLineID(t, pool, org.ID, netAmount, arrival, "Stripe payout")
+	line2 := testBankLineID(t, pool, org.ID, netAmount, arrival, "Stripe payout duplicate")
+
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: core.Cents(netAmount), ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {{Ref: "txn_1", Type: "charge", PaymentRef: "pi_1", Amount: 10000, Fee: 110}},
+		},
+	}
+	b := testBillingService(pool, fake)
+
+	if _, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", line1, "po_1"); err != nil {
+		t.Fatalf("first MatchPayout: %v", err)
+	}
+	_ = payment1
+
+	_, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", line2, "po_1")
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("second MatchPayout: err = %v, want ErrInvalidState", err)
+	}
+	if status, _ := bankLineStatus(t, pool, line2); status != "unmatched" {
+		t.Fatalf("line2 status = %s, want unmatched", status)
+	}
+	var payoutRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payouts WHERE org_id = $1 AND provider_ref = 'po_1'`, org.ID).Scan(&payoutRows); err != nil {
+		t.Fatalf("counting payouts: %v", err)
+	}
+	if payoutRows != 1 {
+		t.Fatalf("payouts rows for po_1 = %d, want 1", payoutRows)
+	}
+}
+
+// TestMatchPayoutRequiresPaidStatus409 covers that a payout whose status
+// isn't "paid" (still pending/in_transit, or failed) is rejected before any
+// write.
+func TestMatchPayoutRequiresPaidStatus409(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	arrival := mustDate(t, "2026-11-05")
+	lineID := testBankLineID(t, pool, org.ID, 10000, arrival, "Stripe payout")
+
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: 10000, ArrivalOn: arrival, Status: "in_transit"},
+		},
+	}
+	b := testBillingService(pool, fake)
+
+	_, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID, "po_1")
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("err = %v, want ErrInvalidState", err)
+	}
+	if status, _ := bankLineStatus(t, pool, lineID); status != "unmatched" {
+		t.Fatalf("bank line status = %s, want unmatched", status)
+	}
+}
+
+// TestMatchPayoutEmptyRef422 covers that an empty payout_ref is rejected
+// before any provider call.
+func TestMatchPayoutEmptyRef422(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	lineID := testBankLineID(t, pool, org.ID, 10000, mustDate(t, "2026-11-05"), "Stripe payout")
+
+	b := testBillingService(pool, &payments.Fake{})
+	_, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID, "")
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestMatchPayoutNotFound422 covers that a payout the provider doesn't
+// recognise (payments.ErrPayoutNotFound) is reported as 422, not a generic
+// failure.
+func TestMatchPayoutNotFound422(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	lineID := testBankLineID(t, pool, org.ID, 10000, mustDate(t, "2026-11-05"), "Stripe payout")
+
+	b := testBillingService(pool, &payments.Fake{})
+	_, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID, "po_does_not_exist")
+	if !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestMatchPayoutSkipsPayoutTxnAndChecksSum covers that the payout's own
+// balance transaction (type "payout") is skipped entirely, and that the
+// remaining transactions' net total (amount - fee) must equal the payout
+// amount: a payout whose listed transactions don't actually add up (e.g. a
+// truncated list, or extra untracked activity) is rejected rather than
+// silently booking whatever happened to map.
+func TestMatchPayoutSkipsPayoutTxnAndChecksSum(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	contactID := createContact(t, pool, org.ID)
+
+	_, payment1 := testStripePayment(t, pool, org.ID, contactID, 10000, mustDate(t, "2026-11-01"), "pi_1")
+	_ = payment1
+	arrival := mustDate(t, "2026-11-03")
+	netAmount := int64(10000 - 110)
+	lineID := testBankLineID(t, pool, org.ID, netAmount, arrival, "Stripe payout")
+
+	// Sum mismatch: the charge's net (9890) alone would equal netAmount,
+	// but an extra stripe_fee transaction throws the total off.
+	fakeMismatch := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: core.Cents(netAmount), ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {
+				{Ref: "txn_1", Type: "charge", PaymentRef: "pi_1", Amount: 10000, Fee: 110},
+				{Ref: "txn_2", Type: "stripe_fee", Amount: -50, Fee: 0},
+			},
+		},
+	}
+	b := testBillingService(pool, fakeMismatch)
+	_, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID, "po_1")
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("sum mismatch: err = %v, want ErrInvalidState", err)
+	}
+	if status, _ := bankLineStatus(t, pool, lineID); status != "unmatched" {
+		t.Fatalf("bank line status after mismatch = %s, want unmatched", status)
+	}
+
+	// The payout's own balance transaction (type "payout") is included in
+	// the list (as a real Stripe response would, alongside the charge),
+	// but must be skipped rather than rejected as an unexpected type or
+	// counted into the sum.
+	fakeOK := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: core.Cents(netAmount), ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {
+				{Ref: "txn_1", Type: "charge", PaymentRef: "pi_1", Amount: 10000, Fee: 110},
+				{Ref: "txn_payout", Type: "payout", Amount: core.Cents(-netAmount), Fee: 0},
+			},
+		},
+	}
+	b2 := testBillingService(pool, fakeOK)
+	result, err := recon.MatchPayout(ctx, pool, b2, org.ID, "acme", lineID, "po_1")
+	if err != nil {
+		t.Fatalf("MatchPayout with payout txn present: %v", err)
+	}
+	if result.PaymentsLinked != 1 {
+		t.Fatalf("PaymentsLinked = %d, want 1", result.PaymentsLinked)
+	}
+}
+
+// TestMatchExpenseRejectsFeeExpense409 covers that a "Stripe fees" expense
+// MatchPayout created (linked via payouts.fee_expense_id) can't be matched
+// directly to a debit line - it isn't a free-standing expense.
+func TestMatchExpenseRejectsFeeExpense409(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	contactID := createContact(t, pool, org.ID)
+
+	_, payment1 := testStripePayment(t, pool, org.ID, contactID, 10000, mustDate(t, "2026-11-01"), "pi_1")
+	_ = payment1
+	arrival := mustDate(t, "2026-11-03")
+	netAmount := int64(10000 - 110)
+	payoutLineID := testBankLineID(t, pool, org.ID, netAmount, arrival, "Stripe payout")
+
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: core.Cents(netAmount), ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {{Ref: "txn_1", Type: "charge", PaymentRef: "pi_1", Amount: 10000, Fee: 110}},
+		},
+	}
+	b := testBillingService(pool, fake)
+	result, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", payoutLineID, "po_1")
+	if err != nil {
+		t.Fatalf("MatchPayout: %v", err)
+	}
+
+	debitLineID := testBankLineID(t, pool, org.ID, -110, mustDate(t, "2026-11-03"), "Stripe fee debit, unrelated")
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	err = recon.MatchExpense(ctx, tx, org.ID, debitLineID, *result.FeeExpenseID)
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("MatchExpense on fee expense: err = %v, want ErrInvalidState", err)
+	}
+}
+
+// TestSuggestExcludesFeeExpenseAndMatchedPayout covers two Suggest
+// exclusions: a "Stripe fees" expense (linked via payouts.fee_expense_id,
+// not bank_line_id) must never be offered as a debit-line suggestion, and a
+// payout already matched to a bank line must not be offered again for a
+// different line with the same amount.
+func TestSuggestExcludesFeeExpenseAndMatchedPayout(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	contactID := createContact(t, pool, org.ID)
+
+	_, payment1 := testStripePayment(t, pool, org.ID, contactID, 10000, mustDate(t, "2026-11-01"), "pi_1")
+	_ = payment1
+	arrival := mustDate(t, "2026-11-03")
+	netAmount := int64(10000 - 110)
+	payoutLineID := testBankLineID(t, pool, org.ID, netAmount, arrival, "Stripe payout")
+
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: core.Cents(netAmount), ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {{Ref: "txn_1", Type: "charge", PaymentRef: "pi_1", Amount: 10000, Fee: 110}},
+		},
+	}
+	b := testBillingService(pool, fake)
+	result, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", payoutLineID, "po_1")
+	if err != nil {
+		t.Fatalf("MatchPayout: %v", err)
+	}
+
+	// A debit line of the same amount as the fee expense must not suggest
+	// it.
+	debitLineID := testBankLineID(t, pool, org.ID, -110, mustDate(t, "2026-11-03"), "Unrelated debit")
+	debitSuggestions, err := recon.Suggest(ctx, pool, b, org.ID, "acme", debitLineID)
+	if err != nil {
+		t.Fatalf("Suggest (debit): %v", err)
+	}
+	for _, s := range debitSuggestions {
+		if s.Kind == "expense" && s.ID == *result.FeeExpenseID {
+			t.Fatalf("Suggest offered the fee expense %d as a match", *result.FeeExpenseID)
+		}
+	}
+
+	// A second credit line of the same amount/arrival as the now-matched
+	// payout must not suggest it again.
+	secondCreditLine := testBankLineID(t, pool, org.ID, netAmount, arrival, "Second Stripe payout line")
+	creditSuggestions, err := recon.Suggest(ctx, pool, b, org.ID, "acme", secondCreditLine)
+	if err != nil {
+		t.Fatalf("Suggest (credit): %v", err)
+	}
+	for _, s := range creditSuggestions {
+		if s.Kind == "payout" && s.Ref == "po_1" {
+			t.Fatalf("Suggest offered already-matched payout %q again", s.Ref)
+		}
 	}
 }

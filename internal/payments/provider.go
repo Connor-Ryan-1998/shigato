@@ -21,6 +21,10 @@ var ErrBadSignature = errors.New("bad webhook signature")
 // there's just no provider_url, and the invoice relies on bank/PayID.
 var ErrNoProvider = errors.New("no payment provider configured")
 
+// ErrPayoutNotFound is returned by Provider.GetPayout when the provider has
+// no payout matching the given reference (e.g. Stripe's resource_missing).
+var ErrPayoutNotFound = errors.New("payout not found")
+
 // Provider sends invoices to, and receives payment notifications from, an
 // external payment processor. Stripe is not the source of truth: invoice
 // numbers, amounts and status live in Postgres, and provider IDs are only
@@ -63,14 +67,19 @@ type Payout struct {
 }
 
 // BalanceTxn is one balance transaction contributing to a Payout, as seen
-// by recon.MatchPayout. Type is one of "charge", "payment", "refund",
-// "stripe_fee", "adjustment", or another provider transaction type.
-// PaymentRef is the payment intent id for a "charge"/"payment" transaction
-// (empty otherwise).
+// by recon.MatchPayout. Type is one of "charge", "payment", "payout",
+// "refund", "stripe_fee", "adjustment", or another provider transaction
+// type. PaymentRef is the payment intent id for a "charge"/"payment"
+// transaction (empty otherwise). InvoiceRef is that transaction's provider
+// invoice id, when resolvable (empty otherwise) - a real webhook payment's
+// provider_ref is sometimes the Stripe invoice id rather than the payment
+// intent id (see payments/stripe.paymentRef's fallback), so MatchPayout
+// must be able to match on either.
 type BalanceTxn struct {
 	Ref        string
 	Type       string
 	PaymentRef string
+	InvoiceRef string
 	Amount     core.Cents
 	Fee        core.Cents
 }

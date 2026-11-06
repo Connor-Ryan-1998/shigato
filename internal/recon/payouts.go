@@ -36,6 +36,12 @@ type PayoutResult struct {
 	FeeExpenseID   *int64
 }
 
+// stripeFeeGST is the GST code the fee expense line is given explicitly
+// (rather than relying on the "Stripe fees" category's own default), so a
+// category whose default was later changed can't silently misstate GST on
+// money that genuinely includes it (Stripe AU fees include GST).
+var stripeFeeGST = core.GST
+
 // MatchPayout reconciles credit line lineID against orgSlug's payout
 // payoutRef: every payment the payout transferred is linked to it, and any
 // provider fees are booked as a "Stripe fees" expense dated the line's
@@ -44,13 +50,21 @@ type PayoutResult struct {
 // All calls to the payment provider happen before any transaction opens;
 // nothing inside the transaction touches the network, so a provider outage
 // can never leave a half-written payout. It returns core.ErrInvalidInput
-// (422) if orgSlug has no provider configured, or if fees are owed but the
-// org has no "Stripe fees" category; core.ErrInvalidState (409) if the line
-// isn't an unmatched credit, if the payout's amount or arrival date doesn't
-// match the line, or if any payout transaction doesn't map to an existing
-// payment (listing the offending transaction refs) - in every 409 case,
+// (422) if payoutRef is empty, if orgSlug has no provider configured, if
+// the provider has no such payout, or if fees are owed but the org has no
+// "Stripe fees" category; core.ErrInvalidState (409, with a
+// core.PublicError message where noted) if the line isn't an unmatched
+// credit, if the payout isn't "paid", if its amount or arrival date doesn't
+// match the line, if it was already matched to a bank line (public), if any
+// payout transaction doesn't map to an existing, not-already-linked payment
+// (public, listing the offending transaction refs), or if its transactions'
+// net total doesn't equal the payout amount (public) - in every 409 case,
 // nothing is written.
 func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, orgID int64, orgSlug string, lineID int64, payoutRef string) (PayoutResult, error) {
+	if payoutRef == "" {
+		return PayoutResult{}, fmt.Errorf("%w: payout_ref is required", core.ErrInvalidInput)
+	}
+
 	provider, err := b.Payments(orgSlug)
 	if err != nil {
 		if errors.Is(err, payments.ErrNoProvider) {
@@ -61,7 +75,13 @@ func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, or
 
 	payout, err := provider.GetPayout(ctx, payoutRef)
 	if err != nil {
+		if errors.Is(err, payments.ErrPayoutNotFound) {
+			return PayoutResult{}, fmt.Errorf("%w: payout %q not found", core.ErrInvalidInput, payoutRef)
+		}
 		return PayoutResult{}, fmt.Errorf("fetching payout: %w", err)
+	}
+	if payout.Status != "paid" {
+		return PayoutResult{}, &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout %q is not paid (status %q)", payoutRef, payout.Status)}
 	}
 	txns, err := provider.PayoutTransactions(ctx, payoutRef)
 	if err != nil {
@@ -87,16 +107,41 @@ func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, or
 			return fmt.Errorf("%w: payout arrival date is too far from the bank line's posted date", core.ErrInvalidState)
 		}
 
-		var fees core.Cents
+		// Guards both a genuine retry (the same payout ref matched to a
+		// second line) and the concurrent case (two requests racing to
+		// match the same ref to different lines): this SELECT is the fast
+		// path, and the INSERT's unique_violation below is the backstop a
+		// concurrent request could still race into.
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payouts WHERE org_id = $1 AND provider_ref = $2)`, orgID, payoutRef).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout %q is already matched", payoutRef)}
+		}
+
+		var fees, netTotal core.Cents
 		var paymentIDs []int64
 		var badRefs []string
 		for _, txn := range txns {
 			switch txn.Type {
+			case "payout":
+				// The payout's own balance transaction (the net transfer
+				// itself) isn't one of the transactions it paid out;
+				// skipping it keeps it out of both the ref/sum checks
+				// below.
+				continue
 			case "charge", "payment":
 				var paymentID int64
-				err := tx.QueryRow(ctx, `SELECT id FROM payments WHERE org_id = $1 AND provider_ref = $2`, orgID, txn.PaymentRef).Scan(&paymentID)
-				if errors.Is(err, pgx.ErrNoRows) {
+				var existingPayoutID *int64
+				err := tx.QueryRow(ctx, `
+					SELECT id, payout_id FROM payments
+					WHERE org_id = $1 AND provider_ref IN ($2, $3)`,
+					orgID, txn.PaymentRef, txn.InvoiceRef,
+				).Scan(&paymentID, &existingPayoutID)
+				if errors.Is(err, pgx.ErrNoRows) || (err == nil && existingPayoutID != nil) {
 					badRefs = append(badRefs, txn.Ref)
+					netTotal += txn.Amount - txn.Fee
 					continue
 				}
 				if err != nil {
@@ -113,9 +158,13 @@ func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, or
 			default:
 				badRefs = append(badRefs, txn.Ref)
 			}
+			netTotal += txn.Amount - txn.Fee
 		}
 		if len(badRefs) > 0 {
-			return fmt.Errorf("%w: payout has unmatched or unexpected transactions: %s", core.ErrInvalidState, strings.Join(badRefs, ", "))
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout has unmatched or unexpected transactions: %s", strings.Join(badRefs, ", "))}
+		}
+		if netTotal != payout.Amount {
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout transactions net to %d, expected %d", int64(netTotal), int64(payout.Amount))}
 		}
 
 		var feeExpenseID *int64
@@ -131,7 +180,7 @@ func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, or
 			exp, _, err := CreateExpense(ctx, tx, orgID, NewExpense{
 				SpentOn:     line.PostedOn,
 				Description: fmt.Sprintf("Stripe fees %s", payoutRef),
-				Lines:       []NewExpenseLine{{CategoryID: catID, Amount: fees}},
+				Lines:       []NewExpenseLine{{CategoryID: catID, Amount: fees, GSTCode: &stripeFeeGST}},
 			})
 			if err != nil {
 				return err
@@ -140,12 +189,16 @@ func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, or
 		}
 
 		var payoutID int64
-		if err := tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO payouts (org_id, provider_ref, amount, arrival_on, bank_line_id, fee_expense_id)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			RETURNING id`,
 			orgID, payoutRef, int64(payout.Amount), payout.ArrivalOn, lineID, feeExpenseID,
-		).Scan(&payoutID); err != nil {
+		).Scan(&payoutID)
+		if isUniqueViolation(err) {
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout %q is already matched", payoutRef)}
+		}
+		if err != nil {
 			return err
 		}
 

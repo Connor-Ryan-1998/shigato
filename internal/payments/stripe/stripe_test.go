@@ -374,34 +374,64 @@ func TestSendInvoicePastDueDateRejected(t *testing.T) {
 
 // TestPayoutTransactionsMapsPaymentIntent covers that PayoutTransactions
 // expands a charge transaction's source far enough to read the payment
-// intent id into BalanceTxn.PaymentRef, and reports its fee. It runs
-// against a local httptest server, not the network.
+// intent id into BalanceTxn.PaymentRef, reports its fee, and - since a real
+// webhook payment's provider_ref is sometimes the Stripe invoice id rather
+// than the payment intent id (paymentRef's fallback when `payments` isn't
+// expanded) - separately resolves BalanceTxn.InvoiceRef via the
+// /v1/invoice_payments endpoint, queried by payment.payment_intent. It runs
+// against a local httptest server, not the network, and asserts the exact
+// expand/query params each request sends.
 func TestPayoutTransactionsMapsPaymentIntent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/balance_transactions" {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/balance_transactions":
+			if got := r.URL.Query().Get("payout"); got != "po_test_1" {
+				t.Errorf("payout query = %q, want po_test_1", got)
+			}
+			if got := r.URL.Query().Get("expand[0]"); got != "data.source" {
+				t.Errorf("expand[0] query = %q, want data.source", got)
+			}
+			fmt.Fprint(w, `{
+				"object": "list",
+				"has_more": false,
+				"url": "/v1/balance_transactions",
+				"data": [{
+					"id": "txn_1",
+					"object": "balance_transaction",
+					"amount": 10000,
+					"fee": 110,
+					"type": "charge",
+					"source": {
+						"id": "ch_1",
+						"object": "charge",
+						"payment_intent": "pi_test_456"
+					}
+				}]
+			}`)
+		case "/v1/invoice_payments":
+			if got := r.URL.Query().Get("payment[payment_intent]"); got != "pi_test_456" {
+				t.Errorf("payment[payment_intent] query = %q, want pi_test_456", got)
+			}
+			if got := r.URL.Query().Get("payment[type]"); got != "payment_intent" {
+				t.Errorf("payment[type] query = %q, want payment_intent", got)
+			}
+			fmt.Fprint(w, `{
+				"object": "list",
+				"has_more": false,
+				"url": "/v1/invoice_payments",
+				"data": [{
+					"id": "ip_1",
+					"object": "invoice_payment",
+					"invoice": {
+						"id": "in_test_789",
+						"object": "invoice"
+					}
+				}]
+			}`)
+		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("payout"); got != "po_test_1" {
-			t.Errorf("payout query = %q, want po_test_1", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{
-			"object": "list",
-			"has_more": false,
-			"url": "/v1/balance_transactions",
-			"data": [{
-				"id": "txn_1",
-				"object": "balance_transaction",
-				"amount": 10000,
-				"fee": 110,
-				"type": "charge",
-				"source": {
-					"id": "ch_1",
-					"object": "charge",
-					"payment_intent": "pi_test_456"
-				}
-			}]
-		}`)
 	}))
 	defer srv.Close()
 
@@ -428,6 +458,9 @@ func TestPayoutTransactionsMapsPaymentIntent(t *testing.T) {
 	}
 	if txn.PaymentRef != "pi_test_456" {
 		t.Errorf("PaymentRef = %q, want pi_test_456", txn.PaymentRef)
+	}
+	if txn.InvoiceRef != "in_test_789" {
+		t.Errorf("InvoiceRef = %q, want in_test_789", txn.InvoiceRef)
 	}
 	if txn.Amount != 10000 {
 		t.Errorf("Amount = %d, want 10000", txn.Amount)

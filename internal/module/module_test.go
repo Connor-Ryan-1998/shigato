@@ -50,6 +50,7 @@ func TestWriteCoreErrorInvalidStateMessages(t *testing.T) {
 		{"bare ErrInvalidState", core.ErrInvalidState, "invalid state"},
 		{"wrapped with internal detail", fmt.Errorf("stripe: invoice 7 has no due date: %w", core.ErrInvalidState), "invalid state"},
 		{"invoice has payments", core.ErrInvoiceHasPayments, "invoice has payments; record a credit note instead"},
+		{"public error", &core.PublicError{Err: core.ErrInvalidState, Msg: "payout has unmatched transactions: txn_1"}, "payout has unmatched transactions: txn_1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

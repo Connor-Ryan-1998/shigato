@@ -165,21 +165,37 @@ func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core
 	return sent.ID, sent.HostedInvoiceURL, nil
 }
 
+// dateOnly truncates t to its calendar date in loc, stored as UTC midnight -
+// the same normalization core.IssueInvoice and billing.sendToProvider use
+// for every other calendar date shigoto stores (see Config.Location global
+// constraint): taking t's Y/M/D in loc, not a UTC day truncation, which
+// would shift the date for an org east of UTC.
+func dateOnly(t time.Time, loc *time.Location) time.Time {
+	y, m, d := t.In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
 // toPayout converts a Stripe payout to payments.Payout, reporting
-// ArrivalOn as a calendar date in s.loc.
+// ArrivalOn as a calendar date (see dateOnly) in s.loc.
 func (s *Stripe) toPayout(p *stripego.Payout) payments.Payout {
 	return payments.Payout{
 		Ref:       p.ID,
 		Amount:    core.Cents(p.Amount),
-		ArrivalOn: time.Unix(p.ArrivalDate, 0).In(s.locOrUTC()),
+		ArrivalOn: dateOnly(time.Unix(p.ArrivalDate, 0), s.locOrUTC()),
 		Status:    string(p.Status),
 	}
 }
 
-// GetPayout fetches one payout by its Stripe id.
+// GetPayout fetches one payout by its Stripe id. A Stripe resource_missing
+// error (no such payout) is reported as payments.ErrPayoutNotFound, so
+// recon.MatchPayout can map it to a 422 rather than a generic failure.
 func (s *Stripe) GetPayout(ctx context.Context, payoutRef string) (payments.Payout, error) {
 	p, err := s.client.V1Payouts.Retrieve(ctx, payoutRef, nil)
 	if err != nil {
+		var stripeErr *stripego.Error
+		if errors.As(err, &stripeErr) && stripeErr.Code == stripego.ErrorCodeResourceMissing {
+			return payments.Payout{}, fmt.Errorf("%w: %s: %v", payments.ErrPayoutNotFound, payoutRef, err)
+		}
 		return payments.Payout{}, fmt.Errorf("stripe: retrieving payout %s: %w", payoutRef, err)
 	}
 	return s.toPayout(p), nil
@@ -207,11 +223,9 @@ func (s *Stripe) ListPayouts(ctx context.Context, arrivalFrom, arrivalTo time.Ti
 	return out, nil
 }
 
-// balanceTxnType maps a Stripe balance transaction type to the type
-// payments.BalanceTxn reports: "charge" and "payment" pass through
-// unchanged (recon.MatchPayout treats both as a payment to match), and
-// "stripe_fee" also passes through; every other Stripe type is reported
-// as-is, left for the caller to reject as unexpected.
+// balanceTxnPaymentRef returns the payment intent id of txn's underlying
+// charge, reachable without a second round trip because PayoutTransactions
+// expands "data.source".
 func balanceTxnPaymentRef(txn *stripego.BalanceTransaction) string {
 	if txn.Source == nil || txn.Source.Charge == nil || txn.Source.Charge.PaymentIntent == nil {
 		return ""
@@ -219,9 +233,44 @@ func balanceTxnPaymentRef(txn *stripego.BalanceTransaction) string {
 	return txn.Source.Charge.PaymentIntent.ID
 }
 
+// invoiceRefForPaymentIntent resolves the Stripe invoice id that payment
+// intent piID paid, or "" if it didn't pay an invoice.
+//
+// Neither Charge nor PaymentIntent carries an invoice reference in this API
+// version (Stripe's invoice.payments model moved that link onto the
+// invoice, not the payment) - paymentRef (above) already relies on that for
+// the webhook side. The only way back from a payment intent to its invoice
+// is the newer /v1/invoice_payments list endpoint, queried by
+// payment.payment_intent without an invoice filter; this must be resolved
+// because a real webhook payment's provider_ref is sometimes the Stripe
+// invoice id rather than the payment intent id (see paymentRef's fallback
+// when a real invoice.paid event doesn't expand `payments`), and
+// MatchPayout needs to match either.
+func (s *Stripe) invoiceRefForPaymentIntent(ctx context.Context, piID string) (string, error) {
+	params := &stripego.InvoicePaymentListParams{
+		Payment: &stripego.InvoicePaymentListPaymentParams{
+			Type:          stripego.String(string(stripego.InvoicePaymentPaymentTypePaymentIntent)),
+			PaymentIntent: stripego.String(piID),
+		},
+	}
+	params.Limit = stripego.Int64(1)
+	params.Single = true
+	for ip, err := range s.client.V1InvoicePayments.List(ctx, params).All(ctx) {
+		if err != nil {
+			return "", err
+		}
+		if ip.Invoice != nil {
+			return ip.Invoice.ID, nil
+		}
+		break
+	}
+	return "", nil
+}
+
 // PayoutTransactions lists the balance transactions that make up payoutRef,
 // expanding each one's source so a charge's payment intent id is reachable
-// without a second round trip.
+// without a second round trip, and (for a charge/payment transaction)
+// separately resolving its Stripe invoice id via invoiceRefForPaymentIntent.
 func (s *Stripe) PayoutTransactions(ctx context.Context, payoutRef string) ([]payments.BalanceTxn, error) {
 	params := &stripego.BalanceTransactionListParams{Payout: stripego.String(payoutRef)}
 	params.AddExpand("data.source")
@@ -234,10 +283,19 @@ func (s *Stripe) PayoutTransactions(ctx context.Context, payoutRef string) ([]pa
 		if fee < 0 {
 			fee = -fee
 		}
+		paymentRef := balanceTxnPaymentRef(txn)
+		var invoiceRef string
+		if paymentRef != "" {
+			invoiceRef, err = s.invoiceRefForPaymentIntent(ctx, paymentRef)
+			if err != nil {
+				return nil, fmt.Errorf("stripe: resolving invoice for payment intent %s: %w", paymentRef, err)
+			}
+		}
 		out = append(out, payments.BalanceTxn{
 			Ref:        txn.ID,
 			Type:       string(txn.Type),
-			PaymentRef: balanceTxnPaymentRef(txn),
+			PaymentRef: paymentRef,
+			InvoiceRef: invoiceRef,
 			Amount:     core.Cents(txn.Amount),
 			Fee:        fee,
 		})

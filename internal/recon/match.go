@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -179,6 +180,19 @@ func MatchExpense(ctx context.Context, tx core.Querier, orgID, lineID, expenseID
 	}
 	if expBankLineID != nil {
 		return fmt.Errorf("%w: expense is already linked to a bank line", core.ErrInvalidState)
+	}
+
+	// A "Stripe fees" expense MatchPayout created is linked via
+	// payouts.fee_expense_id, not expenses.bank_line_id (the bank line
+	// already belongs to the payout), so the check above doesn't catch
+	// it: reject it here instead of letting it be double-booked against a
+	// debit line too.
+	var isFeeExpense bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payouts WHERE org_id = $1 AND fee_expense_id = $2)`, orgID, expenseID).Scan(&isFeeExpense); err != nil {
+		return err
+	}
+	if isFeeExpense {
+		return fmt.Errorf("%w: expense is a Stripe payout fee; it can't be matched directly", core.ErrInvalidState)
 	}
 
 	exp, err := GetExpense(ctx, tx, orgID, expenseID)
@@ -404,6 +418,15 @@ func daysBetween(a, b time.Time) int {
 	return d
 }
 
+// payoutAlreadyMatched reports whether orgID already has a payouts row for
+// provider reference ref, so Suggest doesn't keep offering a payout that's
+// already been matched to a bank line.
+func payoutAlreadyMatched(ctx context.Context, q core.Querier, orgID int64, ref string) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payouts WHERE org_id = $1 AND provider_ref = $2)`, orgID, ref).Scan(&exists)
+	return exists, err
+}
+
 // Suggest ranks candidate invoices (for a credit line) or expenses (for a
 // debit line) that lineID might reconcile against, highest score first,
 // capped at 10. For a credit line it also asks orgSlug's payment provider
@@ -463,16 +486,28 @@ func Suggest(ctx context.Context, q core.Querier, b *billing.Service, orgID int6
 			to := line.PostedOn.AddDate(0, 0, 5)
 			payouts, err := provider.ListPayouts(ctx, from, to)
 			if err != nil {
-				return nil, err
-			}
-			for _, p := range payouts {
-				if p.Amount != line.Amount {
-					continue
+				// A live provider error degrades to "no payout
+				// suggestions" rather than failing the whole call - the
+				// invoice suggestions above are still useful on their
+				// own, and a flaky provider shouldn't block them.
+				slog.Error("listing payouts for suggestions failed", "error", err)
+			} else {
+				for _, p := range payouts {
+					if p.Amount != line.Amount {
+						continue
+					}
+					matched, err := payoutAlreadyMatched(ctx, q, orgID, p.Ref)
+					if err != nil {
+						return nil, err
+					}
+					if matched {
+						continue
+					}
+					suggestions = append(suggestions, Suggestion{Kind: "payout", Ref: p.Ref, Score: 90, Reason: "payout amount and arrival date match"})
 				}
-				suggestions = append(suggestions, Suggestion{Kind: "payout", Ref: p.Ref, Score: 90, Reason: "payout amount and arrival date match"})
 			}
 		} else if !errors.Is(err, payments.ErrNoProvider) {
-			return nil, err
+			slog.Error("resolving payment provider for suggestions failed", "error", err)
 		}
 	case line.Amount < 0:
 		rows, err := q.Query(ctx, `
@@ -480,6 +515,7 @@ func Suggest(ctx context.Context, q core.Querier, b *billing.Service, orgID int6
 			FROM expenses e
 			JOIN expense_lines l ON l.expense_id = e.id
 			WHERE e.org_id = $1 AND e.bank_line_id IS NULL
+				AND NOT EXISTS (SELECT 1 FROM payouts p WHERE p.org_id = e.org_id AND p.fee_expense_id = e.id)
 			GROUP BY e.id, e.spent_on`,
 			orgID,
 		)

@@ -39,6 +39,20 @@ func (invoiceHasPaymentsError) Unwrap() error { return ErrInvalidState }
 // voided has at least one recorded payment.
 var ErrInvoiceHasPayments error = invoiceHasPaymentsError{}
 
+// PublicError pairs an internal sentinel (Err, e.g. ErrInvalidState) with a
+// message that's safe to send to an API client - module.WriteCoreError
+// renders Msg instead of that sentinel's generic text, the same way
+// invoiceHasPaymentsError gets its own exact 409 message. Use it wherever a
+// 409 needs to say something specific (e.g. which refs didn't match)
+// without leaking internal detail for every other ErrInvalidState.
+type PublicError struct {
+	Err error
+	Msg string
+}
+
+func (e *PublicError) Error() string { return e.Msg }
+func (e *PublicError) Unwrap() error { return e.Err }
+
 // NewLine is one line of a draft invoice being created.
 type NewLine struct {
 	Description   string

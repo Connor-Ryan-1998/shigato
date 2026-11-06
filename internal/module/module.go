@@ -89,6 +89,8 @@ func PathID(r *http.Request) (int64, bool) {
 
 // WriteCoreError maps a core package error to an HTTP response.
 func WriteCoreError(w http.ResponseWriter, err error) {
+	var pub *core.PublicError
+	hasPublicMsg := errors.As(err, &pub)
 	switch {
 	case errors.Is(err, core.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "not found")
@@ -104,6 +106,11 @@ func WriteCoreError(w http.ResponseWriter, err error) {
 		// fixed generic text, so internal error text never leaks into an
 		// API response body.
 		WriteError(w, http.StatusConflict, err.Error())
+	case hasPublicMsg && errors.Is(err, core.ErrInvalidState):
+		// A core.PublicError wrapping ErrInvalidState (e.g. recon's
+		// unmatched-payout-transaction or fee-sum-mismatch errors) renders
+		// its own Msg instead of the generic text below.
+		WriteError(w, http.StatusConflict, pub.Msg)
 	case errors.Is(err, core.ErrInvalidState):
 		WriteError(w, http.StatusConflict, "invalid state")
 	default:

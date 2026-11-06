@@ -168,7 +168,7 @@ func (f *Fake) GetPayout(_ context.Context, payoutRef string) (Payout, error) {
 	}
 	p, ok := f.Payouts[payoutRef]
 	if !ok {
-		return Payout{}, fmt.Errorf("fake: payout %q not found", payoutRef)
+		return Payout{}, fmt.Errorf("%w: %q", ErrPayoutNotFound, payoutRef)
 	}
 	return p, nil
 }
