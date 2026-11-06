@@ -443,12 +443,12 @@ func basDetailHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 // --- CSV ---
 
 // csvSafe guards against formula injection by prefixing a single quote to
-// any text cell starting with =, +, -, or @, which spreadsheet software
-// would otherwise treat as a formula. Only applied to free text cells
+// any text cell starting with =, +, -, @, tab or carriage return, which
+// spreadsheet software would otherwise treat as a formula. Only applied to free text cells
 // (descriptions/categories/references/names), never to the numeric amount
 // columns.
 func csvSafe(s string) string {
-	if s != "" && strings.ContainsAny(s[:1], "=+-@") {
+	if s != "" && strings.ContainsAny(s[:1], "=+-@\t\r") {
 		return "'" + s
 	}
 	return s

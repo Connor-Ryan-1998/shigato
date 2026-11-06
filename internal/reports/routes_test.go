@@ -27,3 +27,23 @@ func TestResolveRangeToBeforeFrom(t *testing.T) {
 		t.Errorf("to before from accepted, want rejected")
 	}
 }
+
+// TestCSVSafe checks formula-trigger characters, including a leading tab or
+// carriage return, get a ' prefix and ordinary text is left alone.
+func TestCSVSafe(t *testing.T) {
+	cases := map[string]string{
+		"=SUM(A1)": "'=SUM(A1)",
+		"+1":       "'+1",
+		"-1":       "'-1",
+		"@x":       "'@x",
+		"\tx":      "'\tx",
+		"\rx":      "'\rx",
+		"Rent":     "Rent",
+		"":         "",
+	}
+	for in, want := range cases {
+		if got := csvSafe(in); got != want {
+			t.Errorf("csvSafe(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
