@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -301,16 +302,63 @@ func getInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// defaultInvoiceListLimit and maxInvoiceListLimit bound GET /invoices'
+// limit query param: 50 unless given, never more than 200.
+const (
+	defaultInvoiceListLimit = 50
+	maxInvoiceListLimit     = 200
+)
+
+// invoiceListResponse is GET /invoices' response shape: the page of
+// invoices plus the total count of invoices matching the filter (ignoring
+// limit/offset), for pagination.
+type invoiceListResponse struct {
+	Invoices []billing.InvoiceResponse `json:"invoices"`
+	Total    int                       `json:"total"`
+}
+
 func listInvoices(w http.ResponseWriter, r *http.Request, d Deps) {
+	q := r.URL.Query()
+	filter := core.InvoiceListFilter{
+		Status:  q.Get("status"),
+		Overdue: q.Get("overdue") == "true",
+		Today:   today(d),
+		Limit:   defaultInvoiceListLimit,
+	}
+	if s := q.Get("contact_id"); s != "" {
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "contact_id must be an integer")
+			return
+		}
+		filter.ContactID = &id
+	}
+	if s := q.Get("limit"); s != "" {
+		limit, err := strconv.Atoi(s)
+		if err != nil || limit < 1 {
+			writeError(w, http.StatusUnprocessableEntity, "limit must be a positive integer")
+			return
+		}
+		filter.Limit = min(limit, maxInvoiceListLimit)
+	}
+	if s := q.Get("offset"); s != "" {
+		offset, err := strconv.Atoi(s)
+		if err != nil || offset < 0 {
+			writeError(w, http.StatusUnprocessableEntity, "offset must be a non-negative integer")
+			return
+		}
+		filter.Offset = offset
+	}
+
 	p := auth.From(r.Context())
-	invoices, err := core.ListInvoices(r.Context(), d.Pool, p.OrgID, r.URL.Query().Get("status"))
+	invoices, total, err := core.ListInvoices(r.Context(), d.Pool, p.OrgID, filter)
 	if err != nil {
 		slog.Error("list invoices failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	resp := make([]billing.InvoiceResponse, len(invoices))
+	resp := invoiceListResponse{Invoices: make([]billing.InvoiceResponse, len(invoices)), Total: total}
 	for i, inv := range invoices {
 		ir, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 		if err != nil {
@@ -318,7 +366,7 @@ func listInvoices(w http.ResponseWriter, r *http.Request, d Deps) {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
-		resp[i] = ir
+		resp.Invoices[i] = ir
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

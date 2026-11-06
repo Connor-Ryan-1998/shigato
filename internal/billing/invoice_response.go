@@ -28,6 +28,7 @@ type LineResponse struct {
 type InvoiceResponse struct {
 	ID               int64          `json:"id"`
 	ContactID        int64          `json:"contact_id"`
+	ContactName      string         `json:"contact_name"`
 	Number           *int           `json:"number"`
 	Source           string         `json:"source"`
 	Status           string         `json:"status"`
@@ -37,6 +38,8 @@ type InvoiceResponse struct {
 	Subtotal         int64          `json:"subtotal"`
 	GSTTotal         int64          `json:"gst_total"`
 	Total            int64          `json:"total"`
+	AmountPaid       int64          `json:"amount_paid"`
+	Outstanding      int64          `json:"outstanding"`
 	PaymentReference string         `json:"payment_reference"`
 	PayOptions       []string       `json:"pay_options"`
 	Lines            []LineResponse `json:"lines"`
@@ -62,9 +65,27 @@ func (s *Service) InvoiceJSON(ctx context.Context, q core.Querier, inv core.Invo
 		return InvoiceResponse{}, err
 	}
 
+	contact, err := core.GetContact(ctx, q, inv.OrgID, inv.ContactID)
+	if err != nil {
+		return InvoiceResponse{}, err
+	}
+
+	var paid int64
+	if err := q.QueryRow(ctx,
+		`SELECT coalesce(sum(amount), 0) FROM payments WHERE org_id = $1 AND invoice_id = $2`,
+		inv.OrgID, inv.ID,
+	).Scan(&paid); err != nil {
+		return InvoiceResponse{}, err
+	}
+	// Outstanding is floored at 0, matching the dashboard's own rule: an
+	// overpaid invoice (allowed - see MatchInvoice) must never report a
+	// negative balance owed.
+	outstanding := max(int64(inv.Total)-paid, 0)
+
 	resp := InvoiceResponse{
-		ID: inv.ID, ContactID: inv.ContactID, Number: inv.Number, Source: inv.Source, Status: inv.Status,
+		ID: inv.ID, ContactID: inv.ContactID, ContactName: contact.Name, Number: inv.Number, Source: inv.Source, Status: inv.Status,
 		Currency: inv.Currency, Subtotal: int64(inv.Subtotal), GSTTotal: int64(inv.GSTTotal), Total: int64(inv.Total),
+		AmountPaid: paid, Outstanding: outstanding,
 		PaymentReference: inv.PaymentReference, PayOptions: InvoicePayOptions(inv, opts), Lines: make([]LineResponse, len(inv.Lines)),
 	}
 	if inv.IssueDate != nil {

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,6 +38,15 @@ type Deps struct {
 type Module struct {
 	Name   string
 	Routes func(mux *http.ServeMux, d Deps)
+	// Dashboard builds this module's dashboard section for orgID as of
+	// today (a UTC-midnight calendar date, in the caller's configured
+	// Location), using q for reads. It is nil for a module with no
+	// dashboard section. The httpapi dashboard handler calls it only for
+	// an enabled module whose role holds that module's read permission,
+	// and assembles its result under the module's name - the module
+	// itself owns the money/date maths behind its own numbers, so that
+	// logic is never duplicated in httpapi.
+	Dashboard func(ctx context.Context, q core.Querier, orgID int64, today time.Time) (any, error)
 }
 
 // maxBodyBytes caps request bodies ReadJSON will accept.

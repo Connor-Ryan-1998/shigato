@@ -289,7 +289,7 @@ func TestDeleteLinkedExpense409(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
-	lines, err := recon.ListBankLines(ctx, pool, org.ID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(ctx, pool, org.ID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}

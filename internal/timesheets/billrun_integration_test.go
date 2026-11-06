@@ -541,7 +541,7 @@ func TestRunBillingZeroTotal422(t *testing.T) {
 		t.Fatalf("result.Invoice.ID = %d, want 0 (no draft committed)", result.Invoice.ID)
 	}
 
-	invoices, err := core.ListInvoices(ctx, pool, org.ID, "")
+	invoices, _, err := core.ListInvoices(ctx, pool, org.ID, core.InvoiceListFilter{})
 	if err != nil {
 		t.Fatalf("ListInvoices: %v", err)
 	}

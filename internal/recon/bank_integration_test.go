@@ -163,7 +163,7 @@ func TestImportIdempotent(t *testing.T) {
 		t.Fatalf("second (repeat) import = %+v, want {RowsTotal:3 RowsNew:0}", second)
 	}
 
-	lines, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestImportOverlap(t *testing.T) {
 		t.Fatalf("overlap import = %+v, want {RowsTotal:4 RowsNew:1}", got)
 	}
 
-	lines, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestImportKeepsSameDayDuplicates(t *testing.T) {
 		t.Fatalf("import = %+v, want {RowsTotal:2 RowsNew:2}", got)
 	}
 
-	lines, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestImportConcurrentSameFile(t *testing.T) {
 		t.Fatalf("sum of RowsNew across concurrent imports = %d, want 3 (each row created exactly once)", sumNew)
 	}
 
-	lines, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}

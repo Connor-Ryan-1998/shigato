@@ -51,4 +51,9 @@ type BankLineFilter struct {
 	Status        *string
 	From          *time.Time
 	To            *time.Time
+	// Limit caps the number of rows returned. Zero (the default) means no
+	// limit.
+	Limit int
+	// Offset skips this many matching rows before Limit is applied.
+	Offset int
 }

@@ -326,6 +326,28 @@ func ListLeasesByProperty(ctx context.Context, q core.Querier, orgID, propertyID
 	return leases, nil
 }
 
+// listLeaseIDs lists the ids of every lease in orgID, for the dashboard's
+// across-every-lease totals (GetLedger and BondInfo take a lease id, not a
+// property, so there's no single aggregate query for them - see
+// dashboardSection's own note).
+func listLeaseIDs(ctx context.Context, q core.Querier, orgID int64) ([]int64, error) {
+	rows, err := q.Query(ctx, `SELECT id FROM leases WHERE org_id = $1 ORDER BY id`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // --- rent changes ---
 
 func listRentChanges(ctx context.Context, q core.Querier, leaseID int64) ([]LeaseRentChange, error) {

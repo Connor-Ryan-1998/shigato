@@ -1,6 +1,7 @@
 package recon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +37,38 @@ func parseDate(s string) (time.Time, error) {
 // Module returns the reconciliation module: bank accounts and their CSV
 // imports, gated by config.Config.Modules["reconciliation"].
 func Module() module.Module {
-	return module.Module{Name: "reconciliation", Routes: registerRoutes}
+	return module.Module{Name: "reconciliation", Routes: registerRoutes, Dashboard: dashboardSection}
+}
+
+// reconDashboard is the reconciliation module's dashboard section.
+type reconDashboard struct {
+	UnmatchedCount    int     `json:"unmatched_count"`
+	OldestUnmatchedOn *string `json:"oldest_unmatched_on"`
+	UnmatchedIn       int64   `json:"unmatched_in"`
+	UnmatchedOut      int64   `json:"unmatched_out"`
+}
+
+// dashboardSection builds the reconciliation module's dashboard section in
+// a single aggregate query over unmatched bank lines: how many, the oldest
+// one's date, and the total credited in versus debited out.
+func dashboardSection(ctx context.Context, q core.Querier, orgID int64, _ time.Time) (any, error) {
+	var d reconDashboard
+	var oldest *time.Time
+	err := q.QueryRow(ctx, `
+		SELECT count(*), min(posted_on),
+			coalesce(sum(amount) FILTER (WHERE amount > 0), 0),
+			coalesce(sum(-amount) FILTER (WHERE amount < 0), 0)
+		FROM bank_lines WHERE org_id = $1 AND status = 'unmatched'`,
+		orgID,
+	).Scan(&d.UnmatchedCount, &oldest, &d.UnmatchedIn, &d.UnmatchedOut)
+	if err != nil {
+		return nil, err
+	}
+	if oldest != nil {
+		s := oldest.Format(dateLayout)
+		d.OldestUnmatchedOn = &s
+	}
+	return d, nil
 }
 
 func registerRoutes(mux *http.ServeMux, d module.Deps) {
@@ -174,23 +206,42 @@ type importResponse struct {
 	RowsNew   int `json:"rows_new"`
 }
 
-type bankLineResponse struct {
-	ID            int64   `json:"id"`
-	BankAccountID int64   `json:"bank_account_id"`
-	ImportID      int64   `json:"import_id"`
-	PostedOn      string  `json:"posted_on"`
-	Amount        int64   `json:"amount"`
-	Description   string  `json:"description"`
-	Status        string  `json:"status"`
-	IgnoreReason  *string `json:"ignore_reason,omitempty"`
+// bankLineMatchResponse is what bank line's matched (or ignored) entity
+// renders as: the invoice number for invoices, the expense description for
+// expenses, the payout ref for payouts, or the ignore reason for ignored
+// lines.
+type bankLineMatchResponse struct {
+	Kind  string `json:"kind"`
+	ID    int64  `json:"id"`
+	Label string `json:"label"`
 }
 
-func bankLineToResponse(l BankLine) bankLineResponse {
-	return bankLineResponse{
+type bankLineResponse struct {
+	ID            int64                  `json:"id"`
+	BankAccountID int64                  `json:"bank_account_id"`
+	ImportID      int64                  `json:"import_id"`
+	PostedOn      string                 `json:"posted_on"`
+	Amount        int64                  `json:"amount"`
+	Description   string                 `json:"description"`
+	Status        string                 `json:"status"`
+	IgnoreReason  *string                `json:"ignore_reason,omitempty"`
+	Match         *bankLineMatchResponse `json:"match"`
+}
+
+// bankLineToResponse builds l's JSON response. match is l's resolved
+// BankLineMatch (see MatchFor), nil for an unmatched line - rendered as a
+// JSON null, never omitted, so a client can always rely on the key being
+// present.
+func bankLineToResponse(l BankLine, match *BankLineMatch) bankLineResponse {
+	resp := bankLineResponse{
 		ID: l.ID, BankAccountID: l.BankAccountID, ImportID: l.ImportID,
 		PostedOn: l.PostedOn.Format(dateLayout), Amount: int64(l.Amount),
 		Description: l.Description, Status: l.Status, IgnoreReason: l.IgnoreReason,
 	}
+	if match != nil {
+		resp.Match = &bankLineMatchResponse{Kind: match.Kind, ID: match.ID, Label: match.Label}
+	}
+	return resp
 }
 
 // --- handlers ---
@@ -278,9 +329,24 @@ func importBankLines(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 var validBankLineStatuses = map[string]bool{"unmatched": true, "matched": true, "ignored": true}
 
+// defaultBankLineListLimit and maxBankLineListLimit bound GET /bank-lines'
+// limit query param, matching GET /invoices' own defaults.
+const (
+	defaultBankLineListLimit = 50
+	maxBankLineListLimit     = 200
+)
+
+// bankLineListResponse is GET /bank-lines' response shape: the page of
+// lines plus the total count of lines matching the filter (ignoring
+// limit/offset), for pagination.
+type bankLineListResponse struct {
+	Lines []bankLineResponse `json:"lines"`
+	Total int                `json:"total"`
+}
+
 func listBankLinesHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	q := r.URL.Query()
-	var filter BankLineFilter
+	filter := BankLineFilter{Limit: defaultBankLineListLimit}
 
 	if s := q.Get("account_id"); s != "" {
 		id, err := strconv.ParseInt(s, 10, 64)
@@ -313,16 +379,37 @@ func listBankLinesHandler(w http.ResponseWriter, r *http.Request, d module.Deps)
 		}
 		filter.To = &t
 	}
+	if s := q.Get("limit"); s != "" {
+		limit, err := strconv.Atoi(s)
+		if err != nil || limit < 1 {
+			module.WriteError(w, http.StatusUnprocessableEntity, "limit must be a positive integer")
+			return
+		}
+		filter.Limit = min(limit, maxBankLineListLimit)
+	}
+	if s := q.Get("offset"); s != "" {
+		offset, err := strconv.Atoi(s)
+		if err != nil || offset < 0 {
+			module.WriteError(w, http.StatusUnprocessableEntity, "offset must be a non-negative integer")
+			return
+		}
+		filter.Offset = offset
+	}
 
 	p := auth.From(r.Context())
-	lines, err := ListBankLines(r.Context(), d.Pool, p.OrgID, filter)
+	lines, total, err := ListBankLines(r.Context(), d.Pool, p.OrgID, filter)
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return
 	}
-	resp := make([]bankLineResponse, len(lines))
+	resp := bankLineListResponse{Lines: make([]bankLineResponse, len(lines)), Total: total}
 	for i, l := range lines {
-		resp[i] = bankLineToResponse(l)
+		match, err := MatchFor(r.Context(), d.Pool, p.OrgID, l)
+		if err != nil {
+			module.WriteCoreError(w, err)
+			return
+		}
+		resp.Lines[i] = bankLineToResponse(l, match)
 	}
 	module.WriteJSON(w, http.StatusOK, resp)
 }
@@ -954,19 +1041,24 @@ func ignoreHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	p := auth.From(r.Context())
 	ctx := billing.WithActor(r.Context(), p.UserID)
 	var updated BankLine
+	var match *BankLineMatch
 	err := module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
 		if err := Ignore(ctx, tx, p.OrgID, lineID, body.Reason); err != nil {
 			return err
 		}
 		var err error
 		updated, err = getBankLine(ctx, tx, p.OrgID, lineID)
+		if err != nil {
+			return err
+		}
+		match, err = MatchFor(ctx, tx, p.OrgID, updated)
 		return err
 	})
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, bankLineToResponse(updated))
+	module.WriteJSON(w, http.StatusOK, bankLineToResponse(updated, match))
 }
 
 func unmatchHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -991,7 +1083,9 @@ func unmatchHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, bankLineToResponse(updated))
+	// Unmatch always reverts to "unmatched", which never has a match; no
+	// MatchFor lookup needed here (unlike ignoreHandler above).
+	module.WriteJSON(w, http.StatusOK, bankLineToResponse(updated, nil))
 }
 
 type suggestionResponse struct {

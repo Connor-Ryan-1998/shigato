@@ -1,6 +1,7 @@
 package property
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -20,7 +21,63 @@ const dateLayout = "2006-01-02"
 // Module returns the property module: properties, leases, rent changes,
 // charges and lease termination, gated by config.Config.Modules["property"].
 func Module() module.Module {
-	return module.Module{Name: "property", Routes: registerRoutes}
+	return module.Module{Name: "property", Routes: registerRoutes, Dashboard: dashboardSection}
+}
+
+// propertyDashboard is the property module's dashboard section.
+type propertyDashboard struct {
+	ArrearsTotal         int64 `json:"arrears_total"`
+	UnissuedTotal        int64 `json:"unissued_total"`
+	BondsUnlodgedOverdue int   `json:"bonds_unlodged_overdue"`
+}
+
+// dashboardSection builds the property module's dashboard section: arrears
+// and unissued totals, and the count of leases whose bond is held but not
+// lodged with the RTA within the warning window, summed across every
+// lease in the org. It reuses GetLedger and BondInfo - the same maths the
+// ledger and lease endpoints already use - rather than recomputing
+// arrears/unissued/bond-warning logic here.
+//
+// ponytail: this is one GetLedger plus one GetLease/BondInfo call per
+// lease (GetLedger itself also loads the lease), not a single aggregate
+// query - reusing the existing per-lease maths outweighs duplicating it in
+// SQL. Fine at today's lease counts per org; replace with an aggregate
+// query (or a batched GetLedger) if an org's lease count ever makes this
+// dashboard call slow.
+func dashboardSection(ctx context.Context, q core.Querier, orgID int64, today time.Time) (any, error) {
+	leaseIDs, err := listLeaseIDs(ctx, q, orgID)
+	if err != nil {
+		return nil, err
+	}
+
+	var arrears, unissued core.Cents
+	var bondsUnlodgedOverdue int
+	for _, id := range leaseIDs {
+		ledger, err := GetLedger(ctx, q, orgID, id, today)
+		if err != nil {
+			return nil, err
+		}
+		arrears += ledger.Arrears
+		unissued += ledger.Unissued
+
+		lease, err := GetLease(ctx, q, orgID, id)
+		if err != nil {
+			return nil, err
+		}
+		status, warnings, err := BondInfo(ctx, q, orgID, lease, today)
+		if err != nil {
+			return nil, err
+		}
+		if status == "held" && len(warnings) > 0 {
+			bondsUnlodgedOverdue++
+		}
+	}
+
+	return propertyDashboard{
+		ArrearsTotal:         int64(arrears),
+		UnissuedTotal:        int64(unissued),
+		BondsUnlodgedOverdue: bondsUnlodgedOverdue,
+	}, nil
 }
 
 func registerRoutes(mux *http.ServeMux, d module.Deps) {

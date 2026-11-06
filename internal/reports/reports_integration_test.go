@@ -616,7 +616,7 @@ func TestReconciledMovementsCountExactlyOnce(t *testing.T) {
 	if _, err := recon.Import(ctx, pool, org.ID, account.ID, strings.NewReader(statement)); err != nil {
 		t.Fatalf("Import: %v", err)
 	}
-	lines, err := recon.ListBankLines(ctx, pool, org.ID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(ctx, pool, org.ID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}

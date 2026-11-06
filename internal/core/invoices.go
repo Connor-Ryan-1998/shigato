@@ -160,19 +160,74 @@ func GetInvoice(ctx context.Context, q Querier, orgID, id int64) (Invoice, error
 	return inv, nil
 }
 
-// ListInvoices lists an org's invoices, optionally filtered by status. An
-// empty status returns every invoice. Lines are not loaded (use GetInvoice
-// for a single invoice's lines).
-func ListInvoices(ctx context.Context, q Querier, orgID int64, status string) ([]Invoice, error) {
-	var rows pgx.Rows
-	var err error
-	if status == "" {
-		rows, err = q.Query(ctx, `SELECT `+invoiceColumns+` FROM invoices WHERE org_id = $1 ORDER BY id`, orgID)
-	} else {
-		rows, err = q.Query(ctx, `SELECT `+invoiceColumns+` FROM invoices WHERE org_id = $1 AND status = $2 ORDER BY id`, orgID, status)
+// InvoiceListFilter narrows ListInvoices. A zero value matches every
+// invoice in the org, most recently issued first, with no limit.
+type InvoiceListFilter struct {
+	// Status, if non-empty, matches invoices.status exactly.
+	Status string
+	// Overdue, if set, matches only invoices that are "open" with a
+	// due_date before Today - Status is ignored in that case (an overdue
+	// invoice is always open).
+	Overdue bool
+	// Today is the calendar date Overdue compares due_date against. It's
+	// ignored when Overdue is false.
+	Today time.Time
+	// ContactID, if set, matches invoices.contact_id exactly.
+	ContactID *int64
+	// Limit caps the number of rows returned. Zero (the default) means
+	// no limit.
+	Limit int
+	// Offset skips this many matching rows before Limit is applied.
+	Offset int
+}
+
+// where builds f's SQL WHERE clause (without the leading "WHERE") and its
+// positional args, scoped to orgID. Both ListInvoices and its paired count
+// query share this so the two can never drift apart.
+func (f InvoiceListFilter) where(orgID int64) (string, []any) {
+	sql := "org_id = $1"
+	args := []any{orgID}
+	switch {
+	case f.Overdue:
+		args = append(args, f.Today)
+		sql += fmt.Sprintf(" AND status = 'open' AND due_date < $%d", len(args))
+	case f.Status != "":
+		args = append(args, f.Status)
+		sql += fmt.Sprintf(" AND status = $%d", len(args))
 	}
+	if f.ContactID != nil {
+		args = append(args, *f.ContactID)
+		sql += fmt.Sprintf(" AND contact_id = $%d", len(args))
+	}
+	return sql, args
+}
+
+// ListInvoices lists an org's invoices matching filter, ordered by
+// issue_date descending (undated drafts first) then id descending (newest
+// first), plus the total count of matching invoices (ignoring Limit/Offset,
+// for pagination). Lines are not loaded (use GetInvoice for a single
+// invoice's lines).
+func ListInvoices(ctx context.Context, q Querier, orgID int64, filter InvoiceListFilter) ([]Invoice, int, error) {
+	where, args := filter.where(orgID)
+
+	var total int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM invoices WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	sql := `SELECT ` + invoiceColumns + ` FROM invoices WHERE ` + where + ` ORDER BY issue_date DESC NULLS FIRST, id DESC`
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		sql += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	if filter.Offset > 0 {
+		args = append(args, filter.Offset)
+		sql += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
+
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -180,11 +235,11 @@ func ListInvoices(ctx context.Context, q Querier, orgID int64, status string) ([
 	for rows.Next() {
 		inv, err := scanInvoice(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		invoices = append(invoices, inv)
 	}
-	return invoices, rows.Err()
+	return invoices, total, rows.Err()
 }
 
 func invoiceLines(ctx context.Context, q Querier, orgID, invoiceID int64) ([]InvoiceLine, error) {

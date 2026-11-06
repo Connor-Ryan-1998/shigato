@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -199,9 +200,11 @@ func scanBankLine(row pgx.Row) (BankLine, error) {
 	return l, err
 }
 
-// ListBankLines lists orgID's bank lines matching filter.
-func ListBankLines(ctx context.Context, q core.Querier, orgID int64, filter BankLineFilter) ([]BankLine, error) {
-	sql := `SELECT ` + bankLineColumns + ` FROM bank_lines WHERE org_id = $1`
+// where builds filter's SQL WHERE clause (without the leading "WHERE") and
+// its positional args, scoped to orgID. ListBankLines' row query and its
+// paired count query share this so the two can never drift apart.
+func (filter BankLineFilter) where(orgID int64) (string, []any) {
+	sql := "org_id = $1"
 	args := []any{orgID}
 	if filter.BankAccountID != nil {
 		args = append(args, *filter.BankAccountID)
@@ -219,11 +222,32 @@ func ListBankLines(ctx context.Context, q core.Querier, orgID int64, filter Bank
 		args = append(args, *filter.To)
 		sql += fmt.Sprintf(" AND posted_on <= $%d", len(args))
 	}
-	sql += " ORDER BY posted_on, id"
+	return sql, args
+}
+
+// ListBankLines lists orgID's bank lines matching filter, plus the total
+// count of matching lines (ignoring Limit/Offset, for pagination).
+func ListBankLines(ctx context.Context, q core.Querier, orgID int64, filter BankLineFilter) ([]BankLine, int, error) {
+	where, args := filter.where(orgID)
+
+	var total int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM bank_lines WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	sql := `SELECT ` + bankLineColumns + ` FROM bank_lines WHERE ` + where + ` ORDER BY posted_on, id`
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		sql += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	if filter.Offset > 0 {
+		args = append(args, filter.Offset)
+		sql += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
 
 	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -231,9 +255,81 @@ func ListBankLines(ctx context.Context, q core.Querier, orgID int64, filter Bank
 	for rows.Next() {
 		l, err := scanBankLine(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		lines = append(lines, l)
 	}
-	return lines, rows.Err()
+	return lines, total, rows.Err()
+}
+
+// BankLineMatch describes what a matched or ignored bank line resolves to,
+// for display - the entity a payment, expense or payout match points at,
+// or (for an ignored line, which has no such entity) the line itself.
+type BankLineMatch struct {
+	Kind  string // "invoice", "expense", "payout" or "ignored"
+	ID    int64
+	Label string
+}
+
+// MatchFor looks up what bank line l is matched to, nil for an unmatched
+// line. A payout match is checked before an invoice match: MatchPayout
+// also links its payments' bank_line_id to the same line, so checking
+// invoices first would misreport a payout-funded line as a plain invoice
+// match.
+func MatchFor(ctx context.Context, q core.Querier, orgID int64, l BankLine) (*BankLineMatch, error) {
+	switch l.Status {
+	case "ignored":
+		reason := ""
+		if l.IgnoreReason != nil {
+			reason = *l.IgnoreReason
+		}
+		return &BankLineMatch{Kind: "ignored", ID: l.ID, Label: reason}, nil
+	case "matched":
+		var payoutID int64
+		var ref string
+		err := q.QueryRow(ctx, `SELECT id, provider_ref FROM payouts WHERE org_id = $1 AND bank_line_id = $2`, orgID, l.ID).Scan(&payoutID, &ref)
+		if err == nil {
+			return &BankLineMatch{Kind: "payout", ID: payoutID, Label: ref}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+
+		var expenseID int64
+		var description string
+		err = q.QueryRow(ctx, `SELECT id, description FROM expenses WHERE org_id = $1 AND bank_line_id = $2`, orgID, l.ID).Scan(&expenseID, &description)
+		if err == nil {
+			return &BankLineMatch{Kind: "expense", ID: expenseID, Label: description}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+
+		var invoiceID int64
+		var number *int32
+		err = q.QueryRow(ctx, `
+			SELECT i.id, i.number FROM payments p
+			JOIN invoices i ON i.org_id = p.org_id AND i.id = p.invoice_id
+			WHERE p.org_id = $1 AND p.bank_line_id = $2`,
+			orgID, l.ID,
+		).Scan(&invoiceID, &number)
+		if err == nil {
+			label := ""
+			if number != nil {
+				label = strconv.Itoa(int(*number))
+			}
+			return &BankLineMatch{Kind: "invoice", ID: invoiceID, Label: label}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		// A "matched" line with no payout/expense/payment row would be an
+		// internal inconsistency (every match path above links one before
+		// setting status='matched'); reporting no match rather than
+		// erroring the whole list keeps one bad row from blocking the
+		// rest.
+		return nil, nil
+	default:
+		return nil, nil
+	}
 }

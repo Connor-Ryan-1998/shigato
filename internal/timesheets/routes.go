@@ -1,6 +1,7 @@
 package timesheets
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -45,7 +46,79 @@ func today(d module.Deps) time.Time {
 // Module returns the timesheets module: projects, tasks and (in a later
 // task) time entries, gated by config.Config.Modules["timesheets"].
 func Module() module.Module {
-	return module.Module{Name: "timesheets", Routes: registerRoutes}
+	return module.Module{Name: "timesheets", Routes: registerRoutes, Dashboard: dashboardSection}
+}
+
+// timesheetsDashboard is the timesheets module's dashboard section.
+type timesheetsDashboard struct {
+	UnbilledMinutes  int   `json:"unbilled_minutes"`
+	UnbilledEstimate int64 `json:"unbilled_estimate"`
+}
+
+// dashboardSection builds the timesheets module's dashboard section: every
+// unbilled time entry's minutes, and their billing estimate computed the
+// same way LineFor would (DivRound(minutes*effective_rate, 60) per task),
+// so the estimate never drifts from what a real billing run would charge.
+//
+// ponytail: one query groups every unbilled entry by task (bounded by
+// distinct unbilled tasks, not entry count), then GetTask/GetProject is
+// called once per distinct task (and once per distinct project, cached) to
+// get its effective rate - reusing lockUnbilledEntries' own task/project
+// lookup pattern rather than duplicating EffectiveRate's logic in SQL.
+// Fine while unbilled tasks stay in the dozens/hundreds; move the rate
+// lookup into the grouping query (a join) if that ever grows large.
+func dashboardSection(ctx context.Context, q core.Querier, orgID int64, today time.Time) (any, error) {
+	rows, err := q.Query(ctx, `
+		SELECT task_id, sum(minutes) FROM time_entries
+		WHERE org_id = $1 AND invoice_line_id IS NULL
+		GROUP BY task_id`,
+		orgID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	type taskMinutes struct {
+		taskID  int64
+		minutes int
+	}
+	var groups []taskMinutes
+	for rows.Next() {
+		var g taskMinutes
+		if err := rows.Scan(&g.taskID, &g.minutes); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	projects := map[int64]Project{}
+	var unbilledMinutes int
+	var unbilledEstimate core.Cents
+	for _, g := range groups {
+		task, err := GetTask(ctx, q, orgID, g.taskID)
+		if err != nil {
+			return nil, err
+		}
+		project, ok := projects[task.ProjectID]
+		if !ok {
+			project, err = GetProject(ctx, q, orgID, task.ProjectID)
+			if err != nil {
+				return nil, err
+			}
+			projects[task.ProjectID] = project
+		}
+		unbilledMinutes += g.minutes
+		unbilledEstimate += core.Cents(core.DivRound(int64(g.minutes)*int64(task.EffectiveRate(project)), 60))
+	}
+
+	return timesheetsDashboard{
+		UnbilledMinutes:  unbilledMinutes,
+		UnbilledEstimate: int64(unbilledEstimate),
+	}, nil
 }
 
 func registerRoutes(mux *http.ServeMux, d module.Deps) {
