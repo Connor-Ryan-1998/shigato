@@ -41,6 +41,7 @@
 		{ value: '', label: 'Category default' },
 		{ value: 'GST', label: 'GST' },
 		{ value: 'FRE', label: 'GST-free' },
+		{ value: 'INP', label: 'Input-taxed purchase (INP)' },
 		{ value: 'N-T', label: 'Not taxable (N-T)' }
 	];
 
@@ -92,6 +93,10 @@
 		const file = (e.currentTarget as HTMLInputElement).files?.[0];
 		if (!file || !onReceiptUpload) return;
 		receiptError = '';
+		// Clear any previously attached receipt up front: if this upload
+		// fails, the form must not go on submitting with a stale file id
+		// from an earlier, unrelated attachment.
+		receiptFileId = undefined;
 		uploadingReceipt = true;
 		try {
 			receiptFileId = await onReceiptUpload(file);
@@ -102,12 +107,18 @@
 		}
 	}
 
+	// Only "expense"-type categories are valid on a split line
+	// (internal/recon/expenses.go rejects any other type); "income"
+	// categories exist for the same org but would just bounce off the
+	// server, so they're never offered here.
+	const expenseCategories = $derived(categories.filter((c) => c.type === 'expense'));
+
 	const uid = $props.id();
 	let nextId = 0;
 	function emptyRow(): Row {
 		return {
 			id: nextId++,
-			categoryId: categories[0] ? String(categories[0].id) : '',
+			categoryId: expenseCategories[0] ? String(expenseCategories[0].id) : '',
 			amount: '',
 			gstCode: '',
 			propertyId: '',
@@ -126,7 +137,7 @@
 	let receiptFileId = $state<number | undefined>(undefined);
 
 	const categoryOptions = $derived(
-		categories.map((c) => ({ value: String(c.id), label: c.name }))
+		expenseCategories.map((c) => ({ value: String(c.id), label: c.name }))
 	);
 	const supplierOptions = $derived([
 		{ value: '', label: 'No supplier' },

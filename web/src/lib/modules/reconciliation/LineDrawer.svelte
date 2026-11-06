@@ -56,8 +56,16 @@
 
 	let suggestions = $state<Suggestion[]>([]);
 	let suggestionsError = $state('');
-	let actionError = $state('');
 	let actionBusy = $state(false);
+	// Each action kind gets its own error slot, so (e.g.) a failed Ignore
+	// renders next to the Ignore controls rather than inside whatever
+	// unrelated section (the expense form, the match panels) happened to
+	// own the one shared error string before.
+	let matchError = $state('');
+	let expenseError = $state('');
+	let ignoreError = $state('');
+	let unmatchError = $state('');
+	let expenseWarnings = $state<string[]>([]);
 	let ignoreReason = $state('transfer');
 	let showExpenseForm = $state(false);
 
@@ -65,11 +73,18 @@
 		suggestions = [];
 		suggestionsError = '';
 		try {
-			suggestions = await api<Suggestion[]>(
+			const result = await api<Suggestion[]>(
 				'GET',
 				`/api/v1/orgs/${org}/bank-lines/${lineId}/suggestions`
 			);
+			// The drawer may have moved on to a different (or no) line while
+			// this request was in flight - applying a stale response here
+			// would show line B's suggestions as if they were line A's, and
+			// Accept would then post a match for the wrong line entirely.
+			if (line?.id !== lineId) return;
+			suggestions = result;
 		} catch (e) {
+			if (line?.id !== lineId) return;
 			suggestionsError = e instanceof ApiError ? e.message : 'Could not load suggestions.';
 		}
 	}
@@ -78,7 +93,11 @@
 	// unmatched line is opened in the drawer.
 	$effect(() => {
 		if (!open || !line) return;
-		actionError = '';
+		matchError = '';
+		expenseError = '';
+		ignoreError = '';
+		unmatchError = '';
+		expenseWarnings = [];
 		showExpenseForm = false;
 		ignoreReason = 'transfer';
 		if (line.status === 'unmatched') {
@@ -88,16 +107,20 @@
 		}
 	});
 
-	async function runAction(action: () => Promise<void>) {
+	// runAction is shared by every action that closes the drawer on success
+	// (everything except createExpense, which may need to stay open to show
+	// warnings). setError lets each caller route a failure to its own error
+	// slot instead of a single shared one that the wrong section would show.
+	async function runAction(action: () => Promise<void>, setError: (msg: string) => void) {
 		if (actionBusy) return;
 		actionBusy = true;
-		actionError = '';
+		setError('');
 		try {
 			await action();
-			open = false;
 			onChanged();
+			open = false;
 		} catch (e) {
-			actionError = e instanceof ApiError ? e.message : 'Something went wrong.';
+			setError(e instanceof ApiError ? e.message : 'Something went wrong.');
 		} finally {
 			actionBusy = false;
 		}
@@ -112,19 +135,19 @@
 					invoice_id: s.id,
 					method: 'bank_transfer'
 				});
-			});
+			}, (m) => (matchError = m));
 		} else if (s.kind === 'payout' && s.ref !== undefined) {
 			runAction(async () => {
 				await api('POST', `/api/v1/orgs/${org}/bank-lines/${lineId}/match-payout`, {
 					payout_ref: s.ref
 				});
-			});
+			}, (m) => (matchError = m));
 		} else if (s.kind === 'expense' && s.id !== undefined) {
 			runAction(async () => {
 				await api('POST', `/api/v1/orgs/${org}/bank-lines/${lineId}/match-expense`, {
 					expense_id: s.id
 				});
-			});
+			}, (m) => (matchError = m));
 		}
 	}
 
@@ -136,7 +159,7 @@
 				invoice_id: invoiceId,
 				method: 'bank_transfer'
 			});
-		});
+		}, (m) => (matchError = m));
 	}
 
 	function matchPayout(payoutRef: string) {
@@ -146,15 +169,38 @@
 			await api('POST', `/api/v1/orgs/${org}/bank-lines/${lineId}/match-payout`, {
 				payout_ref: payoutRef
 			});
-		});
+		}, (m) => (matchError = m));
 	}
 
-	function createExpense(expense: NewExpense) {
-		if (!line) return;
+	// createExpense doesn't go through runAction: on success the server may
+	// return warnings (e.g. GST computed oddly for a line), which must stay
+	// visible to the user - unlike every other action here, the drawer
+	// can't just close itself and rely on a Toast (the list already
+	// refreshes either way, since the expense was created either way).
+	async function createExpense(expense: NewExpense) {
+		if (!line || actionBusy) return;
 		const lineId = line.id;
-		runAction(async () => {
-			await api('POST', `/api/v1/orgs/${org}/bank-lines/${lineId}/expense`, expense);
-		});
+		actionBusy = true;
+		expenseError = '';
+		expenseWarnings = [];
+		try {
+			const result = await api<{ warnings: string[] }>(
+				'POST',
+				`/api/v1/orgs/${org}/bank-lines/${lineId}/expense`,
+				expense
+			);
+			onChanged();
+			if (result.warnings.length > 0) {
+				expenseWarnings = result.warnings;
+				showExpenseForm = false;
+			} else {
+				open = false;
+			}
+		} catch (e) {
+			expenseError = e instanceof ApiError ? e.message : 'Something went wrong.';
+		} finally {
+			actionBusy = false;
+		}
 	}
 
 	function ignoreLine() {
@@ -164,7 +210,7 @@
 			await api('POST', `/api/v1/orgs/${org}/bank-lines/${lineId}/ignore`, {
 				reason: ignoreReason
 			});
-		});
+		}, (m) => (ignoreError = m));
 	}
 
 	function unmatchLine() {
@@ -172,7 +218,7 @@
 		const lineId = line.id;
 		runAction(async () => {
 			await api('POST', `/api/v1/orgs/${org}/bank-lines/${lineId}/unmatch`);
-		});
+		}, (m) => (unmatchError = m));
 	}
 </script>
 
@@ -208,6 +254,9 @@
 							{/each}
 						</ul>
 					{/if}
+					{#if matchError}
+						<p class="error" role="alert">{matchError}</p>
+					{/if}
 				</section>
 
 				{#if line.amount > 0}
@@ -222,7 +271,15 @@
 				{:else}
 					<section>
 						<h3>Create expense</h3>
-						{#if !showExpenseForm}
+						{#if expenseWarnings.length > 0}
+							<p class="muted">Expense created.</p>
+							<ul class="warning-list">
+								{#each expenseWarnings as w, i (i)}
+									<li class="warning">{w}</li>
+								{/each}
+							</ul>
+							<Button variant="secondary" onclick={() => (open = false)}>Done</Button>
+						{:else if !showExpenseForm}
 							<Button onclick={() => (showExpenseForm = true)}>Create expense</Button>
 						{:else}
 							<ExpenseForm
@@ -233,7 +290,7 @@
 								{properties}
 								{projects}
 								busy={actionBusy}
-								error={actionError}
+								error={expenseError}
 								{onReceiptUpload}
 								onSubmit={createExpense}
 							/>
@@ -249,6 +306,9 @@
 							Ignore line
 						</Button>
 					</div>
+					{#if ignoreError}
+						<p class="error" role="alert">{ignoreError}</p>
+					{/if}
 				</section>
 			{:else}
 				<section>
@@ -257,11 +317,10 @@
 						{#if line.match}: {line.match.label}{/if}
 					</p>
 					<Button variant="secondary" disabled={actionBusy} onclick={unmatchLine}>Unmatch</Button>
+					{#if unmatchError}
+						<p class="error" role="alert">{unmatchError}</p>
+					{/if}
 				</section>
-			{/if}
-
-			{#if actionError && !showExpenseForm}
-				<p class="error" role="alert">{actionError}</p>
 			{/if}
 		</div>
 	{/if}
@@ -328,5 +387,12 @@
 		padding: var(--space-2) var(--space-3);
 		border-radius: var(--radius-md);
 		background: var(--danger-subtle);
+	}
+	.warning-list {
+		margin: 0 0 var(--space-3);
+		padding-left: var(--space-5);
+	}
+	.warning {
+		color: var(--warning);
 	}
 </style>

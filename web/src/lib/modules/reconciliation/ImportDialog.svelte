@@ -65,7 +65,13 @@
 		</div>
 	{:else}
 		<Field label="CSV file" id="import-file">
-			<input id="import-file" type="file" accept=".csv,text/csv" onchange={pickFile} />
+			<!-- Keyed by `open`: a native file input keeps showing its last-
+			     picked filename even after `file` resets to null above, so a
+			     dialog reopened after a previous import still displayed the
+			     old filename without this remount. -->
+			{#key open}
+				<input id="import-file" type="file" accept=".csv,text/csv" onchange={pickFile} />
+			{/key}
 		</Field>
 		{#if error}
 			<p class="dialog-error" role="alert">{error}</p>

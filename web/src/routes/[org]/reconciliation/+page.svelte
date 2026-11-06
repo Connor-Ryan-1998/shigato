@@ -31,6 +31,14 @@
 	let loadStatus = $state<'loading' | 'error' | 'ready'>('loading');
 	let errorMessage = $state('');
 	let requestSeq = 0;
+	// True only once the list has rendered at least once. Every later
+	// load() (a tab/filter/offset change, or a refresh after a drawer
+	// action) then becomes a background refresh - refreshing stays true
+	// while the already-rendered table and its rows stay mounted, instead
+	// of tearing the whole view down to a bare "Loading…" line for every
+	// single action.
+	let hasLoadedOnce = false;
+	let refreshing = $state(false);
 
 	let accounts = $state<BankAccount[]>([]);
 	let categories = $state<Category[]>([]);
@@ -76,7 +84,11 @@
 
 	async function load() {
 		const seq = ++requestSeq;
-		loadStatus = 'loading';
+		if (hasLoadedOnce) {
+			refreshing = true;
+		} else {
+			loadStatus = 'loading';
+		}
 		errorMessage = '';
 		try {
 			const org = page.params.org;
@@ -92,10 +104,19 @@
 			lines = res.lines;
 			total = res.total;
 			loadStatus = 'ready';
+			hasLoadedOnce = true;
 		} catch (e) {
 			if (seq !== requestSeq) return;
 			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
-			loadStatus = 'error';
+			// Once the table has rendered once, a failed refresh (a bad
+			// filter, a dropped connection) shows inline above the still-
+			// mounted table instead of replacing it with the full-page
+			// error state, which would otherwise discard the user's place.
+			if (!hasLoadedOnce) {
+				loadStatus = 'error';
+			}
+		} finally {
+			refreshing = false;
 		}
 	}
 
@@ -162,7 +183,11 @@
 		load();
 	}
 
+	let autoMatchBusy = $state(false);
+
 	async function autoMatch() {
+		if (autoMatchBusy) return;
+		autoMatchBusy = true;
 		try {
 			const org = page.params.org;
 			const res = await api<{ matched: number }>('POST', `/api/v1/orgs/${org}/reconcile/auto`);
@@ -172,6 +197,8 @@
 		} catch (e) {
 			toastTone = 'danger';
 			toastMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
+		} finally {
+			autoMatchBusy = false;
 		}
 	}
 
@@ -189,7 +216,7 @@
 		<Button variant="secondary" onclick={() => goto(`/${page.params.org}/reconciliation/accounts`)}>
 			Bank accounts
 		</Button>
-		<Button onclick={autoMatch}>Auto-match</Button>
+		<Button disabled={autoMatchBusy} onclick={autoMatch}>Auto-match</Button>
 	{/snippet}
 </PageHeader>
 
@@ -239,21 +266,28 @@
 			<Button onclick={load}>Retry</Button>
 		{/snippet}
 	</EmptyState>
-{:else if lines.length === 0}
-	<EmptyState title="No bank lines in this view" />
 {:else}
-	<BankLineTable {lines} onSelect={selectLine} />
-	<div class="pagination">
-		<p>{offset + 1}–{Math.min(offset + lines.length, total)} of {total}</p>
-		<div class="pagination-buttons">
-			<Button variant="secondary" disabled={offset === 0} onclick={() => gotoOffset(Math.max(0, offset - PAGE_SIZE))}>
-				Previous
-			</Button>
-			<Button variant="secondary" disabled={offset + PAGE_SIZE >= total} onclick={() => gotoOffset(offset + PAGE_SIZE)}>
-				Next
-			</Button>
+	{#if refreshing}
+		<p class="refreshing" aria-live="polite">Refreshing…</p>
+	{:else if errorMessage}
+		<p class="refresh-error" role="alert">{errorMessage}</p>
+	{/if}
+	{#if lines.length === 0}
+		<EmptyState title="No bank lines in this view" />
+	{:else}
+		<BankLineTable {lines} onSelect={selectLine} />
+		<div class="pagination">
+			<p>{offset + 1}–{Math.min(offset + lines.length, total)} of {total}</p>
+			<div class="pagination-buttons">
+				<Button variant="secondary" disabled={offset === 0} onclick={() => gotoOffset(Math.max(0, offset - PAGE_SIZE))}>
+					Previous
+				</Button>
+				<Button variant="secondary" disabled={offset + PAGE_SIZE >= total} onclick={() => gotoOffset(offset + PAGE_SIZE)}>
+					Next
+				</Button>
+			</div>
 		</div>
-	</div>
+	{/if}
 {/if}
 
 <LineDrawer
@@ -299,6 +333,31 @@
 		flex-wrap: wrap;
 		gap: var(--space-4);
 		margin-bottom: var(--space-4);
+	}
+	/* A native <select>'s intrinsic width follows its longest option text
+	   (an account name can be long), which can overflow the viewport at
+	   360px. Give each filter field a shrinkable flex basis and force the
+	   select to fill it, rather than its own content width - the same fix
+	   as the drawer's ignore row. */
+	.filters :global(.field) {
+		flex: 1 1 10rem;
+		min-width: 0;
+	}
+	.filters :global(select) {
+		width: 100%;
+		min-width: 0;
+	}
+	.refreshing {
+		color: var(--text-muted);
+		font-size: var(--text-sm);
+		margin: 0 0 var(--space-3);
+	}
+	.refresh-error {
+		margin: 0 0 var(--space-3);
+		padding: var(--space-2) var(--space-3);
+		border-radius: var(--radius-md);
+		background: var(--danger-subtle);
+		color: var(--danger);
 	}
 	.pagination {
 		display: flex;

@@ -32,8 +32,14 @@ textarea {
 	color: inherit;
 }
 
+/* A native <select> left unstyled renders with the browser's own white
+   background, regardless of theme - in dark mode that left light `color:
+   inherit` text unreadable on it (an AA failure). Styling every select here
+   (not just the ones routed through the Select component) means a raw
+   <select> - e.g. the org switcher in the top bar - is never missed. */
 input,
-textarea {
+textarea,
+select {
 	padding: var(--space-2) var(--space-3);
 	border-radius: var(--radius-md);
 	border: 1px solid var(--border);
