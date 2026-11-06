@@ -82,4 +82,24 @@ describe('ReloginDialog', () => {
 
 		vi.unstubAllGlobals();
 	});
+
+	it('calls onCancel when the native dialog is dismissed (Escape/backdrop)', () => {
+		vi.stubGlobal('fetch', vi.fn());
+		const onCancel = vi.fn();
+
+		const { container } = render(ReloginDialog, {
+			props: { open: true, email: 'staffer@example.com', onSuccess: vi.fn(), onCancel }
+		});
+
+		// jsdom doesn't implement real Escape-to-close or backdrop-click
+		// dismissal; both fire the same native "close" event Dialog.svelte
+		// listens for, so dispatching it directly exercises the same path.
+		const dialogEl = container.querySelector('dialog');
+		dialogEl?.dispatchEvent(new Event('close'));
+
+		expect(onCancel).toHaveBeenCalledOnce();
+		expect(fetch).not.toHaveBeenCalled();
+
+		vi.unstubAllGlobals();
+	});
 });

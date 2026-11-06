@@ -129,10 +129,19 @@ export async function api<T>(
 		} catch {
 			// Body wasn't JSON (or was empty): fall back to statusText.
 		}
-		if (res.status === 401 && !isRetry) {
-			const reloggedIn = await onUnauthorized();
-			if (reloggedIn) {
-				return api<T>(method, path, body, true);
+		if (res.status === 401) {
+			if (!isRetry) {
+				const reloggedIn = await onUnauthorized();
+				if (reloggedIn) {
+					return api<T>(method, path, body, true);
+				}
+			} else {
+				// The retried request 401'd again right after a successful
+				// re-login - the session was invalidated again immediately,
+				// or never really took. Redirect rather than leave the
+				// caller with what would otherwise look like a silent,
+				// uncaught rejection.
+				redirectToLogin();
 			}
 		}
 		throw new ApiError(res.status, message);

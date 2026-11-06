@@ -27,14 +27,6 @@ const (
 	loginWindow     = 15 * time.Minute
 )
 
-// configuredSecureCookies is whether a session cookie should carry the
-// Secure attribute. New sets it once at process start (there is only ever
-// one *Auth per process), so StartSession - called from flows that don't
-// have an *Auth handy, like invite acceptance, OIDC callbacks and
-// magic-link exchange - can set the cookie identically without needing one
-// threaded through.
-var configuredSecureCookies bool
-
 // writeJSONError writes a JSON error body {"error":"<message>"}. It
 // duplicates module.WriteError rather than importing it: package module
 // imports package auth (for module.Deps.Auth), so auth importing module back
@@ -81,7 +73,6 @@ func New(pool *pgxpool.Pool, secureCookies bool, opts ...Option) *Auth {
 	for _, opt := range opts {
 		opt(a)
 	}
-	configuredSecureCookies = secureCookies
 	return a
 }
 
@@ -115,10 +106,12 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Checked before touching the password, so an attacker who's already
-	// over a limit can't use further attempts to keep timing-probing it.
+	// Checked (and reserved - see Limiter.Allow) before touching the
+	// password, so an attacker who's already over a limit can't use
+	// further attempts to keep timing-probing it, and so concurrent
+	// attempts can't all slip through before any of them is recorded.
 	emailKey := "email:" + strings.ToLower(body.Email)
-	ipKey := "ip:" + ClientIP(r, a.trustedProxy)
+	ipKey := ipRateLimitKey(ClientIP(r, a.trustedProxy))
 	if ok, retryAfter := a.limiter.Allow(emailKey, loginEmailLimit, loginWindow); !ok {
 		writeTooManyRequests(w, retryAfter)
 		return
@@ -130,10 +123,11 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	userID, err := verifyCredentials(r.Context(), a.pool, body.Email, body.Password)
 	if errors.Is(err, ErrInvalidCredentials) {
-		// Success never resets either count: an attacker who guesses
-		// right on attempt 4 still has only 1 try left in this window.
-		a.limiter.Fail(emailKey, loginWindow)
-		a.limiter.Fail(ipKey, loginWindow)
+		// Nothing further to do: Allow's reservation above is already the
+		// record of this failure. Success never resets either count -
+		// Succeed below only releases this one request's own reservation -
+		// so an attacker who guesses right on attempt 4 still has only 1
+		// try left in this window.
 		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -142,8 +136,10 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	a.limiter.Succeed(emailKey)
+	a.limiter.Succeed(ipKey)
 
-	if err := StartSession(r.Context(), a.pool, w, userID); err != nil {
+	if err := a.StartSession(r.Context(), a.pool, w, userID); err != nil {
 		slog.Error("starting session failed", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return

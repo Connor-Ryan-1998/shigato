@@ -82,11 +82,13 @@ func createSession(ctx context.Context, q core.Querier, userID int64) (string, e
 }
 
 // StartSession creates a new session for userID and sets the session cookie
-// on w with exactly the flags LoginHandler has always used. It's exported
-// so other flows that authenticate a user outside password Login - invite
-// acceptance, OIDC callbacks, magic-link exchange - can start a session the
-// same way, without duplicating the cookie plumbing.
-func StartSession(ctx context.Context, q core.Querier, w http.ResponseWriter, userID int64) error {
+// on w with exactly the flags LoginHandler has always used (including
+// a.secureCookies). It's exported so other flows that authenticate a user
+// outside password Login - invite acceptance, OIDC callbacks, magic-link
+// exchange - can start a session the same way, without duplicating the
+// cookie plumbing. q is separate from a's own pool so a caller already
+// inside a transaction can pass that instead.
+func (a *Auth) StartSession(ctx context.Context, q core.Querier, w http.ResponseWriter, userID int64) error {
 	token, err := createSession(ctx, q, userID)
 	if err != nil {
 		return err
@@ -97,7 +99,7 @@ func StartSession(ctx context.Context, q core.Querier, w http.ResponseWriter, us
 		Path:     "/",
 		Expires:  time.Now().Add(sessionTTL),
 		HttpOnly: true,
-		Secure:   configuredSecureCookies,
+		Secure:   a.secureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil

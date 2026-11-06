@@ -385,6 +385,79 @@ func TestLoginRateLimitedByIP(t *testing.T) {
 	}
 }
 
+// TestLoginSuccessDoesNotResetRateLimit checks global-constraints.md /
+// Ruling: "Success does not reset either count." A successful login in the
+// middle of a run of failures only releases its own reservation - it
+// doesn't zero out the counter - so the failures on both sides of it still
+// add up to the limit.
+func TestLoginSuccessDoesNotResetRateLimit(t *testing.T) {
+	pool := db.TestPool(t)
+	createTestUser(t, pool, "resets-nothing@example.com", "correct-password")
+
+	now := time.Now()
+	a := New(pool, false, WithClock(func() time.Time { return now }))
+
+	for i := 0; i < 4; i++ {
+		rr := httptest.NewRecorder()
+		a.LoginHandler(rr, loginRequest("resets-nothing@example.com", "wrong-password"))
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: status = %d, want %d", i, rr.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("resets-nothing@example.com", "correct-password"))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("successful login: status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+
+	// A 5th failure, right after the success: 4 + 1 = 5, at the limit.
+	rr = httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("resets-nothing@example.com", "wrong-password"))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("5th failure: status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+
+	// A 6th attempt - even the correct password - is blocked: the earlier
+	// success never reset the count back down.
+	rr = httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("resets-nothing@example.com", "correct-password"))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after success mid-run = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+}
+
+// TestLoginRateLimitEmailIsCaseInsensitive checks that the email rate-limit
+// key is built from the lowercased address, so varying the case of repeated
+// failed attempts can't be used to dodge the limit.
+func TestLoginRateLimitEmailIsCaseInsensitive(t *testing.T) {
+	pool := db.TestPool(t)
+
+	now := time.Now()
+	a := New(pool, false, WithClock(func() time.Time { return now }))
+
+	emails := []string{
+		"Mixed-Case@Example.com",
+		"mixed-case@example.com",
+		"MIXED-CASE@EXAMPLE.COM",
+		"mixed-Case@example.Com",
+		"MiXeD-cAsE@eXaMpLe.CoM",
+	}
+	for i, email := range emails {
+		rr := httptest.NewRecorder()
+		a.LoginHandler(rr, loginRequest(email, "wrong-password"))
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d (%s): status = %d, want %d", i, email, rr.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("mixed-case@example.com", "whatever"))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d (case variants should share one limit)", rr.Code, http.StatusTooManyRequests)
+	}
+}
+
 func TestLogoutHandlerRevokesSession(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()

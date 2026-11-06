@@ -68,7 +68,14 @@ describe('api', () => {
 		expect(fetch).toHaveBeenCalledTimes(2);
 	});
 
-	it('does not retry forever if the retried request 401s again', async () => {
+	it('does not retry forever if the retried request 401s again, and redirects instead of failing silently', async () => {
+		const realLocation = window.location;
+		const assign = vi.fn();
+		Object.defineProperty(window, 'location', {
+			value: { pathname: '/acme/invoices', search: '', assign },
+			writable: true
+		});
+
 		vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
 		const onUnauthorized = vi.fn(async () => true);
 		setOnUnauthorized(onUnauthorized);
@@ -79,6 +86,12 @@ describe('api', () => {
 		// called again for the retry's own 401.
 		expect(fetch).toHaveBeenCalledTimes(2);
 		expect(onUnauthorized).toHaveBeenCalledOnce();
+		// The session was invalidated again immediately (or never really
+		// took): redirect rather than leave the caller with what looks like
+		// a silently-swallowed rejection.
+		expect(assign).toHaveBeenCalledWith('/login?next=%2Facme%2Finvoices');
+
+		Object.defineProperty(window, 'location', { value: realLocation, writable: true });
 	});
 
 	it('returns undefined for a 2xx response with an empty body', async () => {

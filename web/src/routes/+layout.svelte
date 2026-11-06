@@ -38,6 +38,18 @@
 			]);
 			session.setMe(me);
 			session.setModules(meta.modules);
+			// Only registered once there's a real session to pre-fill the
+			// dialog's email from: a 401 before this point (e.g. the /me
+			// call itself, on a cold load with an already-expired session)
+			// must fall through to api.ts's plain redirect instead of
+			// opening ReloginDialog with nothing to show.
+			registerReloginPrompt(
+				() =>
+					new Promise<boolean>((resolve) => {
+						resolveRelogin = resolve;
+						reloginOpen = true;
+					})
+			);
 		} catch (err) {
 			// A 401 already triggered api()'s onUnauthorized redirect; any
 			// other failure is unexpected, but it must still leave the user
@@ -58,27 +70,22 @@
 		// mounts the org shell where the toggle lives.
 		theme.apply();
 
-		// api.ts's defaultOnUnauthorized already never calls this on /login
-		// itself, so registering it unconditionally is harmless there; a 401
-		// anywhere else now reopens this dialog in place instead of falling
-		// back to a redirect.
-		registerReloginPrompt(
-			() =>
-				new Promise<boolean>((resolve) => {
-					resolveRelogin = resolve;
-					reloginOpen = true;
-				})
-		);
+		// Registered before any early return, so a component that never
+		// gets as far as registering a prompt (the /login branch below, or
+		// loadSession failing before it registers one) still tears down
+		// cleanly - unregistering something that was never registered is a
+		// harmless no-op.
+		const cleanup = () => registerReloginPrompt(null);
 
 		// /login has no session to fetch yet; fetching /me there would just
 		// 401 and bounce back to the very page we're already on.
 		if (page.url.pathname === '/login') {
 			loading = false;
-			return;
+			return cleanup;
 		}
 		loadSession();
 
-		return () => registerReloginPrompt(null);
+		return cleanup;
 	});
 </script>
 
