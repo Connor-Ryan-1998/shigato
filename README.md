@@ -27,10 +27,23 @@ echo "local-dev-password" | docker compose exec -T app /shigoto admin create-own
   --org-slug me --org-name "Me" --email me@example.com
 
 # log in and call the API with the session cookie
-curl -c j -X POST localhost:8080/api/v1/auth/login \
+curl -c j -X POST localhost:8080/api/v1/auth/login -H 'X-Shigoto-CSRF: 1' \
   -d '{"email":"me@example.com","password":"local-dev-password"}'
 curl -b j localhost:8080/api/v1/orgs/me/contacts
 ```
+
+### API notes
+
+- Every unsafe request (`POST`, `PUT`, `PATCH`, `DELETE`) to `/api/` must
+  send `X-Shigoto-CSRF: 1`, or it is rejected with 403. If the request has
+  an `Origin` header, it must match `SHIGOTO_BASE_URL`'s origin. `/webhooks/`
+  is exempt. A browser form on another site can't set custom headers, so
+  this blocks cross-site request forgery.
+- Every error body is `{"error": "<message>"}`.
+- Paged list endpoints return the page plus the total match count (ignoring
+  `limit`/`offset`): `GET /api/v1/orgs/{org}/invoices` returns
+  `{"invoices": [...], "total": n}` and `GET /api/v1/orgs/{org}/bank-lines`
+  returns `{"lines": [...], "total": n}`. `limit` defaults to 50, max 200.
 
 ## Usage
 
@@ -45,6 +58,7 @@ task web:install              # npm ci in web/
 task web:build                # builds the SPA into internal/webui/dist
 task web:test                 # svelte-check plus vitest (--run)
 task web:dev                  # vite dev server, proxying /api and /webhooks to task dev's backend
+task web:e2e                  # Playwright smoke test against a real binary + Postgres
 ```
 
 ### Web UI dev workflow
