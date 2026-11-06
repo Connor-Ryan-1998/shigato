@@ -16,6 +16,7 @@ import (
 	"shigoto/internal/payments/stripe"
 	"shigoto/internal/property"
 	"shigoto/internal/recon"
+	"shigoto/internal/reports"
 	"shigoto/internal/timesheets"
 )
 
@@ -119,6 +120,8 @@ func New(d Deps) http.Handler {
 	registerWebhookRoutes(mux, d)
 
 	md := module.Deps{Pool: d.Pool, Auth: d.Auth, Cfg: d.Cfg, Billing: d.Billing}
+	// Reports are core: always on, never gated by d.Cfg.Modules.
+	reports.RegisterRoutes(mux, md)
 	var enabled []string
 	for _, m := range modules {
 		if d.Cfg.Modules[m.Name] {
