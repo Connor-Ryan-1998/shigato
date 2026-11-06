@@ -364,7 +364,17 @@ func TestImportRouteAuditsActor(t *testing.T) {
 	).Scan(&actorID); err != nil {
 		t.Fatalf("reading audit_log: %v", err)
 	}
-	if actorID == nil {
-		t.Fatalf("audit_log actor_user_id = nil, want the uploading user's id")
+	if want := ownerUserID(t, pool); actorID == nil || *actorID != want {
+		t.Fatalf("audit_log actor_user_id = %v, want the uploading user's id %d", actorID, want)
 	}
+}
+
+// ownerUserID returns the id of the owner reconTestSetup logs in as.
+func ownerUserID(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM users WHERE email = 'owner@example.com'`).Scan(&id); err != nil {
+		t.Fatalf("reading owner user id: %v", err)
+	}
+	return id
 }

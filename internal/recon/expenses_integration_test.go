@@ -581,8 +581,8 @@ func TestDeleteExpenseRouteAuditsContents(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("audit_log rows: %v", err)
 	}
-	if len(actors) != 1 || actors[0] == nil {
-		t.Fatalf("delete audit actors = %v, want exactly one with the requesting user", actors)
+	if want := ownerUserID(t, pool); len(actors) != 1 || actors[0] == nil || *actors[0] != want {
+		t.Fatalf("delete audit actors = %v, want exactly one with the requesting user %d", actors, want)
 	}
 	want := fmt.Sprintf(`{"spent_on":"2026-11-01","description":"Plumber","lines":[`+
 		`{"category_id":%d,"amount":11000,"gst_code":"GST","gst_amount":1000},`+

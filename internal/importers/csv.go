@@ -179,7 +179,8 @@ func (s csvSource) Lines(r io.Reader) ([]Line, error) {
 // arithmetic only (no float parsing, so there's no rounding error to
 // worry about). A blank cell is 0. Accepted forms: "1234.56",
 // "1,234.56", "-12.30", "(12.30)" (parentheses mean negative), "+5.00",
-// "$12.30", "-$12.30" and "$-12.30" (one sign, before or after the $).
+// "$12.30", "-$12.30" and "$-12.30" (one sign, before or after the $;
+// parentheses count as that sign).
 // After those are stripped the integer part must be 1-15 ASCII digits and
 // the fraction 0-2 ASCII digits, so a stray sign inside the number
 // ("1.-5", "1-2") or a value too large for cents is rejected.
@@ -190,12 +191,13 @@ func parseAmountCents(raw string) (core.Cents, error) {
 	}
 	invalid := fmt.Errorf("%w: invalid amount %q", core.ErrInvalidInput, raw)
 
-	neg := false
+	// Parentheses already mark the amount negative, so they count as its
+	// one sign: "(-5.00)" is rejected rather than cancelling to +5.00.
+	neg, signed := false, false
 	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
-		neg = true
+		neg, signed = true, true
 		s = s[1 : len(s)-1]
 	}
-	signed := false
 	takeSign := func() {
 		if signed || s == "" {
 			return
