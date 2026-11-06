@@ -1,0 +1,16 @@
+{
+	"extends": "$app/tsconfig",
+	"include": ["src", "*"],
+	"compilerOptions": {
+		"strict": true,
+		"moduleResolution": "bundler",
+		"module": "esnext",
+		"target": "esnext",
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"resolveJsonModule": true,
+		"allowJs": true,
+		"checkJs": true
+	}
+}

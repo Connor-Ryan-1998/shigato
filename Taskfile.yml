@@ -22,6 +22,7 @@ tasks:
 
   build:
     desc: Build the shigoto binary.
+    deps: [web:build]
     cmds:
       - go build -trimpath -o bin/shigoto ./cmd/shigoto
 
@@ -30,6 +31,37 @@ tasks:
     cmds:
       - docker compose up -d --wait db
       - SHIGOTO_DATABASE_URL=postgres://shigoto:shigoto@localhost:5432/shigoto?sslmode=disable SHIGOTO_BASE_URL=http://localhost:8080 go run ./cmd/shigoto serve
+
+  web:install:
+    desc: Install the web app's npm dependencies.
+    dir: web
+    cmds:
+      - npm ci
+
+  web:build:
+    desc: Build the web app into internal/webui/dist.
+    dir: web
+    cmds:
+      - npm run build
+
+  web:test:
+    desc: Type-check and unit-test the web app.
+    dir: web
+    cmds:
+      - npm run check
+      - npm test -- --run
+
+  web:check:
+    desc: Type-check the web app (no tests).
+    dir: web
+    cmds:
+      - npm run check
+
+  web:dev:
+    desc: Run the web app's dev server (proxies /api and /webhooks to task dev's backend).
+    dir: web
+    cmds:
+      - npm run dev
 
   lint:
     desc: Check formatting and vet the code.
@@ -42,3 +74,4 @@ tasks:
           exit 1
         fi
       - go vet ./...
+      - task: web:check

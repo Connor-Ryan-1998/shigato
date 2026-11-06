@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +19,7 @@ import (
 	"shigoto/internal/recon"
 	"shigoto/internal/reports"
 	"shigoto/internal/timesheets"
+	"shigoto/internal/webui"
 )
 
 // Deps holds httpapi's own dependencies, a superset of module.Deps: it adds
@@ -140,5 +142,32 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"modules": enabled})
 	})
 
-	return csrfMiddleware(d.Cfg.BaseURL, mux)
+	return csrfMiddleware(d.Cfg.BaseURL, routeWebUI(mux))
+}
+
+// routeWebUI wires in the embedded SPA (internal/webui) as the catch-all for
+// everything mux doesn't own: it only ever registers /healthz and specific
+// /api/ and /webhooks/ paths, never a "/" pattern, so an unmatched /api/
+// path or a wrong method on a known one would otherwise fall through to
+// mux's own un-routed 404/405 - not to the SPA, since those two prefixes
+// are routed to mux here, never to the webui handler.
+//
+// /api/ requests additionally go through jsonAPIFallback, because mux's own
+// 404 ("404 page not found") and 405 ("Method Not Allowed") responses are
+// plain text, not the {"error": "..."} JSON every other /api/ response
+// uses.
+func routeWebUI(mux *http.ServeMux) http.Handler {
+	api := jsonAPIFallback(mux)
+	ui := webui.Handler()
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/"):
+			api.ServeHTTP(w, r)
+		case r.URL.Path == "/healthz", strings.HasPrefix(r.URL.Path, "/webhooks/"):
+			mux.ServeHTTP(w, r)
+		default:
+			ui.ServeHTTP(w, r)
+		}
+	})
 }

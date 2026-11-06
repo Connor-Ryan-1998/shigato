@@ -1,3 +1,11 @@
+FROM --platform=$BUILDPLATFORM node:24.22.2-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=secret,id=laptop_ca,target=/etc/ssl/certs/ca-certificates.crt \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
@@ -7,6 +15,7 @@ COPY go.mod go.sum ./
 RUN --mount=type=secret,id=laptop_ca,target=/etc/ssl/certs/ca-certificates.crt \
     go mod download
 COPY . .
+COPY --from=web /src/internal/webui/dist/. /src/internal/webui/dist/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /shigoto ./cmd/shigoto
 
 # Preserve the notices required when redistributing the compiled dependencies.

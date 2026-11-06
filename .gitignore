@@ -2,3 +2,14 @@
 /data/
 .env
 .superpowers/
+
+# internal/webui/dist is `task web:build`'s output. The committed
+# index.html is a placeholder so `go build`/`go test` work without node;
+# `task web:build` overwrites it with the real build (git then shows it as
+# modified, not deleted - that's expected after a local build).
+/internal/webui/dist/*
+!/internal/webui/dist/index.html
+
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/

@@ -21,7 +21,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - uses: go-task/setup-task@v1
+      - run: task web:install web:test
       - run: task lint
       - run: task test
       - run: task test SUITE=integration
