@@ -18,11 +18,13 @@
 <script lang="ts">
 	import Money from '../../components/Money.svelte';
 
-	let { core }: { core: CoreDashboard } = $props();
+	// org is the current org's slug: links must be absolute, since a relative
+	// href resolves against /<org> to a path without the org in it.
+	let { core, org }: { core: CoreDashboard; org: string } = $props();
 </script>
 
 <div class="tiles">
-	<a class="tile" href="invoices?status=open">
+	<a class="tile" href={`/${org}/invoices?status=open`}>
 		<p class="label">Open invoices</p>
 		<p class="value">{core.open_count}</p>
 		<p class="sub"><Money cents={core.open_outstanding} /> outstanding</p>
@@ -30,7 +32,7 @@
 
 	<!-- Styled as a warning, but "Overdue" is also shown as text, so the
 	     status never depends on colour alone. -->
-	<a class="tile tile-warning" href="invoices?status=overdue">
+	<a class="tile tile-warning" href={`/${org}/invoices?status=overdue`}>
 		<p class="label">Overdue</p>
 		<p class="value">{core.overdue_count}</p>
 		<p class="sub"><Money cents={core.overdue_outstanding} /> outstanding</p>

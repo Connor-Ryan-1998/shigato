@@ -122,7 +122,12 @@
 	</nav>
 
 	<main id="main-content">
-		{@render children()}
+		<!-- Switching org keeps the same route, so SvelteKit would reuse the
+		     page component and its onMount-loaded data would still be the
+		     previous org's. Keying on the org remounts the page instead. -->
+		{#key page.params.org}
+			{@render children()}
+		{/key}
 	</main>
 </div>
 

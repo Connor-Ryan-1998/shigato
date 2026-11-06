@@ -13,26 +13,28 @@ const core = {
 
 describe('DashboardCore', () => {
 	it('formats outstanding amounts as currency, never computed client-side', () => {
-		render(DashboardCore, { core });
+		render(DashboardCore, { core, org: 'acme' });
 		expect(screen.getByText('$1,234.56')).toBeTruthy();
 		expect(screen.getByText('$78.90')).toBeTruthy();
 	});
 
 	it('labels the overdue tile with text, not colour alone', () => {
-		render(DashboardCore, { core });
+		render(DashboardCore, { core, org: 'acme' });
 		expect(screen.getByText('Overdue')).toBeTruthy();
 	});
 
 	it('shows the draft count', () => {
-		render(DashboardCore, { core });
+		render(DashboardCore, { core, org: 'acme' });
 		expect(screen.getByText('2')).toBeTruthy();
 	});
 
-	it('links tiles to the invoice list filters the Invoices screen expects', () => {
-		render(DashboardCore, { core });
+	// Absolute, org-scoped hrefs: a relative "invoices?..." resolves against
+	// /acme to /invoices, dropping the org.
+	it('links tiles to the org-scoped invoice list filters', () => {
+		render(DashboardCore, { core, org: 'acme' });
 		const openLink = screen.getByRole('link', { name: /open invoices/i });
 		const overdueLink = screen.getByRole('link', { name: /overdue/i });
-		expect(openLink.getAttribute('href')).toBe('invoices?status=open');
-		expect(overdueLink.getAttribute('href')).toBe('invoices?status=overdue');
+		expect(openLink.getAttribute('href')).toBe('/acme/invoices?status=open');
+		expect(overdueLink.getAttribute('href')).toBe('/acme/invoices?status=overdue');
 	});
 });

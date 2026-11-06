@@ -14,10 +14,11 @@
 	import Money from '../../components/Money.svelte';
 	import DateText from '../../components/DateText.svelte';
 
-	let { data }: { data: ReconciliationDashboard } = $props();
+	// org is the current org's slug, for an absolute (org-scoped) link.
+	let { data, org }: { data: ReconciliationDashboard; org: string } = $props();
 </script>
 
-<a class="card" href="reconciliation">
+<a class="card" href={`/${org}/reconciliation`}>
 	<h2>Reconciliation</h2>
 	<dl>
 		<div class="row">

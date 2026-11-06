@@ -87,11 +87,11 @@
 {:else if isEmpty}
 	<EmptyState title="No invoices yet — create one" />
 {:else if core}
-	<DashboardCore {core} />
+	<DashboardCore {core} org={page.params.org ?? ''} />
 	{#if cards.length > 0}
 		<div class="module-cards">
 			{#each cards as { name, Component, data } (name)}
-				<Component {data} />
+				<Component {data} org={page.params.org ?? ''} />
 			{/each}
 		</div>
 	{/if}

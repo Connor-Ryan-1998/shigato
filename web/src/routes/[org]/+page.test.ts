@@ -69,4 +69,28 @@ describe('[org] dashboard page empty/settled state', () => {
 		expect(await screen.findByText('Open invoices')).toBeTruthy();
 		expect(screen.queryByText('No invoices yet — create one')).toBeNull();
 	});
+
+	it('links the reconciliation card to the org-scoped reconciliation screen', async () => {
+		apiMock.mockResolvedValue({
+			core: {
+				open_count: 1,
+				open_outstanding: 100,
+				overdue_count: 0,
+				overdue_outstanding: 0,
+				draft_count: 0,
+				invoice_count: 1
+			},
+			modules: {
+				reconciliation: { unmatched_count: 2, oldest_unmatched_on: null, unmatched_in: 0, unmatched_out: 0 }
+			}
+		});
+
+		render(Page);
+
+		const card = await screen.findByRole('link', { name: /reconciliation/i });
+		expect(card.getAttribute('href')).toBe('/acme/reconciliation');
+		expect(screen.getByRole('link', { name: /open invoices/i }).getAttribute('href')).toBe(
+			'/acme/invoices?status=open'
+		);
+	});
 });
