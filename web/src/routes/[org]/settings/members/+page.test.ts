@@ -80,3 +80,29 @@ describe('members page - role change', () => {
 		expect(select.value).toBe('owner');
 	});
 });
+
+describe('members page - revoke invite', () => {
+	it('shows a revoke failure inline without clearing the invite list', async () => {
+		const invites = [{ id: 7, email: 'pending@example.com', role: 'staff', expires_at: '2026-12-01T00:00:00Z' }];
+		apiMock.mockImplementation((method: string, path: string) => {
+			if (method === 'GET' && path.endsWith('/members')) return Promise.resolve(MEMBERS);
+			if (method === 'GET' && path.endsWith('/invites')) return Promise.resolve(invites);
+			if (method === 'DELETE' && path.endsWith('/invites/7')) {
+				return Promise.reject(new ApiError(404, 'not found'));
+			}
+			return Promise.reject(new Error(`unexpected call ${method} ${path}`));
+		});
+
+		render(Page);
+
+		await screen.findByText('pending@example.com — staff');
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
+
+		const errorText = await screen.findByText('not found');
+		expect(errorText).toBeTruthy();
+		// The invite is still shown - the failed revoke never removed it from
+		// the still-mounted list.
+		expect(screen.getByText('pending@example.com — staff')).toBeTruthy();
+	});
+});

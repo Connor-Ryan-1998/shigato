@@ -45,18 +45,19 @@
 		submitting = true;
 		try {
 			const body = alreadyLoggedIn ? undefined : { name, password };
-			await api('POST', `/api/v1/invites/${token}/accept`, body);
+			const res = await api<{ org_slug: string }>('POST', `/api/v1/invites/${token}/accept`, body);
 			accepted = true;
-			if (!alreadyLoggedIn) {
-				const [me, meta] = await Promise.all([
-					api<MeResponse>('GET', '/api/v1/me'),
-					api<{ modules: string[] }>('GET', '/api/v1/meta')
-				]);
-				session.setMe(me);
-				session.setModules(meta.modules);
-			}
-			const org = session.me?.orgs.find((o) => o.name === details?.org_name);
-			goto(org ? `/${org.slug}` : '/');
+			// Always refetch /me: accepting while already logged in adds a new
+			// org to the current session's membership list, and accepting
+			// anonymously creates the session in the first place - either way
+			// the shell's own cached /me is now stale.
+			const [me, meta] = await Promise.all([
+				api<MeResponse>('GET', '/api/v1/me'),
+				api<{ modules: string[] }>('GET', '/api/v1/meta')
+			]);
+			session.setMe(me);
+			session.setModules(meta.modules);
+			goto(`/${res.org_slug}`);
 		} catch (err) {
 			error = err instanceof ApiError ? err.message : 'Something went wrong.';
 		} finally {

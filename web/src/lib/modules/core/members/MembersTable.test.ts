@@ -28,4 +28,20 @@ describe('MembersTable', () => {
 		expect(removeButtons[0].disabled).toBe(true);
 		expect(removeButtons[1].disabled).toBe(false);
 	});
+
+	it('shows a tenant/client row as plain text, not a role select', () => {
+		const tenant: Member = {
+			user_id: 3,
+			name: 'Tess Tenant',
+			email: 'tess@example.com',
+			role: 'tenant',
+			sso_linked: false
+		};
+		render(MembersTable, {
+			props: { members: [tenant], onRoleChange: vi.fn(), onRemove: vi.fn() }
+		});
+
+		expect(screen.getByText('tenant')).toBeTruthy();
+		expect(screen.queryByLabelText('Role for Tess Tenant')).toBeNull();
+	});
 });

@@ -1,8 +1,10 @@
 -- Staff invites: an owner invites someone by email to join their org with a
 -- given role. The invite is single-use (token_hash, consumed atomically by
--- UPDATE ... RETURNING) and expires after 7 days (enforced in Go,
--- internal/auth/invites.go). A partial unique index on (org_id, email)
--- WHERE used_at IS NULL means creating a second invite for the same email
+-- UPDATE ... RETURNING) and expires 7 days after creation (that duration is
+-- a Go constant, internal/auth/invites.go inviteTTL, but expiry itself is
+-- enforced in SQL: every query that consumes or lists invites filters on
+-- expires_at > now()). A partial unique index on (org_id, email) WHERE
+-- used_at IS NULL means creating a second invite for the same email
 -- replaces the outstanding one instead of duplicating it.
 CREATE TABLE invites (
     id          bigserial PRIMARY KEY,

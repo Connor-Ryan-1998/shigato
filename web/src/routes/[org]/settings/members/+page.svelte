@@ -12,12 +12,26 @@
 	} from '../../../../lib/modules/core/members/InviteDialog.svelte';
 
 	type Invite = { id: number; email: string; role: string; expires_at: string };
-	type CreateInviteResponse = { invite_id: number; link: string };
+	type CreateInviteResponse = { invite_id: number; link: string; emailed: boolean };
 
 	let loadStatus = $state<'loading' | 'error' | 'ready'>('loading');
 	let errorMessage = $state('');
 	let members = $state<Member[]>([]);
 	let invites = $state<Invite[]>([]);
+
+	// Bumped on every load() call; a response is only applied if it's still
+	// the most recent request by the time it resolves - otherwise a slow
+	// earlier load (e.g. one overtaken by a quick second refresh, or an org
+	// param change) could land after a faster later one and clobber it with
+	// stale data.
+	let requestSeq = 0;
+	// True only once the list has rendered at least once. Every later load()
+	// (a refresh after an invite/role/remove/revoke action) then becomes a
+	// background refresh - refreshing stays true while the already-rendered
+	// table stays mounted, instead of tearing the whole view down to a bare
+	// "Loading…" line for every single action.
+	let hasLoadedOnce = false;
+	let refreshing = $state(false);
 
 	let busyUserId = $state<number | null>(null);
 	let memberError = $state('');
@@ -26,9 +40,16 @@
 	let inviteBusy = $state(false);
 	let inviteError = $state('');
 	let inviteLink = $state('');
+	let inviteEmailed = $state(false);
+	let invitedEmail = $state('');
 
 	async function load() {
-		loadStatus = 'loading';
+		const seq = ++requestSeq;
+		if (hasLoadedOnce) {
+			refreshing = true;
+		} else {
+			loadStatus = 'loading';
+		}
 		errorMessage = '';
 		try {
 			const org = page.params.org;
@@ -36,12 +57,23 @@
 				api<Member[]>('GET', `/api/v1/orgs/${org}/members`),
 				api<Invite[]>('GET', `/api/v1/orgs/${org}/invites`)
 			]);
+			if (seq !== requestSeq) return;
 			members = m;
 			invites = i;
 			loadStatus = 'ready';
+			hasLoadedOnce = true;
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
-			loadStatus = 'error';
+			// Once the page has rendered once, a failed refresh shows inline
+			// above the still-mounted table instead of replacing it with the
+			// full-page error state, which would otherwise discard the admin's
+			// place (open selects, scroll position, in-flight dialog).
+			if (!hasLoadedOnce) {
+				loadStatus = 'error';
+			}
+		} finally {
+			refreshing = false;
 		}
 	}
 
@@ -57,7 +89,7 @@
 		busyUserId = userId;
 		try {
 			await api('PUT', `/api/v1/orgs/${org}/members/${userId}`, { role });
-			members = members.map((m) => (m.user_id === userId ? { ...m, role } : m));
+			await load();
 		} catch (e) {
 			memberError = e instanceof ApiError ? e.message : 'Something went wrong.';
 			// Revert the select back to its previous value - the PUT failed (e.g.
@@ -77,7 +109,7 @@
 		busyUserId = userId;
 		try {
 			await api('DELETE', `/api/v1/orgs/${org}/members/${userId}`);
-			members = members.filter((m) => m.user_id !== userId);
+			await load();
 		} catch (e) {
 			memberError = e instanceof ApiError ? e.message : 'Something went wrong.';
 		} finally {
@@ -92,6 +124,8 @@
 		try {
 			const res = await api<CreateInviteResponse>('POST', `/api/v1/orgs/${org}/invites`, invite);
 			inviteLink = res.link;
+			inviteEmailed = res.emailed;
+			invitedEmail = invite.email;
 			await load();
 		} catch (e) {
 			inviteError = e instanceof ApiError ? e.message : 'Something went wrong.';
@@ -102,17 +136,23 @@
 
 	async function revokeInvite(id: number) {
 		const org = page.params.org;
+		memberError = '';
 		try {
 			await api('DELETE', `/api/v1/orgs/${org}/invites/${id}`);
-			invites = invites.filter((i) => i.id !== id);
+			await load();
 		} catch (e) {
-			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
+			// Shown in the same inline slot as a failed role change/removal,
+			// not the full-page load-error state: the invite list is still
+			// valid and mounted, only this one revoke failed.
+			memberError = e instanceof ApiError ? e.message : 'Something went wrong.';
 		}
 	}
 
 	function openInviteDialog() {
 		inviteError = '';
 		inviteLink = '';
+		inviteEmailed = false;
+		invitedEmail = '';
 		inviteOpen = true;
 	}
 </script>
@@ -132,6 +172,11 @@
 		{/snippet}
 	</EmptyState>
 {:else}
+	{#if refreshing}
+		<p class="refreshing" aria-live="polite">Refreshing…</p>
+	{:else if errorMessage}
+		<p class="inline-error" role="alert">{errorMessage}</p>
+	{/if}
 	{#if memberError}
 		<p class="inline-error" role="alert">{memberError}</p>
 	{/if}
@@ -161,6 +206,8 @@
 	error={inviteError}
 	busy={inviteBusy}
 	link={inviteLink}
+	emailed={inviteEmailed}
+	{invitedEmail}
 	onSubmit={createInvite}
 />
 
@@ -168,6 +215,9 @@
 	h2 {
 		margin-top: var(--space-6);
 		font-size: var(--text-lg);
+	}
+	.refreshing {
+		color: var(--text-muted);
 	}
 	.inline-error {
 		margin: 0 0 var(--space-4);

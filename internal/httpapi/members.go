@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
+	netmail "net/mail"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -96,10 +99,8 @@ type inviteResponse struct {
 }
 
 func inviteToResponse(inv auth.Invite) inviteResponse {
-	return inviteResponse{ID: inv.ID, Email: inv.Email, Role: inv.Role, ExpiresAt: inv.ExpiresAt.Format(timestampLayout)}
+	return inviteResponse{ID: inv.ID, Email: inv.Email, Role: inv.Role, ExpiresAt: inv.ExpiresAt.Format(time.RFC3339)}
 }
-
-const timestampLayout = "2006-01-02T15:04:05Z07:00"
 
 // --- members handlers ---
 
@@ -145,7 +146,11 @@ func listMembers(w http.ResponseWriter, r *http.Request, d Deps) {
 // locking the rows means a second concurrent demotion/removal blocks until
 // the first commits, then sees the up-to-date count rather than racing it.
 func lockOwnerCount(ctx context.Context, tx pgx.Tx, orgID int64) (int, error) {
-	rows, err := tx.Query(ctx, "SELECT user_id FROM memberships WHERE org_id = $1 AND role = 'owner' FOR UPDATE", orgID)
+	// ORDER BY user_id: every caller locks these rows in the same fixed
+	// order, so two concurrent transactions locking the same org's owners
+	// (e.g. a demote racing a remove) can never deadlock against each
+	// other by having grabbed them in opposite orders.
+	rows, err := tx.Query(ctx, "SELECT user_id FROM memberships WHERE org_id = $1 AND role = 'owner' ORDER BY user_id FOR UPDATE", orgID)
 	if err != nil {
 		return 0, err
 	}
@@ -165,6 +170,12 @@ func lockOwnerCount(ctx context.Context, tx pgx.Tx, orgID int64) (int, error) {
 // errLastOwner is the public 409 for demoting or removing an org's last
 // owner.
 var errLastOwner = &core.PublicError{Err: core.ErrInvalidState, Msg: "an organisation needs at least one owner"}
+
+// errPortalRole is the public 409 for PUTting a staff role (owner/staff/
+// bookkeeper) onto a tenant or client membership. Portal access is managed
+// separately (it isn't a role this endpoint's invite flow ever grants), so
+// a tenant/client row is never a valid target for this write.
+var errPortalRole = &core.PublicError{Err: core.ErrInvalidState, Msg: "this member's role is managed through portal access, not here"}
 
 func updateMemberRole(w http.ResponseWriter, r *http.Request, d Deps) {
 	userID, ok := userIDPathValue(r)
@@ -194,6 +205,9 @@ func updateMemberRole(w http.ResponseWriter, r *http.Request, d Deps) {
 		}
 		if err != nil {
 			return err
+		}
+		if currentRole == "tenant" || currentRole == "client" {
+			return errPortalRole
 		}
 
 		if currentRole == "owner" && body.Role != "owner" {
@@ -271,10 +285,19 @@ func createInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if strings.TrimSpace(body.Email) == "" {
+
+	email := strings.TrimSpace(body.Email)
+	if email == "" {
 		writeError(w, http.StatusUnprocessableEntity, "email is required")
 		return
 	}
+	addr, err := netmail.ParseAddress(email)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "email is not a valid address")
+		return
+	}
+	email = addr.Address
+
 	if !validInviteRole(body.Role) {
 		writeError(w, http.StatusUnprocessableEntity, "role must be owner, staff or bookkeeper")
 		return
@@ -283,14 +306,18 @@ func createInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 	p := auth.From(r.Context())
 	var inviteID int64
 	var token string
-	err := runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+	err = runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
-		inviteID, token, err = auth.CreateInvite(r.Context(), tx, p.OrgID, body.Email, body.Role, p.UserID)
+		inviteID, token, err = auth.CreateInvite(r.Context(), tx, p.OrgID, email, body.Role, p.UserID)
 		if err != nil {
 			return err
 		}
-		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "invite", inviteID, "create", body)
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "invite", inviteID, "create", map[string]string{"email": email, "role": body.Role})
 	})
+	if errors.Is(err, auth.ErrAlreadyMember) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		slog.Error("creating invite failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -298,33 +325,44 @@ func createInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 	}
 
 	link := strings.TrimRight(d.Cfg.BaseURL, "/") + "/invite/" + token
-	sendInviteEmail(r.Context(), d, r.PathValue("org"), body.Email, link)
+	emailed := sendInviteEmail(r.Context(), d, r.PathValue("org"), email, link)
 
-	writeJSON(w, http.StatusCreated, map[string]any{"invite_id": inviteID, "link": link})
+	writeJSON(w, http.StatusCreated, map[string]any{"invite_id": inviteID, "link": link, "emailed": emailed})
 }
 
 // sendInviteEmail sends the invite link to email, if d.Mailer is
-// configured. A nil Mailer (SMTP not configured) is not an error: the link
-// is always returned to the caller in createInvite's response regardless,
-// so it can still be shared by hand. A send failure is logged, not
-// surfaced: the invite itself was already created successfully.
-func sendInviteEmail(ctx context.Context, d Deps, orgSlug, email, link string) {
+// configured, and reports whether it actually went out. A nil Mailer (SMTP
+// not configured) or a send failure both return false - neither is treated
+// as an error here: the invite link is always returned to the caller in
+// createInvite's response regardless, so it can still be shared by hand; a
+// send failure is logged, not surfaced, since the invite itself was already
+// created successfully.
+func sendInviteEmail(ctx context.Context, d Deps, orgSlug, email, link string) bool {
 	if d.Mailer == nil {
-		return
+		return false
 	}
 	orgName := orgSlug
 	if org, err := core.OrgBySlug(ctx, d.Pool, orgSlug); err == nil {
 		orgName = org.Name
 	}
+	// orgName and link are escaped before going into the HTML body: orgName
+	// is an operator-chosen org name (not attacker-controlled in practice,
+	// but never trusted blindly into markup), and link embeds a
+	// base64url-encoded token that can't contain HTML-special characters
+	// but is escaped anyway on the same principle.
+	safeOrgName := html.EscapeString(orgName)
+	safeLink := html.EscapeString(link)
 	msg := mail.Message{
 		To:      email,
 		Subject: fmt.Sprintf("You've been invited to %s on shigoto", orgName),
 		Text:    fmt.Sprintf("You've been invited to join %s on shigoto. Open this link to accept: %s", orgName, link),
-		HTML:    fmt.Sprintf(`<p>You've been invited to join <strong>%s</strong> on shigoto.</p><p><a href="%s">Accept your invite</a></p>`, orgName, link),
+		HTML:    fmt.Sprintf(`<p>You've been invited to join <strong>%s</strong> on shigoto.</p><p><a href="%s">Accept your invite</a></p>`, safeOrgName, safeLink),
 	}
 	if err := d.Mailer.Send(ctx, msg); err != nil {
 		slog.Error("sending invite email failed", "error", err)
+		return false
 	}
+	return true
 }
 
 func listInvites(w http.ResponseWriter, r *http.Request, d Deps) {
@@ -402,7 +440,7 @@ func acceptInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 		loggedInUserID = &id
 	}
 
-	err := d.Auth.AcceptInvite(r.Context(), w, r.PathValue("token"), loggedInUserID, body.Name, body.Password)
+	orgSlug, err := d.Auth.AcceptInvite(r.Context(), w, r.PathValue("token"), loggedInUserID, body.Name, body.Password)
 	switch {
 	case errors.Is(err, auth.ErrInviteInvalid):
 		writeError(w, http.StatusGone, "this invite has already been used or has expired")
@@ -410,12 +448,14 @@ func acceptInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 		writeError(w, http.StatusConflict, "this invite is for a different email address")
 	case errors.Is(err, auth.ErrAccountExists):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, auth.ErrNameRequired):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, auth.ErrPasswordTooShort):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	case err != nil:
 		slog.Error("accepting invite failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
-		w.WriteHeader(http.StatusNoContent)
+		writeJSON(w, http.StatusOK, map[string]string{"org_slug": orgSlug})
 	}
 }

@@ -24,6 +24,15 @@
 		{ value: 'bookkeeper', label: 'Bookkeeper' }
 	];
 
+	// A tenant/client row is a portal membership, not one this page's role
+	// PUT ever accepts (the server rejects it with 409 - see
+	// internal/httpapi/members.go errPortalRole), so it's shown as plain
+	// text rather than a select that would silently offer roles the server
+	// will refuse.
+	function isStaffRole(role: string): boolean {
+		return role === 'owner' || role === 'staff' || role === 'bookkeeper';
+	}
+
 	let {
 		members,
 		busyUserId = null,
@@ -41,14 +50,18 @@
 </script>
 
 {#snippet roleCell(m: Member)}
-	<label class="visually-hidden" for={`member-role-${m.user_id}`}>Role for {m.name}</label>
-	<Select
-		id={`member-role-${m.user_id}`}
-		value={m.role}
-		disabled={busyUserId === m.user_id}
-		options={ROLE_OPTIONS}
-		onchange={(role) => onRoleChange(m.user_id, role)}
-	/>
+	{#if isStaffRole(m.role)}
+		<label class="visually-hidden" for={`member-role-${m.user_id}`}>Role for {m.name}</label>
+		<Select
+			id={`member-role-${m.user_id}`}
+			value={m.role}
+			disabled={busyUserId === m.user_id}
+			options={ROLE_OPTIONS}
+			onchange={(role) => onRoleChange(m.user_id, role)}
+		/>
+	{:else}
+		{m.role}
+	{/if}
 {/snippet}
 
 {#snippet actionsCell(m: Member)}

@@ -19,9 +19,15 @@
 		error,
 		busy = false,
 		// Set once the invite is created - the server always returns a link
-		// (even when email is configured and was sent), so the dialog switches
-		// to showing it for copying by hand rather than just closing.
+		// regardless of whether email was sent, so the dialog switches away
+		// from the form either way.
 		link = '',
+		// Whether the server actually sent the invite email (false covers
+		// both "no mailer configured" and "the send failed"). When true, the
+		// dialog shows a "sent to ..." note instead of the link/copy
+		// affordance - the recipient already has it in their inbox.
+		emailed = false,
+		invitedEmail = '',
 		onSubmit,
 		onclose
 	}: {
@@ -29,6 +35,8 @@
 		error?: string;
 		busy?: boolean;
 		link?: string;
+		emailed?: boolean;
+		invitedEmail?: string;
 		onSubmit: (invite: NewInvite) => void;
 		onclose?: () => void;
 	} = $props();
@@ -65,11 +73,15 @@
 
 <Dialog bind:open title="Invite a staff member" {onclose}>
 	{#if link}
-		<p>Invite created. Share this link with them:</p>
-		<div class="link-row">
-			<input readonly value={link} aria-label="Invite link" />
-			<Button variant="secondary" onclick={copyLink}>{copied ? 'Copied' : 'Copy'}</Button>
-		</div>
+		{#if emailed}
+			<p>Invite sent to <strong>{invitedEmail}</strong>.</p>
+		{:else}
+			<p>Invite created. Share this link with them:</p>
+			<div class="link-row">
+				<input readonly value={link} aria-label="Invite link" />
+				<Button variant="secondary" onclick={copyLink}>{copied ? 'Copied' : 'Copy'}</Button>
+			</div>
+		{/if}
 		<div class="actions">
 			<Button onclick={() => (open = false)}>Done</Button>
 		</div>

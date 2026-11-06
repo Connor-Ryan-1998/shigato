@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"shigoto/internal/core"
 )
@@ -41,6 +42,12 @@ var (
 	// ErrPasswordTooShort means an unauthenticated accept supplied a
 	// password shorter than minInvitePasswordLength. 422.
 	ErrPasswordTooShort = errors.New("password must be at least 12 characters")
+	// ErrNameRequired means an unauthenticated accept supplied a blank (or
+	// all-whitespace) name. 422.
+	ErrNameRequired = errors.New("name is required")
+	// ErrAlreadyMember means CreateInvite was asked to invite an email that
+	// already belongs to a member of the org. 409.
+	ErrAlreadyMember = errors.New("this person is already a member of this organisation")
 )
 
 // Invite is one outstanding invite, as listed to an org admin.
@@ -79,8 +86,24 @@ func newInviteToken() (token string, hash []byte, err error) {
 // replacing any outstanding (unused) invite already sitting for that email
 // (the partial unique index on (org_id, email) WHERE used_at IS NULL is the
 // conflict target). It returns the invite's id and the plaintext token -
-// callers build the link and send it; only the token's hash is stored.
+// callers build the link and send it; only the token's hash is stored. It
+// returns ErrAlreadyMember if email already belongs to a member of orgID -
+// inviting them again would be confusing (and AcceptInvite would just 409
+// its own accept with ErrAccountExists for the no-session path).
 func CreateInvite(ctx context.Context, q core.Querier, orgID int64, email, role string, invitedBy int64) (id int64, token string, err error) {
+	var exists int
+	err = q.QueryRow(ctx, `
+		SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id
+		WHERE m.org_id = $1 AND u.email = $2`,
+		orgID, email,
+	).Scan(&exists)
+	if err == nil {
+		return 0, "", ErrAlreadyMember
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", err
+	}
+
 	token, hash, err := newInviteToken()
 	if err != nil {
 		return 0, "", err
@@ -183,24 +206,31 @@ func InviteByToken(ctx context.Context, q core.Querier, token string) (InviteDet
 // AcceptInvite accepts the invite identified by the plaintext token, in a
 // single transaction that atomically consumes the token (so a reused or
 // racing accept always fails rather than ever granting membership twice).
+// On success it returns the org's slug, so the caller can send the SPA
+// straight there.
+//
+// Token validity is checked first: an invalid/used/expired token
+// (ErrInviteInvalid) always wins over a validation error on the request
+// body, even when both are true, because every later step runs inside the
+// same not-yet-committed transaction - a validation failure after this
+// point rolls back the token consumption too, leaving the token usable for
+// a retry with a corrected body.
 //
 // When loggedInUserID is non-nil, the invite's email must match that
 // user's own (ErrEmailMismatch otherwise) and only a membership is added.
-// When nil, name and password must be supplied: password must be at least
+// When nil, name and password must be supplied: name must be non-blank
+// (ErrNameRequired otherwise) and password must be at least
 // minInvitePasswordLength characters (ErrPasswordTooShort otherwise), and
-// an existing account for the invite's email is rejected with
-// ErrAccountExists ("sign in first, then open the link again") rather than
-// silently added to - this flow is for people who don't have an account
-// yet. On success for this path, a new session is started and its cookie
-// set on w, exactly as LoginHandler would.
-func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token string, loggedInUserID *int64, name, password string) error {
-	if loggedInUserID == nil && len(password) < minInvitePasswordLength {
-		return ErrPasswordTooShort
-	}
-
+// an existing account for the invite's email - including one created by a
+// concurrent accept racing this one - is rejected with ErrAccountExists
+// ("sign in first, then open the link again") rather than silently added
+// to - this flow is for people who don't have an account yet. On success
+// for this path, a new session is started and its cookie set on w, exactly
+// as LoginHandler would.
+func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token string, loggedInUserID *int64, name, password string) (orgSlug string, err error) {
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -213,41 +243,59 @@ func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token st
 		hashToken(token),
 	).Scan(&orgID, &email, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrInviteInvalid
+		return "", ErrInviteInvalid
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var userID int64
+	var newAccount bool
 	if loggedInUserID != nil {
 		var loggedInEmail string
 		if err := tx.QueryRow(ctx, "SELECT email FROM users WHERE id = $1", *loggedInUserID).Scan(&loggedInEmail); err != nil {
-			return err
+			return "", err
 		}
 		if !strings.EqualFold(loggedInEmail, email) {
-			return ErrEmailMismatch
+			return "", ErrEmailMismatch
 		}
 		userID = *loggedInUserID
 	} else {
+		if strings.TrimSpace(name) == "" {
+			return "", ErrNameRequired
+		}
+		if len(password) < minInvitePasswordLength {
+			return "", ErrPasswordTooShort
+		}
+
 		err := tx.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", email).Scan(&userID)
 		if err == nil {
-			return ErrAccountExists
+			return "", ErrAccountExists
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
+			return "", err
 		}
 
 		hash, err := HashPassword(password)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if err := tx.QueryRow(ctx,
 			"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
 			email, name, hash,
 		).Scan(&userID); err != nil {
-			return err
+			// A concurrent accept for the same email (e.g. two outstanding
+			// invites to different orgs) can race this exact check-then-
+			// insert; the unique constraint on users.email is the real
+			// guard, and a violation here means the same thing the earlier
+			// SELECT would have found had it run a moment later.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return "", ErrAccountExists
+			}
+			return "", err
 		}
+		newAccount = true
 	}
 
 	// ON CONFLICT DO NOTHING: a user who somehow already holds a
@@ -257,16 +305,32 @@ func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token st
 		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3) ON CONFLICT (user_id, org_id) DO NOTHING",
 		userID, orgID, role,
 	); err != nil {
-		return err
+		return "", err
+	}
+
+	if newAccount {
+		if err := core.Audit(ctx, tx, orgID, &userID, "user", userID, "create", map[string]string{"email": email}); err != nil {
+			return "", err
+		}
+	}
+	if err := core.Audit(ctx, tx, orgID, &userID, "membership", userID, "accept_invite", map[string]string{"role": role}); err != nil {
+		return "", err
 	}
 
 	if loggedInUserID == nil {
 		if err := a.StartSession(ctx, tx, w, userID); err != nil {
-			return err
+			return "", err
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.QueryRow(ctx, "SELECT slug FROM orgs WHERE id = $1", orgID).Scan(&orgSlug); err != nil {
+		return "", err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return orgSlug, nil
 }
 
 // PruneInvites deletes every invite that's already used or has expired
