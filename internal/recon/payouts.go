@@ -61,14 +61,14 @@ var stripeFeeGST = core.GST
 // can never leave a half-written payout. It returns core.ErrInvalidInput
 // (422) if payoutRef is empty, if orgSlug has no provider configured, if
 // the provider has no such payout, or if fees are owed but the org has no
-// "Stripe fees" category; core.ErrInvalidState (409, with a
-// core.PublicError message where noted) if the line isn't an unmatched
-// credit, if the payout isn't "paid", if its amount or arrival date doesn't
-// match the line, if it was already matched to a bank line (public), if any
+// "Stripe fees" category; core.ErrInvalidState (409, always with a
+// core.PublicError message stating the reason) if the line isn't
+// unmatched, if the payout isn't "paid", if its amount or arrival date
+// doesn't match the line, if it was already matched to a bank line, if any
 // payout transaction doesn't map to an existing, not-already-linked payment
-// (public, listing the offending transaction refs), or if its transactions'
-// net total doesn't equal the payout amount (public) - in every 409 case,
-// nothing is written.
+// (listing the offending transaction refs), or if its transactions' net
+// total doesn't equal the payout amount - in every 409 case, nothing is
+// written.
 func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, orgID int64, orgSlug string, lineID int64, payoutRef string) (PayoutResult, error) {
 	if payoutRef == "" {
 		return PayoutResult{}, fmt.Errorf("%w: payout_ref is required", core.ErrInvalidInput)
