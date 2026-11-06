@@ -12,6 +12,7 @@ import (
 	"shigoto/internal/auth"
 	"shigoto/internal/billing"
 	"shigoto/internal/config"
+	"shigoto/internal/mail"
 	"shigoto/internal/module"
 	"shigoto/internal/payments"
 	"shigoto/internal/payments/stripe"
@@ -43,6 +44,11 @@ type Deps struct {
 	// *billing.Service built from Pool, GetEnv, Payments and
 	// Cfg.Location.
 	Billing *billing.Service
+	// Mailer sends invite emails. It defaults to mail.New(Cfg.SMTP), which
+	// is nil when SMTP isn't configured - callers (e.g. createInvite) must
+	// handle a nil Mailer by skipping the send, not erroring: the invite
+	// link is still returned to the caller so it can be shared by hand.
+	Mailer *mail.Mailer
 }
 
 // defaultPayments builds the default Payments resolver: a stripe.Provider
@@ -84,6 +90,9 @@ func (d Deps) withDefaults() Deps {
 	if d.Billing == nil {
 		d.Billing = billing.New(d.Pool, d.GetEnv, d.Payments, d.Cfg.Location)
 	}
+	if d.Mailer == nil {
+		d.Mailer = mail.New(d.Cfg.SMTP)
+	}
 	return d
 }
 
@@ -122,6 +131,7 @@ func New(d Deps) http.Handler {
 	registerWebhookRoutes(mux, d)
 	registerMeRoutes(mux, d)
 	registerDashboardRoutes(mux, d)
+	registerMemberRoutes(mux, d)
 
 	md := module.Deps{Pool: d.Pool, Auth: d.Auth, Cfg: d.Cfg, Billing: d.Billing}
 	// Reports are core: always on, never gated by d.Cfg.Modules.

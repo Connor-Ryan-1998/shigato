@@ -7,6 +7,7 @@ export const core: ModuleManifest = {
 	label: 'Core',
 	nav: [
 		{ href: '', label: 'Dashboard', perm: '' },
-		{ href: 'invoices', label: 'Invoices', perm: 'invoices_read' }
+		{ href: 'invoices', label: 'Invoices', perm: 'invoices_read' },
+		{ href: 'settings/members', label: 'Members', perm: 'org_admin' }
 	]
 };

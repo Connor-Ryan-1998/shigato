@@ -106,6 +106,9 @@ func (j Jobs) Tick(ctx context.Context, now time.Time) error {
 	if err := auth.PruneSessions(ctx, j.Pool, now); err != nil {
 		slog.Error("pruning sessions failed", "error", err)
 	}
+	if err := auth.PruneInvites(ctx, j.Pool, now); err != nil {
+		slog.Error("pruning invites failed", "error", err)
+	}
 
 	return nil
 }
