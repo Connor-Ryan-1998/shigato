@@ -186,23 +186,35 @@ func get(handler http.Handler, token, path string) *httptest.ResponseRecorder {
 	return rr
 }
 
+// basFiguresBody mirrors the API's snake_case/"1a"/"1b" BAS figure keys
+// (see reports.BASFigures.MarshalJSON), used for both figures_cents and
+// figures_dollars.
+type basFiguresBody struct {
+	G1  int64 `json:"g1"`
+	G2  int64 `json:"g2"`
+	G3  int64 `json:"g3"`
+	G4  int64 `json:"g4"`
+	G10 int64 `json:"g10"`
+	G11 int64 `json:"g11"`
+	A1  int64 `json:"1a"`
+	B1  int64 `json:"1b"`
+}
+
 type basResponseBody struct {
-	Period       string `json:"period"`
-	FiguresCents struct {
-		G1, G2, G3, G4, G10, G11 int64
-		A1, B1                   int64
-	} `json:"figures_cents"`
+	Period         string         `json:"period"`
+	FiguresCents   basFiguresBody `json:"figures_cents"`
+	FiguresDollars basFiguresBody `json:"figures_dollars"`
 }
 
 type basDetailResponseBody struct {
 	Field  string `json:"field"`
 	Income []struct {
-		Incl int64 `json:"Incl"`
-		GST  int64 `json:"GST"`
+		InclGST int64 `json:"incl_gst"`
+		GST     int64 `json:"gst"`
 	} `json:"income"`
 	Expenses []struct {
-		Incl int64 `json:"Incl"`
-		GST  int64 `json:"GST"`
+		InclGST int64 `json:"incl_gst"`
+		GST     int64 `json:"gst"`
 	} `json:"expenses"`
 }
 
@@ -278,14 +290,14 @@ func TestBASTiesToDetail(t *testing.T) {
 			if isGSTField {
 				sum += r.GST
 			} else {
-				sum += r.Incl
+				sum += r.InclGST
 			}
 		}
 		for _, r := range detail.Expenses {
 			if isGSTField {
 				sum += r.GST
 			} else {
-				sum += r.Incl
+				sum += r.InclGST
 			}
 		}
 		if sum != want[field] {
@@ -306,6 +318,7 @@ type pnlGroupResponseBody struct {
 // "Unassigned", each with the right net.
 func TestPnLByProperty(t *testing.T) {
 	pool, handler, token, orgID := reportsTestSetup(t)
+	setGSTRegistered(t, pool, orgID, true)
 	tenant := testContact(t, pool, orgID, "tenant", "Tenant")
 	client := testContact(t, pool, orgID, "client", "Client")
 	p1 := testProperty(t, pool, orgID, "P1", false)
@@ -313,6 +326,10 @@ func TestPnLByProperty(t *testing.T) {
 	rentInv := testInvoice(t, pool, orgID, tenant, "rent", 1000, 50000, "FRE", &p1, nil)
 	testPayment(t, pool, orgID, rentInv.ID, 50000, mustDate(t, "2026-07-10"))
 
+	// Repairs & maintenance defaults to GST; with the org GST-registered,
+	// an incl-GST amount of 11000 splits into gst_amount
+	// GSTInInclusive(11000, GST) = round(11000/11) = 1000, so ex-GST (what
+	// PnL sums) is 11000 - 1000 = 10000.
 	repairsCat := testCategoryID(t, pool, orgID, "Repairs & maintenance")
 	testExpense(t, pool, orgID, repairsCat, 11000, mustDate(t, "2026-07-15"), &p1)
 
@@ -339,16 +356,11 @@ func TestPnLByProperty(t *testing.T) {
 	if p1Group.TotalIncome != 50000 {
 		t.Errorf("P1 TotalIncome = %d, want 50000", p1Group.TotalIncome)
 	}
-	// Repairs is a non-capital GST-default category, but the invoice was
-	// marked FRE so no gst_amount; repairs expense is incl 11000, its
-	// category default is GST so gst_amount is computed by CreateExpense
-	// and Ex = Incl - GST. We only assert Net ties out via TotalExpenses
-	// directly from the response instead of recomputing GST here.
-	if p1Group.TotalExpenses <= 0 {
-		t.Errorf("P1 TotalExpenses = %d, want > 0", p1Group.TotalExpenses)
+	if p1Group.TotalExpenses != 10000 {
+		t.Errorf("P1 TotalExpenses = %d, want 10000", p1Group.TotalExpenses)
 	}
-	if p1Group.Net != p1Group.TotalIncome-p1Group.TotalExpenses {
-		t.Errorf("P1 Net = %d, want %d", p1Group.Net, p1Group.TotalIncome-p1Group.TotalExpenses)
+	if p1Group.Net != 40000 {
+		t.Errorf("P1 Net = %d, want 40000", p1Group.Net)
 	}
 
 	unassigned, ok := byKey["Unassigned"]
@@ -357,6 +369,9 @@ func TestPnLByProperty(t *testing.T) {
 	}
 	if unassigned.TotalIncome != 10000 {
 		t.Errorf("Unassigned TotalIncome = %d, want 10000", unassigned.TotalIncome)
+	}
+	if unassigned.TotalExpenses != 0 {
+		t.Errorf("Unassigned TotalExpenses = %d, want 0", unassigned.TotalExpenses)
 	}
 	if unassigned.Net != 10000 {
 		t.Errorf("Unassigned Net = %d, want 10000", unassigned.Net)
@@ -432,22 +447,64 @@ func TestTransactionsCSV(t *testing.T) {
 	}
 }
 
-// TestReportsExcludeDraftAndVoid checks that a draft invoice's payment (if
-// any) and a voided invoice never contribute to income rows.
+// rawInsertPayment inserts a payment row directly via SQL, bypassing
+// core.RecordPayment's own draft/void guard - used to prove the report
+// query's own status filter holds even against data that shouldn't exist
+// in practice (RecordPayment itself refuses to record against a draft).
+func rawInsertPayment(t *testing.T, pool *pgxpool.Pool, orgID, invoiceID int64, amount int64, paidOn time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO payments (org_id, invoice_id, amount, paid_on, method) VALUES ($1, $2, $3, $4, 'bank_transfer')`,
+		orgID, invoiceID, amount, paidOn,
+	); err != nil {
+		t.Fatalf("inserting raw payment: %v", err)
+	}
+}
+
+// forceVoid sets an invoice's status to 'void' directly via SQL, bypassing
+// core.VoidInvoice's own payment-count guard - used to produce a voided
+// invoice that still has a recorded payment (the state the reports status
+// filter must exclude), which VoidInvoice itself refuses to create.
+func forceVoid(t *testing.T, pool *pgxpool.Pool, invoiceID int64) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE invoices SET status = 'void' WHERE id = $1`, invoiceID); err != nil {
+		t.Fatalf("forcing void: %v", err)
+	}
+}
+
+// TestReportsExcludeDraftAndVoid checks that a paid-then-voided invoice and
+// a draft invoice with a payment recorded directly against it (both states
+// core itself refuses to produce, but the report query's own status filter
+// must still exclude) never appear in transactions.csv or count toward
+// BAS G1/1A.
 func TestReportsExcludeDraftAndVoid(t *testing.T) {
 	pool, handler, token, orgID := reportsTestSetup(t)
+	setGSTRegistered(t, pool, orgID, true)
 	tenant := testContact(t, pool, orgID, "tenant", "Tenant")
 
-	// An issued invoice that gets voided before payment - no payment is
-	// possible on a draft, so to exercise "void never contributes" we void
-	// an unpaid open invoice, confirming VoidInvoice leaves no income row.
-	voidedInv := testInvoice(t, pool, orgID, tenant, "manual", 1000, 20000, "FRE", nil, nil)
-	if _, err := core.VoidInvoice(context.Background(), pool, orgID, voidedInv.ID); err != nil {
-		t.Fatalf("VoidInvoice: %v", err)
-	}
+	// Issued, paid in full (22000 = 20000 ex-GST + 2000 GST), then forced
+	// void via SQL - a state VoidInvoice itself refuses (it checks for
+	// existing payments), but the reports query must still exclude by
+	// status alone.
+	voidedInv := testInvoice(t, pool, orgID, tenant, "manual", 1000, 20000, "GST", nil, nil)
+	testPayment(t, pool, orgID, voidedInv.ID, 22000, mustDate(t, "2026-07-05"))
+	forceVoid(t, pool, voidedInv.ID)
 
-	// A real, paid invoice in the same window, to confirm the report isn't
-	// simply empty.
+	// A draft invoice (never issued) with a payment row inserted directly -
+	// core.RecordPayment refuses this itself, but the reports query must
+	// still exclude it by status alone.
+	draft, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
+		ContactID: tenant, Source: "manual", DueInDays: 7,
+		Lines: []core.NewLine{{Description: "line", QuantityMilli: 1000, UnitAmount: 5000, GSTCode: "GST"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraftInvoice: %v", err)
+	}
+	rawInsertPayment(t, pool, orgID, draft.ID, 5500, mustDate(t, "2026-07-06"))
+
+	// A real, paid invoice (FRE, so it contributes to G1 but not 1A) in the
+	// same window, giving G1/1A a known value the excluded rows would
+	// otherwise inflate.
 	paidInv := testInvoice(t, pool, orgID, tenant, "manual", 1000, 30000, "FRE", nil, nil)
 	testPayment(t, pool, orgID, paidInv.ID, 30000, mustDate(t, "2026-07-10"))
 
@@ -461,5 +518,20 @@ func TestReportsExcludeDraftAndVoid(t *testing.T) {
 	}
 	if len(records) != 2 { // header + the one paid invoice's income row
 		t.Fatalf("len(records) = %d, want 2 (header + paid invoice only): %+v", len(records), records)
+	}
+
+	rr = get(handler, token, "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET bas: status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var bas basResponseBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &bas); err != nil {
+		t.Fatalf("unmarshaling bas response: %v", err)
+	}
+	if bas.FiguresCents.G1 != 30000 {
+		t.Errorf("G1 = %d, want 30000 (the draft/voided payments must not count)", bas.FiguresCents.G1)
+	}
+	if bas.FiguresCents.A1 != 0 {
+		t.Errorf("1A = %d, want 0 (the draft/voided GST must not count)", bas.FiguresCents.A1)
 	}
 }

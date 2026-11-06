@@ -95,8 +95,8 @@ func IncomeRows(ctx context.Context, q core.Querier, orgID int64, from, to time.
 	for _, p := range payments {
 		lineRows, err := q.Query(ctx, `
 			SELECT amount, gst_amount, gst_code, property_id, project_id
-			FROM invoice_lines WHERE invoice_id = $1 ORDER BY id`,
-			p.invoiceID,
+			FROM invoice_lines WHERE invoice_id = $1 AND org_id = $2 ORDER BY id`,
+			p.invoiceID, orgID,
 		)
 		if err != nil {
 			return nil, err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -48,7 +49,11 @@ func resolveRange(q map[string][]string) (from, to time.Time, msg string, ok boo
 	if to.Before(from) {
 		return time.Time{}, time.Time{}, "to must not be before from", false
 	}
-	if to.Sub(from) > maxRangeDays*24*time.Hour {
+	// Inclusive day count: both from and to count as days in range, so
+	// 2026-07-01..2026-07-01 is 1 day, and 2026-07-01..2027-07-02 is 367
+	// (366 days apart plus the first day) - over the 366-day limit.
+	inclusiveDays := int(to.Sub(from).Hours()/24) + 1
+	if inclusiveDays > maxRangeDays {
 		return time.Time{}, time.Time{}, fmt.Sprintf("range must not exceed %d days", maxRangeDays), false
 	}
 	return from, to, "", true
@@ -336,10 +341,61 @@ func basHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 var validBASFields = map[string]bool{"G1": true, "G3": true, "G4": true, "G10": true, "G11": true, "1A": true, "1B": true}
 
+// incomeRowResponse is IncomeRow's wire shape: snake_case keys and a
+// YYYY-MM-DD date, rather than IncomeRow's Go field names and time.Time's
+// default RFC 3339 encoding.
+type incomeRowResponse struct {
+	PaymentID     int64  `json:"payment_id"`
+	InvoiceID     int64  `json:"invoice_id"`
+	InvoiceNumber *int   `json:"invoice_number,omitempty"`
+	PaidOn        string `json:"paid_on"`
+	Category      string `json:"category"`
+	GSTCode       string `json:"gst_code"`
+	InclGST       int64  `json:"incl_gst"`
+	GST           int64  `json:"gst"`
+	ExGST         int64  `json:"ex_gst"`
+	PropertyID    *int64 `json:"property_id,omitempty"`
+	ProjectID     *int64 `json:"project_id,omitempty"`
+}
+
+func incomeRowToResponse(r IncomeRow) incomeRowResponse {
+	return incomeRowResponse{
+		PaymentID: r.PaymentID, InvoiceID: r.InvoiceID, InvoiceNumber: r.InvoiceNumber,
+		PaidOn: r.PaidOn.Format(dateLayout), Category: r.Category, GSTCode: string(r.Code),
+		InclGST: int64(r.Incl), GST: int64(r.GST), ExGST: int64(r.Ex),
+		PropertyID: r.PropertyID, ProjectID: r.ProjectID,
+	}
+}
+
+// expenseRowResponse is ExpenseRow's wire shape, the same treatment as
+// incomeRowResponse.
+type expenseRowResponse struct {
+	ExpenseID  int64  `json:"expense_id"`
+	LineID     int64  `json:"line_id"`
+	SpentOn    string `json:"spent_on"`
+	Category   string `json:"category"`
+	Capital    bool   `json:"capital"`
+	GSTCode    string `json:"gst_code"`
+	InclGST    int64  `json:"incl_gst"`
+	GST        int64  `json:"gst"`
+	ExGST      int64  `json:"ex_gst"`
+	PropertyID *int64 `json:"property_id,omitempty"`
+	ProjectID  *int64 `json:"project_id,omitempty"`
+}
+
+func expenseRowToResponse(r ExpenseRow) expenseRowResponse {
+	return expenseRowResponse{
+		ExpenseID: r.ExpenseID, LineID: r.LineID, SpentOn: r.SpentOn.Format(dateLayout),
+		Category: r.Category, Capital: r.Capital, GSTCode: string(r.Code),
+		InclGST: int64(r.Incl), GST: int64(r.GST), ExGST: int64(r.Ex),
+		PropertyID: r.PropertyID, ProjectID: r.ProjectID,
+	}
+}
+
 type basDetailResponse struct {
-	Field    string       `json:"field"`
-	Income   []IncomeRow  `json:"income,omitempty"`
-	Expenses []ExpenseRow `json:"expenses,omitempty"`
+	Field    string               `json:"field"`
+	Income   []incomeRowResponse  `json:"income,omitempty"`
+	Expenses []expenseRowResponse `json:"expenses,omitempty"`
 }
 
 func basDetailHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -373,7 +429,15 @@ func basDetailHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, basDetailResponse{Field: field, Income: incomeRows, Expenses: expenseRows})
+	incomeResp := make([]incomeRowResponse, len(incomeRows))
+	for i, r := range incomeRows {
+		incomeResp[i] = incomeRowToResponse(r)
+	}
+	expenseResp := make([]expenseRowResponse, len(expenseRows))
+	for i, r := range expenseRows {
+		expenseResp[i] = expenseRowToResponse(r)
+	}
+	module.WriteJSON(w, http.StatusOK, basDetailResponse{Field: field, Income: incomeResp, Expenses: expenseResp})
 }
 
 // --- CSV ---
@@ -469,7 +533,11 @@ func transactionsCSVHandler(w http.ResponseWriter, r *http.Request, d module.Dep
 	}
 
 	if err := writeCSV(w, "transactions.csv", rows); err != nil {
-		module.WriteCoreError(w, err)
+		// The response may already be partially written (headers sent,
+		// some CSV rows flushed), so writing another status/body here
+		// would be a no-op at best and corrupt the response at worst;
+		// log it instead.
+		slog.Error("writing transactions.csv failed", "error", err)
 	}
 }
 
@@ -523,7 +591,7 @@ func pnlCSVHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	}
 
 	if err := writeCSV(w, "pnl.csv", rows); err != nil {
-		module.WriteCoreError(w, err)
+		slog.Error("writing pnl.csv failed", "error", err)
 	}
 }
 
@@ -573,6 +641,6 @@ func basCSVHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	}
 
 	if err := writeCSV(w, "bas.csv", rows); err != nil {
-		module.WriteCoreError(w, err)
+		slog.Error("writing bas.csv failed", "error", err)
 	}
 }

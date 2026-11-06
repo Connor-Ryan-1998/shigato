@@ -45,3 +45,39 @@ func TestFYQuarterInvalid(t *testing.T) {
 		}
 	}
 }
+
+// TestFYQuarterOtherFYStartMonths checks FYQuarter against fy_start_months
+// other than the Australian default of 7: 1 (a calendar-year FY, where
+// FY<year> is simply that year) and 4 (a UK-style April start).
+func TestFYQuarterOtherFYStartMonths(t *testing.T) {
+	cases := []struct {
+		fyStartMonth int
+		period       string
+		from, to     string
+	}{
+		{1, "FY2027-Q1", "2027-01-01", "2027-03-31"},
+		{4, "FY2027-Q1", "2026-04-01", "2026-06-30"},
+	}
+	for _, c := range cases {
+		from, to, err := FYQuarter(c.period, c.fyStartMonth)
+		if err != nil {
+			t.Fatalf("FYQuarter(%q, %d): %v", c.period, c.fyStartMonth, err)
+		}
+		if !from.Equal(mustDate(t, c.from)) {
+			t.Errorf("FYQuarter(%q, %d).from = %s, want %s", c.period, c.fyStartMonth, from.Format("2006-01-02"), c.from)
+		}
+		if !to.Equal(mustDate(t, c.to)) {
+			t.Errorf("FYQuarter(%q, %d).to = %s, want %s", c.period, c.fyStartMonth, to.Format("2006-01-02"), c.to)
+		}
+	}
+}
+
+// TestFYQuarterInvalidFYStartMonth checks FYQuarter rejects an
+// out-of-range fy_start_month instead of silently misbehaving.
+func TestFYQuarterInvalidFYStartMonth(t *testing.T) {
+	for _, m := range []int{0, 13, -1} {
+		if _, _, err := FYQuarter("FY2027-Q1", m); err == nil {
+			t.Errorf("FYQuarter(FY2027-Q1, %d): want error, got nil", m)
+		}
+	}
+}

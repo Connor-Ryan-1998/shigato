@@ -1,6 +1,7 @@
 package reports
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"shigoto/internal/core"
@@ -12,11 +13,42 @@ type BASFigures struct {
 	A1, B1                   core.Cents
 }
 
+// basFiguresJSON is the wire shape for both BASFigures and BASDollars: the
+// ATO's own field names, snake_case/lowercase so the API contract reads
+// g1,g2,g3,g4,g10,g11,"1a","1b" (a struct field can't be named "1a" or
+// "1b", hence the separate marshal-only type rather than json tags on
+// BASFigures/BASDollars directly).
+type basFiguresJSON struct {
+	G1  int64 `json:"g1"`
+	G2  int64 `json:"g2"`
+	G3  int64 `json:"g3"`
+	G4  int64 `json:"g4"`
+	G10 int64 `json:"g10"`
+	G11 int64 `json:"g11"`
+	A1  int64 `json:"1a"`
+	B1  int64 `json:"1b"`
+}
+
+// MarshalJSON renders f as {"g1":...,"g2":...,...,"1a":...,"1b":...}.
+func (f BASFigures) MarshalJSON() ([]byte, error) {
+	return json.Marshal(basFiguresJSON{
+		G1: int64(f.G1), G2: int64(f.G2), G3: int64(f.G3), G4: int64(f.G4),
+		G10: int64(f.G10), G11: int64(f.G11), A1: int64(f.A1), B1: int64(f.B1),
+	})
+}
+
 // BASDollars is BASFigures truncated toward zero to whole dollars, the way
 // the ATO's paper/online BAS form takes figures.
 type BASDollars struct {
 	G1, G2, G3, G4, G10, G11 int64
 	A1, B1                   int64
+}
+
+// MarshalJSON renders d the same shape as BASFigures.MarshalJSON.
+func (d BASDollars) MarshalJSON() ([]byte, error) {
+	return json.Marshal(basFiguresJSON{
+		G1: d.G1, G2: d.G2, G3: d.G3, G4: d.G4, G10: d.G10, G11: d.G11, A1: d.A1, B1: d.B1,
+	})
 }
 
 // Dollars truncates each of f's figures toward zero to whole dollars.

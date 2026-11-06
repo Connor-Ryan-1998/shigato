@@ -16,6 +16,9 @@ var fyQuarterPattern = regexp.MustCompile(`^FY(\d{4})-Q([1-4])$`)
 // financial year ending in <year> (e.g. with fyStartMonth 7, FY2027 runs
 // 2026-07-01 to 2027-06-30); Q1 covers the FY's first three months.
 func FYQuarter(s string, fyStartMonth int) (from, to time.Time, err error) {
+	if fyStartMonth < 1 || fyStartMonth > 12 {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid fy_start_month %d: must be 1-12", fyStartMonth)
+	}
 	m := fyQuarterPattern.FindStringSubmatch(s)
 	if m == nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid period %q: want FY<year>-Q<1-4>", s)
