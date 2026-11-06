@@ -33,8 +33,14 @@ type Claims struct {
 	Aud string
 	// Iss overrides the issuer; empty uses the server's own URL.
 	Iss string
-	// ExpiresIn defaults to 5 minutes when zero.
+	// ExpiresIn defaults to 5 minutes when zero; negative issues an
+	// already-expired token.
 	ExpiresIn time.Duration
+	// EmailVerifiedRaw, if non-nil, replaces the email_verified claim's
+	// value outright (e.g. the string "true" instead of the JSON boolean
+	// true), overriding EmailVerified - for testing that a non-boolean
+	// claim is rejected rather than coerced.
+	EmailVerifiedRaw any
 }
 
 // Server is a fake OIDC provider.
@@ -139,13 +145,18 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		expiresIn = 5 * time.Minute
 	}
 
+	emailVerified := any(c.EmailVerified)
+	if c.EmailVerifiedRaw != nil {
+		emailVerified = c.EmailVerifiedRaw
+	}
+
 	now := time.Now()
 	claims := map[string]any{
 		"iss":            iss,
 		"aud":            aud,
 		"sub":            c.Sub,
 		"email":          c.Email,
-		"email_verified": c.EmailVerified,
+		"email_verified": emailVerified,
 		"iat":            now.Unix(),
 		"exp":            now.Add(expiresIn).Unix(),
 	}

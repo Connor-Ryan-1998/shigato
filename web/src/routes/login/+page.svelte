@@ -35,10 +35,19 @@
 	// Only a same-site, absolute path is a safe redirect target: a bare
 	// "//evil.com" is parsed by browsers as a protocol-relative URL (an
 	// open redirect), and anything not starting with "/" could be an
-	// absolute URL to another origin entirely.
+	// absolute URL to another origin entirely. A backslash is rejected too
+	// (Ruling 57, matching the backend's safeOIDCNext in internal/auth/oidc.go):
+	// some browsers normalize an interior backslash to "/" before resolving
+	// a URL, so "/\evil.com" or a tab/newline-smuggled "/\t/evil.com" can
+	// otherwise reach a different origin once followed. Control characters
+	// are rejected for the same reason.
 	function safeNext(raw: string | null): string | null {
 		if (!raw || raw === '/login') return null;
 		if (!raw.startsWith('/') || raw.startsWith('//')) return null;
+		for (let i = 0; i < raw.length; i++) {
+			const code = raw.charCodeAt(i);
+			if (raw[i] === '\\' || code < 0x20 || code === 0x7f) return null;
+		}
 		return raw;
 	}
 

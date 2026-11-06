@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"log/slog"
@@ -13,19 +14,38 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/oauth2"
 
 	"shigoto/internal/core"
 )
 
-// oidcStateTTL is how long an OIDC login's state/nonce/PKCE row is valid for
-// (global-constraints.md "Tokens": OIDC state 10 minutes).
+// oidcStateTTL is how long an OIDC login's state/nonce/PKCE row (and the
+// browser-side state cookie that binds a callback to the browser that
+// started it) is valid for (global-constraints.md "Tokens": OIDC state 10
+// minutes).
 const oidcStateTTL = 10 * time.Minute
 
 // oidcDiscoveryTimeout bounds how long provider discovery (fetching
 // /.well-known/openid-configuration) may take, so a slow or unreachable IdP
 // fails an OIDC attempt rather than hanging the request indefinitely.
 const oidcDiscoveryTimeout = 10 * time.Second
+
+// oidcRequestTimeout bounds the token exchange and ID token verification
+// (which fetches JWKS), for the same reason as oidcDiscoveryTimeout.
+const oidcRequestTimeout = 10 * time.Second
+
+// oidcStateCookieName is a short-lived, HttpOnly cookie set on the browser
+// at /api/v1/auth/oidc/start and checked (then always cleared) at
+// /api/v1/auth/oidc/callback. It binds a callback to the browser that
+// actually started this particular attempt: the "state" query parameter
+// alone only proves the callback carries a value this server once issued,
+// not that it's being redeemed by the same browser it was issued to - a
+// CSRF login attack forges a callback request (from the attacker's own,
+// completed OIDC flow) onto the victim's browser, using the victim's
+// session. Requiring the state to also match a cookie only that browser
+// holds closes that.
+const oidcStateCookieName = "shigoto_oidc_state"
 
 // OIDC error codes. The frontend (web/src/routes/login/+page.svelte) maps
 // each to a fixed message; the backend never sends IdP-originated text to
@@ -103,16 +123,24 @@ func (a *Auth) OIDCEnabled() bool {
 	return a != nil && a.oidc != nil
 }
 
-// safeOIDCNext validates the next redirect target the same way the login
-// page's own safeNext does: an absolute path that isn't protocol-relative
-// ("//" or "/\", either of which a browser would treat as a different
-// origin). Anything else falls back to "/".
+// safeOIDCNext validates the next redirect target: an absolute path that
+// isn't protocol-relative ("//", which a browser treats as a different
+// origin) and carries no backslash or control character. A backslash is
+// rejected outright (not just a leading "/\\") because some browsers
+// normalize an interior backslash to "/" before resolving the URL, so
+// "/\t/evil.com" - "next=/%09/evil.com", a tab - is stripped down to
+// "//evil.com" (protocol-relative) by the time it's followed; filtering
+// control characters (including the tab itself) closes that and similar
+// smuggling via \n, \r or other C0 bytes. Anything that fails falls back to
+// "/".
 func safeOIDCNext(raw string) string {
-	if raw == "" || !strings.HasPrefix(raw, "/") {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
 		return "/"
 	}
-	if strings.HasPrefix(raw, "//") || strings.HasPrefix(raw, "/\\") {
-		return "/"
+	for _, r := range raw {
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return "/"
+		}
 	}
 	return raw
 }
@@ -145,6 +173,44 @@ func redirectLoginError(w http.ResponseWriter, r *http.Request, code string) {
 	http.Redirect(w, r, "/login?error="+code, http.StatusFound)
 }
 
+// setOIDCStateCookie sets the state-binding cookie at the start of an
+// attempt; its lifetime matches the oidc_states row it binds to.
+func setOIDCStateCookie(w http.ResponseWriter, secure bool, state string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcStateCookieName,
+		Value:    state,
+		Path:     "/api/v1/auth/oidc",
+		MaxAge:   int(oidcStateTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearOIDCStateCookie removes the state-binding cookie. The callback
+// clears it unconditionally, on every return path, whether the attempt
+// succeeded or failed: it's single-use either way.
+func clearOIDCStateCookie(w http.ResponseWriter, secure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcStateCookieName,
+		Value:    "",
+		Path:     "/api/v1/auth/oidc",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// failOIDCCallback clears the state cookie and redirects to /login?error=code.
+// Every error return from OIDCCallbackHandler goes through this (rather than
+// the bare redirectLoginError Start uses), since by the time the callback
+// runs there's always a cookie from Start that needs clearing either way.
+func (a *Auth) failOIDCCallback(w http.ResponseWriter, r *http.Request, code string) {
+	clearOIDCStateCookie(w, a.secureCookies)
+	redirectLoginError(w, r, code)
+}
+
 // OIDCStartHandler handles GET /api/v1/auth/oidc/start?next=/path. It
 // generates the state, nonce and PKCE verifier, stores the hashed state,
 // and redirects to the IdP.
@@ -156,7 +222,10 @@ func (a *Auth) OIDCStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	oauthCfg, _, err := a.oidc.ready(r.Context())
 	if err != nil {
-		slog.Error("OIDC discovery failed", "error", err)
+		// Ruling 56: log only a fixed message and the configured issuer, not
+		// the go-oidc error text (which can embed the IdP's own response
+		// body).
+		slog.Error("OIDC discovery failed", "code", oidcErrUnavailable, "issuer", a.oidc.cfg.Issuer)
 		redirectLoginError(w, r, oidcErrUnavailable)
 		return
 	}
@@ -187,6 +256,7 @@ func (a *Auth) OIDCStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setOIDCStateCookie(w, a.secureCookies, state)
 	url := oauthCfg.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce))
 	http.Redirect(w, r, url, http.StatusFound)
 }
@@ -234,7 +304,7 @@ func (a *Auth) OIDCCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Query().Get("error") != "" {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 
@@ -242,46 +312,64 @@ func (a *Auth) OIDCCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 	if state == "" || code == "" {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
+		return
+	}
+
+	// CSRF: the state query parameter alone only proves this server issued
+	// it at some point, not that this callback is being redeemed by the
+	// browser it was issued to. Require the state-binding cookie Start set
+	// to match, in constant time, *before* even attempting to consume the
+	// state row - a missing or wrong cookie must leave the row alone so a
+	// legitimate retry (if the real browser still has it) can still
+	// succeed.
+	cookie, err := r.Cookie(oidcStateCookieName)
+	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 {
+		a.failOIDCCallback(w, r, oidcErrExpired)
 		return
 	}
 
 	consumed, err := consumeOIDCState(ctx, a.pool, state)
 	if errors.Is(err, pgx.ErrNoRows) {
-		redirectLoginError(w, r, oidcErrExpired)
+		a.failOIDCCallback(w, r, oidcErrExpired)
 		return
 	}
 	if err != nil {
 		slog.Error("consuming OIDC state failed", "error", err)
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 
 	oauthCfg, verifier, err := a.oidc.ready(ctx)
 	if err != nil {
-		slog.Error("OIDC discovery failed", "error", err)
-		redirectLoginError(w, r, oidcErrUnavailable)
+		// Ruling 56: log only a fixed message and the configured issuer,
+		// not the go-oidc error text.
+		slog.Error("OIDC discovery failed", "code", oidcErrUnavailable, "issuer", a.oidc.cfg.Issuer)
+		a.failOIDCCallback(w, r, oidcErrUnavailable)
 		return
 	}
 
-	token, err := oauthCfg.Exchange(ctx, code, oauth2.VerifierOption(consumed.verifier))
+	reqCtx, cancel := context.WithTimeout(ctx, oidcRequestTimeout)
+	defer cancel()
+
+	token, err := oauthCfg.Exchange(reqCtx, code, oauth2.VerifierOption(consumed.verifier))
 	if err != nil {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
-	idToken, err := verifier.Verify(ctx, rawIDToken)
+	idToken, err := verifier.Verify(reqCtx, rawIDToken)
 	if err != nil {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 	if idToken.Nonce != consumed.nonce {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 
@@ -289,38 +377,42 @@ func (a *Auth) OIDCCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Email         string `json:"email"`
 		EmailVerified bool   `json:"email_verified"`
 	}
+	// idToken.Claims unmarshals email_verified strictly into a bool: an IdP
+	// sending it as the string "true" fails this decode (fails closed as
+	// oidcErrFailed) rather than being coerced into a pass.
 	if err := idToken.Claims(&claims); err != nil {
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 	if !claims.EmailVerified {
-		redirectLoginError(w, r, oidcErrUnverified)
+		a.failOIDCCallback(w, r, oidcErrUnverified)
 		return
 	}
 
 	userID, err := a.resolveOIDCUser(ctx, idToken.Subject, claims.Email)
 	switch {
 	case errors.Is(err, errOIDCNotInvited):
-		redirectLoginError(w, r, oidcErrNotInvited)
+		a.failOIDCCallback(w, r, oidcErrNotInvited)
 		return
 	case errors.Is(err, errOIDCNotStaff):
-		redirectLoginError(w, r, oidcErrNotStaff)
+		a.failOIDCCallback(w, r, oidcErrNotStaff)
 		return
 	case errors.Is(err, errOIDCConflict):
-		redirectLoginError(w, r, oidcErrConflict)
+		a.failOIDCCallback(w, r, oidcErrConflict)
 		return
 	case err != nil:
 		slog.Error("resolving OIDC user failed", "error", err)
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 
 	if err := a.StartSession(ctx, a.pool, w, userID); err != nil {
 		slog.Error("starting OIDC session failed", "error", err)
-		redirectLoginError(w, r, oidcErrFailed)
+		a.failOIDCCallback(w, r, oidcErrFailed)
 		return
 	}
 
+	clearOIDCStateCookie(w, a.secureCookies)
 	http.Redirect(w, r, consumed.next, http.StatusFound)
 }
 
@@ -401,11 +493,29 @@ func (a *Auth) resolveOIDCUser(ctx context.Context, sub, email string) (int64, e
 	}
 
 	if needsLink {
-		if _, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			"UPDATE users SET oidc_subject = $1, password_hash = NULL WHERE id = $2 AND oidc_subject IS NULL",
 			sub, userID,
-		); err != nil {
+		)
+		if err != nil {
+			// A unique-violation here means a concurrent request linked this
+			// same subject to a different user between our SELECT above and
+			// this UPDATE: treat it the same as the conflict that SELECT
+			// would have found had it run a moment later. No audit, no
+			// session - nothing to undo.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return 0, errOIDCConflict
+			}
 			return 0, err
+		}
+		// 0 rows means another concurrent request already set this user's
+		// oidc_subject (to some other value) between our SELECT and this
+		// UPDATE's WHERE oidc_subject IS NULL - the same race, caught by
+		// the guard instead of the unique index. Either way: no audit, no
+		// session.
+		if tag.RowsAffected() != 1 {
+			return 0, errOIDCConflict
 		}
 		if err := core.Audit(ctx, tx, staffOrgID, &userID, "user", userID, "oidc_link",
 			map[string]any{"email": email, "password_cleared": true},

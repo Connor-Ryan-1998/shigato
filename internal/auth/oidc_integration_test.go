@@ -37,8 +37,10 @@ func newOIDCTestAuth(pool *pgxpool.Pool, idp *oidctest.Server) (*Auth, http.Hand
 }
 
 // startOIDC drives GET /api/v1/auth/oidc/start?next=next and returns the
-// state and nonce the IdP redirect carries, plus the Location URL itself.
-func startOIDC(t *testing.T, mux http.Handler, next string) (loc *url.URL) {
+// redirect's Location URL (state and nonce are query parameters on it) and
+// the value of the state-binding cookie Start set, which callbackOIDC needs
+// to carry for a callback to pass the CSRF cookie check.
+func startOIDC(t *testing.T, mux http.Handler, next string) (loc *url.URL, stateCookie string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oidc/start?next="+url.QueryEscape(next), nil)
 	rr := httptest.NewRecorder()
@@ -50,29 +52,45 @@ func startOIDC(t *testing.T, mux http.Handler, next string) (loc *url.URL) {
 	if err != nil {
 		t.Fatalf("parsing Location: %v", err)
 	}
-	return loc
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == oidcStateCookieName {
+			stateCookie = c.Value
+		}
+	}
+	if stateCookie == "" {
+		t.Fatalf("expected start to set the %s cookie", oidcStateCookieName)
+	}
+	return loc, stateCookie
 }
 
-// callbackOIDC drives GET /api/v1/auth/oidc/callback with the given state
-// and a fixed fake code, and returns the resulting redirect's Location
-// header and any Set-Cookie session token.
-func callbackOIDC(mux http.Handler, state string) (loc *url.URL, sessionCookie string, err error) {
+// callbackOIDC drives GET /api/v1/auth/oidc/callback with the given state, a
+// fixed fake code, and (unless empty) the state-binding cookie, and returns
+// the resulting redirect's Location header, any Set-Cookie session token,
+// and whether the response cleared the state-binding cookie (which the
+// callback must do on every return path).
+func callbackOIDC(mux http.Handler, state, cookieValue string) (loc *url.URL, sessionCookie string, stateCookieCleared bool, err error) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oidc/callback?code=fake-code&state="+url.QueryEscape(state), nil)
+	if cookieValue != "" {
+		req.AddCookie(&http.Cookie{Name: oidcStateCookieName, Value: cookieValue})
+	}
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusFound {
-		return nil, "", errStatus(rr.Code, rr.Body.String())
+		return nil, "", false, errStatus(rr.Code, rr.Body.String())
 	}
 	loc, err = url.Parse(rr.Result().Header.Get("Location"))
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	for _, c := range rr.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		switch c.Name {
+		case sessionCookieName:
 			sessionCookie = c.Value
+		case oidcStateCookieName:
+			stateCookieCleared = c.Value == "" && c.MaxAge < 0
 		}
 	}
-	return loc, sessionCookie, nil
+	return loc, sessionCookie, stateCookieCleared, nil
 }
 
 type statusErr struct {
@@ -95,11 +113,19 @@ func TestOIDCHappyPathLinksAndSignsIn(t *testing.T) {
 
 	_, mux := newOIDCTestAuth(pool, idp)
 
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	state := loc.Query().Get("state")
 	nonce := loc.Query().Get("nonce")
 	if state == "" || nonce == "" {
 		t.Fatalf("expected state and nonce in redirect, got %s", loc)
+	}
+
+	// PKCE: the verifier the fake IdP actually receives at /token must
+	// match the one Start stored alongside this state.
+	var storedVerifier string
+	if err := pool.QueryRow(ctx, "SELECT code_verifier FROM oidc_states WHERE state_hash = $1", stateHash(state)).
+		Scan(&storedVerifier); err != nil {
+		t.Fatalf("querying stored code_verifier: %v", err)
 	}
 
 	idp.SetClaims(oidctest.Claims{
@@ -109,7 +135,7 @@ func TestOIDCHappyPathLinksAndSignsIn(t *testing.T) {
 		Nonce:         nonce,
 	})
 
-	callbackLoc, sessionCookie, err := callbackOIDC(mux, state)
+	callbackLoc, sessionCookie, stateCookieCleared, err := callbackOIDC(mux, state, stateCookie)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -119,8 +145,11 @@ func TestOIDCHappyPathLinksAndSignsIn(t *testing.T) {
 	if sessionCookie == "" {
 		t.Fatalf("expected a session cookie to be set")
 	}
-	if idp.LastCodeVerifier() == "" {
-		t.Fatalf("expected PKCE code_verifier to be sent to the token endpoint")
+	if !stateCookieCleared {
+		t.Fatalf("expected the OIDC state cookie to be cleared on callback")
+	}
+	if idp.LastCodeVerifier() == "" || idp.LastCodeVerifier() != storedVerifier {
+		t.Fatalf("code_verifier sent = %q, want the stored verifier %q", idp.LastCodeVerifier(), storedVerifier)
 	}
 
 	var subject *string
@@ -168,13 +197,13 @@ func TestOIDCAlreadyLinkedUserUntouched(t *testing.T) {
 	}
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	idp.SetClaims(oidctest.Claims{
 		Sub: "idp-subject-2", Email: "staffer@example.com", EmailVerified: true,
 		Nonce: loc.Query().Get("nonce"),
 	})
 
-	if _, _, err := callbackOIDC(mux, loc.Query().Get("state")); err != nil {
+	if _, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie); err != nil {
 		t.Fatalf("callback: %v", err)
 	}
 
@@ -193,15 +222,18 @@ func TestOIDCReplayedStateRejected(t *testing.T) {
 	addMembership(t, pool, userID, org.ID, Staff)
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	state := loc.Query().Get("state")
 	idp.SetClaims(oidctest.Claims{Sub: "sub-x", Email: "staffer@example.com", EmailVerified: true, Nonce: loc.Query().Get("nonce")})
 
-	if _, _, err := callbackOIDC(mux, state); err != nil {
+	if _, _, _, err := callbackOIDC(mux, state, stateCookie); err != nil {
 		t.Fatalf("first callback: %v", err)
 	}
 
-	replayLoc, _, err := callbackOIDC(mux, state)
+	// The real browser still has its state cookie (Start only set it once);
+	// a second callback with the same state and cookie is a replay of an
+	// already-consumed row, not a CSRF mismatch.
+	replayLoc, _, _, err := callbackOIDC(mux, state, stateCookie)
 	if err != nil {
 		t.Fatalf("replayed callback: %v", err)
 	}
@@ -218,11 +250,75 @@ func TestOIDCForeignStateRejected(t *testing.T) {
 	buf := make([]byte, 32)
 	foreignState := base64.RawURLEncoding.EncodeToString(buf)
 
-	loc, _, err := callbackOIDC(mux, foreignState)
+	// The cookie must match the state query parameter for the callback to
+	// get past the CSRF check at all and exercise the "unknown state"
+	// rejection specifically, rather than the cookie-mismatch one.
+	loc, _, _, err := callbackOIDC(mux, foreignState, foreignState)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
 	assertLoginError(t, loc, "sso_expired")
+}
+
+func TestOIDCCallbackMissingCookieRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+	ctx := context.Background()
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, _ := startOIDC(t, mux, "/acme")
+	state := loc.Query().Get("state")
+	idp.SetClaims(oidctest.Claims{Sub: "sub-nocookie", Email: "staffer@example.com", EmailVerified: true, Nonce: loc.Query().Get("nonce")})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, state, "")
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "sso_expired")
+
+	// The state row must be untouched: a missing cookie fails the CSRF
+	// check before the row is ever consumed, so the real browser (which
+	// does still have its cookie) can retry.
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx, "SELECT used_at FROM oidc_states WHERE state_hash = $1", stateHash(state)).Scan(&usedAt); err != nil {
+		t.Fatalf("querying oidc_states: %v", err)
+	}
+	if usedAt != nil {
+		t.Fatalf("used_at = %v, want nil (state must not be consumed without the cookie)", *usedAt)
+	}
+}
+
+func TestOIDCCallbackWrongCookieRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+	ctx := context.Background()
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, _ := startOIDC(t, mux, "/acme")
+	state := loc.Query().Get("state")
+	idp.SetClaims(oidctest.Claims{Sub: "sub-wrongcookie", Email: "staffer@example.com", EmailVerified: true, Nonce: loc.Query().Get("nonce")})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, state, "not-the-right-cookie-value")
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "sso_expired")
+
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx, "SELECT used_at FROM oidc_states WHERE state_hash = $1", stateHash(state)).Scan(&usedAt); err != nil {
+		t.Fatalf("querying oidc_states: %v", err)
+	}
+	if usedAt != nil {
+		t.Fatalf("used_at = %v, want nil (state must not be consumed with a mismatched cookie)", *usedAt)
+	}
 }
 
 func TestOIDCNonceMismatchRejected(t *testing.T) {
@@ -234,13 +330,13 @@ func TestOIDCNonceMismatchRejected(t *testing.T) {
 	addMembership(t, pool, userID, org.ID, Staff)
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	idp.SetClaims(oidctest.Claims{
 		Sub: "sub-y", Email: "staffer@example.com", EmailVerified: true,
 		Nonce: "wrong-nonce-" + loc.Query().Get("nonce"),
 	})
 
-	callbackLoc, _, err := callbackOIDC(mux, loc.Query().Get("state"))
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -256,17 +352,111 @@ func TestOIDCEmailUnverifiedRejected(t *testing.T) {
 	addMembership(t, pool, userID, org.ID, Staff)
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	idp.SetClaims(oidctest.Claims{
 		Sub: "sub-z", Email: "staffer@example.com", EmailVerified: false,
 		Nonce: loc.Query().Get("nonce"),
 	})
 
-	callbackLoc, _, err := callbackOIDC(mux, loc.Query().Get("state"))
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
 	assertLoginError(t, callbackLoc, "email_unverified")
+}
+
+func TestOIDCEmailVerifiedAsStringRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, stateCookie := startOIDC(t, mux, "/acme")
+	idp.SetClaims(oidctest.Claims{
+		Sub: "sub-string-verified", Email: "staffer@example.com",
+		Nonce: loc.Query().Get("nonce"),
+		// A non-boolean email_verified must fail closed, not be coerced
+		// into true.
+		EmailVerifiedRaw: "true",
+	})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "sso_failed")
+}
+
+func TestOIDCWrongIssuerRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, stateCookie := startOIDC(t, mux, "/acme")
+	idp.SetClaims(oidctest.Claims{
+		Sub: "sub-wrong-iss", Email: "staffer@example.com", EmailVerified: true,
+		Nonce: loc.Query().Get("nonce"),
+		Iss:   "https://not-the-configured-issuer.example",
+	})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "sso_failed")
+}
+
+func TestOIDCWrongAudienceRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, stateCookie := startOIDC(t, mux, "/acme")
+	idp.SetClaims(oidctest.Claims{
+		Sub: "sub-wrong-aud", Email: "staffer@example.com", EmailVerified: true,
+		Nonce: loc.Query().Get("nonce"),
+		Aud:   "someone-elses-client-id",
+	})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "sso_failed")
+}
+
+func TestOIDCExpiredIDTokenRejected(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, stateCookie := startOIDC(t, mux, "/acme")
+	idp.SetClaims(oidctest.Claims{
+		Sub: "sub-expired", Email: "staffer@example.com", EmailVerified: true,
+		Nonce:     loc.Query().Get("nonce"),
+		ExpiresIn: -time.Minute,
+	})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "sso_failed")
 }
 
 func TestOIDCUnknownEmailNotInvited(t *testing.T) {
@@ -274,13 +464,42 @@ func TestOIDCUnknownEmailNotInvited(t *testing.T) {
 	idp := oidctest.New(t)
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	idp.SetClaims(oidctest.Claims{
 		Sub: "sub-unknown", Email: "nobody@example.com", EmailVerified: true,
 		Nonce: loc.Query().Get("nonce"),
 	})
 
-	callbackLoc, _, err := callbackOIDC(mux, loc.Query().Get("state"))
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	assertLoginError(t, callbackLoc, "not_invited")
+}
+
+func TestOIDCOutstandingInviteOnlyEmailNotInvited(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+	ctx := context.Background()
+
+	org := createTestOrg(t, pool, "acme")
+	// An outstanding invite, but no account yet: OIDC never auto-accepts
+	// an invite on the invitee's behalf, however it got there. They must
+	// accept the invite (creating a password account) first, then SSO
+	// links to it on a later sign-in.
+	ownerID := createTestUser(t, pool, "owner@example.com", "owner-password")
+	if _, _, err := CreateInvite(ctx, pool, org.ID, "invitee@example.com", "staff", ownerID); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, stateCookie := startOIDC(t, mux, "/acme")
+	idp.SetClaims(oidctest.Claims{
+		Sub: "sub-invitee", Email: "invitee@example.com", EmailVerified: true,
+		Nonce: loc.Query().Get("nonce"),
+	})
+
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -303,13 +522,13 @@ func TestOIDCTenantOnlyUserNotStaff(t *testing.T) {
 	}
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	idp.SetClaims(oidctest.Claims{
 		Sub: "sub-tenant", Email: "tenant@example.com", EmailVerified: true,
 		Nonce: loc.Query().Get("nonce"),
 	})
 
-	callbackLoc, _, err := callbackOIDC(mux, loc.Query().Get("state"))
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -346,13 +565,13 @@ func TestOIDCSubjectConflictRejected(t *testing.T) {
 	}
 
 	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "/acme")
+	loc, stateCookie := startOIDC(t, mux, "/acme")
 	idp.SetClaims(oidctest.Claims{
 		Sub: "a-new-subject-claiming-userb-email", Email: "b@example.com", EmailVerified: true,
 		Nonce: loc.Query().Get("nonce"),
 	})
 
-	callbackLoc, _, err := callbackOIDC(mux, loc.Query().Get("state"))
+	callbackLoc, _, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -360,21 +579,38 @@ func TestOIDCSubjectConflictRejected(t *testing.T) {
 }
 
 func TestOIDCStartNextOpenRedirectFallsBackToRoot(t *testing.T) {
-	pool := db.TestPool(t)
-	idp := oidctest.New(t)
-
-	_, mux := newOIDCTestAuth(pool, idp)
-	loc := startOIDC(t, mux, "//evil.com")
-	state := loc.Query().Get("state")
-
-	var next string
-	if err := pool.QueryRow(context.Background(),
-		"SELECT next FROM oidc_states WHERE state_hash = $1", stateHash(state),
-	).Scan(&next); err != nil {
-		t.Fatalf("querying oidc_states: %v", err)
+	cases := []struct {
+		name string
+		next string
+	}{
+		{"protocol-relative", "//evil.com"},
+		{"backslash-escape", "/\\evil.com"},
+		// A tab: some browsers strip control characters before resolving a
+		// URL, so "/\t/evil.com" would otherwise normalize to the
+		// protocol-relative "//evil.com" once followed.
+		{"tab-smuggled-protocol-relative", "/\t/evil.com"},
+		{"newline-smuggled", "/\n/evil.com"},
+		{"absolute-url", "https://evil.com"},
 	}
-	if next != "/" {
-		t.Fatalf("next = %q, want \"/\"", next)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := db.TestPool(t)
+			idp := oidctest.New(t)
+
+			_, mux := newOIDCTestAuth(pool, idp)
+			loc, _ := startOIDC(t, mux, tc.next)
+			state := loc.Query().Get("state")
+
+			var next string
+			if err := pool.QueryRow(context.Background(),
+				"SELECT next FROM oidc_states WHERE state_hash = $1", stateHash(state),
+			).Scan(&next); err != nil {
+				t.Fatalf("querying oidc_states: %v", err)
+			}
+			if next != "/" {
+				t.Fatalf("next = %q, want \"/\"", next)
+			}
+		})
 	}
 }
 

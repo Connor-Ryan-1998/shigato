@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
 
 const page = { url: new URL('http://localhost/login') };
 vi.mock('$app/state', () => ({
@@ -7,7 +7,8 @@ vi.mock('$app/state', () => ({
 		return page;
 	}
 }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+const { goto } = vi.hoisted(() => ({ goto: vi.fn() }));
+vi.mock('$app/navigation', () => ({ goto }));
 
 import Login from './+page.svelte';
 import { session } from '../../lib/session.svelte';
@@ -23,6 +24,7 @@ describe('login page', () => {
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		goto.mockClear();
 	});
 
 	it('shows no SSO button and no error banner by default', async () => {
@@ -56,6 +58,39 @@ describe('login page', () => {
 		expect(
 			await screen.findByText('No shigoto account for this email — ask an owner to invite you.')
 		).toBeTruthy();
+	});
+
+	it('rejects a backslash-smuggled next on successful password login (Ruling 57)', async () => {
+		page.url = new URL('http://localhost/login?next=' + encodeURIComponent('/\\evil.com'));
+		vi.stubGlobal(
+			'fetch',
+			vi.fn((input: RequestInfo | URL) => {
+				const url = String(input);
+				if (url.includes('/auth/login')) return Promise.resolve(new Response(null, { status: 204 }));
+				if (url.includes('/api/v1/me')) {
+					return Promise.resolve(
+						jsonResponse(200, {
+							user: { id: 1, email: 'staffer@example.com', name: 'Staffer' },
+							orgs: [{ slug: 'acme', name: 'Acme', role: 'owner', perms: [] }]
+						})
+					);
+				}
+				return Promise.resolve(jsonResponse(200, { modules: [], sso: false }));
+			})
+		);
+
+		render(Login);
+
+		await fireEvent.input(screen.getByLabelText('Email'), {
+			target: { value: 'staffer@example.com' }
+		});
+		await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+		await vi.waitFor(() => expect(goto).toHaveBeenCalled());
+		// The malicious next must never be followed; it falls back to the
+		// user's first org instead.
+		expect(goto).toHaveBeenCalledWith('/acme');
 	});
 
 	it('ignores an unknown error code', async () => {
