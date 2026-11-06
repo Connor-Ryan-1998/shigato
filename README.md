@@ -105,6 +105,7 @@ The server is configured by environment variables, all prefixed `SHIGOTO_`:
 | `SHIGOTO_SMTP_PASSWORD` | no | | SMTP auth password. |
 | `SHIGOTO_SMTP_FROM` | yes, if `SHIGOTO_SMTP_HOST` is set | | `From` address for outgoing mail. |
 | `SHIGOTO_SMTP_TLS` | no | `starttls` | `starttls`, `tls` (implicit TLS, e.g. port 465) or `none`. `none` is only accepted for host `localhost`, `127.0.0.1`, `::1` or `mailpit`. |
+| `SHIGOTO_TRUSTED_PROXY` | no | | CIDR of a reverse proxy to trust. When set and a request's `RemoteAddr` is inside it, the right-most `X-Forwarded-For` entry that isn't itself inside the CIDR is used as the client IP for login rate limiting. |
 
 `<ORGSLUG>` is the org slug upper-cased with `-` replaced by `_`. Point each
 org's Stripe webhook at `https://<SHIGOTO_BASE_URL>/webhooks/stripe/<org-slug>`

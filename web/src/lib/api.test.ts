@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError, resetOnUnauthorized, setOnUnauthorized } from './api';
+import { api, ApiError, registerReloginPrompt, resetOnUnauthorized, setOnUnauthorized } from './api';
 
 function jsonResponse(status: number, body: unknown, statusText = ''): Response {
 	return new Response(JSON.stringify(body), {
@@ -12,7 +12,7 @@ function jsonResponse(status: number, body: unknown, statusText = ''): Response 
 describe('api', () => {
 	beforeEach(() => {
 		vi.stubGlobal('fetch', vi.fn());
-		setOnUnauthorized(() => {});
+		setOnUnauthorized(async () => false);
 	});
 
 	afterEach(() => {
@@ -47,13 +47,37 @@ describe('api', () => {
 		);
 	});
 
-	it('calls onUnauthorized on a 401 response', async () => {
+	it('calls onUnauthorized on a 401 response and throws when it resolves false', async () => {
 		vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
-		const onUnauthorized = vi.fn();
+		const onUnauthorized = vi.fn(async () => false);
 		setOnUnauthorized(onUnauthorized);
 
 		await expect(api('GET', '/api/v1/thing')).rejects.toThrow(ApiError);
 
+		expect(onUnauthorized).toHaveBeenCalledOnce();
+	});
+
+	it('retries the request once when onUnauthorized resolves true', async () => {
+		vi.mocked(fetch)
+			.mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' }))
+			.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+		setOnUnauthorized(async () => true);
+
+		await expect(api('GET', '/api/v1/thing')).resolves.toEqual({ ok: true });
+
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('does not retry forever if the retried request 401s again', async () => {
+		vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
+		const onUnauthorized = vi.fn(async () => true);
+		setOnUnauthorized(onUnauthorized);
+
+		await expect(api('GET', '/api/v1/thing')).rejects.toThrow(ApiError);
+
+		// Once for the original request, once for the single retry - not
+		// called again for the retry's own 401.
+		expect(fetch).toHaveBeenCalledTimes(2);
 		expect(onUnauthorized).toHaveBeenCalledOnce();
 	});
 
@@ -67,7 +91,8 @@ describe('api', () => {
 		const realLocation = window.location;
 
 		afterEach(() => {
-			setOnUnauthorized(() => {});
+			setOnUnauthorized(async () => false);
+			registerReloginPrompt(null);
 			Object.defineProperty(window, 'location', { value: realLocation, writable: true });
 		});
 
@@ -92,7 +117,7 @@ describe('api', () => {
 			expect(assign).not.toHaveBeenCalled();
 		});
 
-		it('navigates to /login with next when elsewhere', async () => {
+		it('navigates to /login with next when no relogin prompt is registered', async () => {
 			resetOnUnauthorized();
 			const assign = stubLocation('/acme/invoices');
 			vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
@@ -100,6 +125,60 @@ describe('api', () => {
 			await expect(api('GET', '/api/v1/thing')).rejects.toThrow(ApiError);
 
 			expect(assign).toHaveBeenCalledWith('/login?next=%2Facme%2Finvoices');
+		});
+
+		it('opens the registered relogin prompt and retries on success', async () => {
+			resetOnUnauthorized();
+			const assign = stubLocation('/acme/invoices');
+			vi.mocked(fetch)
+				.mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' }))
+				.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+			registerReloginPrompt(async () => true);
+
+			await expect(api('GET', '/api/v1/thing')).resolves.toEqual({ ok: true });
+
+			expect(assign).not.toHaveBeenCalled();
+		});
+
+		it('falls back to the redirect when the relogin prompt is cancelled', async () => {
+			resetOnUnauthorized();
+			const assign = stubLocation('/acme/invoices');
+			vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
+			registerReloginPrompt(async () => false);
+
+			await expect(api('GET', '/api/v1/thing')).rejects.toThrow(ApiError);
+
+			expect(assign).toHaveBeenCalledWith('/login?next=%2Facme%2Finvoices');
+		});
+
+		it('shares one relogin prompt across two concurrent 401s, then retries both', async () => {
+			resetOnUnauthorized();
+			stubLocation('/acme/invoices');
+			// Both calls' first attempt 401s; both retries (after the shared
+			// prompt resolves) succeed.
+			vi.mocked(fetch)
+				.mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' }))
+				.mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' }))
+				.mockResolvedValueOnce(jsonResponse(200, { ok: true }))
+				.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+
+			let resolvePrompt: (ok: boolean) => void = () => {};
+			const prompt = vi.fn(
+				() => new Promise<boolean>((resolve) => (resolvePrompt = resolve))
+			);
+			registerReloginPrompt(prompt);
+
+			const first = api('GET', '/api/v1/a');
+			const second = api('GET', '/api/v1/b');
+
+			// Both api() calls' fetch + 401 handling run (microtasks) before
+			// either sees a resolved prompt.
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+			resolvePrompt(true);
+
+			await expect(first).resolves.toEqual({ ok: true });
+			await expect(second).resolves.toEqual({ ok: true });
+			expect(prompt).toHaveBeenCalledOnce();
 		});
 	});
 });

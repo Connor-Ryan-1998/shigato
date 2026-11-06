@@ -255,6 +255,47 @@ func TestLoadSMTPNoneAllowedForMailpit(t *testing.T) {
 	}
 }
 
+func TestLoadTrustedProxyUnsetByDefault(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.TrustedProxy != nil {
+		t.Errorf("TrustedProxy = %v, want nil", c.TrustedProxy)
+	}
+}
+
+func TestLoadTrustedProxyParsesCIDR(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL":  "postgres://x",
+		"SHIGOTO_BASE_URL":      "http://localhost:8080",
+		"SHIGOTO_TRUSTED_PROXY": "10.0.0.0/8",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.TrustedProxy == nil || c.TrustedProxy.String() != "10.0.0.0/8" {
+		t.Errorf("TrustedProxy = %v, want 10.0.0.0/8", c.TrustedProxy)
+	}
+}
+
+func TestLoadTrustedProxyRejectsInvalidCIDR(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL":  "postgres://x",
+		"SHIGOTO_BASE_URL":      "http://localhost:8080",
+		"SHIGOTO_TRUSTED_PROXY": "not-a-cidr",
+	}))
+	if err == nil {
+		t.Fatal("expected error for invalid SHIGOTO_TRUSTED_PROXY, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "SHIGOTO_TRUSTED_PROXY") {
+		t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_TRUSTED_PROXY")
+	}
+}
+
 func TestLoadSMTPMissingFromIsError(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"SHIGOTO_DATABASE_URL": "postgres://x",

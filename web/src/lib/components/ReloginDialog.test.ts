@@ -1,0 +1,85 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import ReloginDialog from './ReloginDialog.svelte';
+
+// jsdom doesn't implement <dialog>'s showModal/close - Dialog.svelte calls
+// them directly, so stub them out rather than exercising the real modal
+// behaviour (that's native browser behaviour, not this component's logic).
+beforeEach(() => {
+	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
+		this.setAttribute('open', '');
+	});
+	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
+		this.removeAttribute('open');
+	});
+});
+
+function jsonResponse(status: number, body: unknown): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { 'Content-Type': 'application/json' }
+	});
+}
+
+describe('ReloginDialog', () => {
+	it('pre-fills the email and posts it with the entered password', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, {})));
+		const onSuccess = vi.fn();
+
+		render(ReloginDialog, {
+			props: { open: true, email: 'staffer@example.com', onSuccess, onCancel: vi.fn() }
+		});
+
+		expect((screen.getByLabelText('Email') as HTMLInputElement).value).toBe(
+			'staffer@example.com'
+		);
+
+		await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+		expect(fetch).toHaveBeenCalledWith(
+			'/api/v1/auth/login',
+			expect.objectContaining({
+				method: 'POST',
+				body: JSON.stringify({ email: 'staffer@example.com', password: 'secret' })
+			})
+		);
+		expect(onSuccess).toHaveBeenCalledOnce();
+
+		vi.unstubAllGlobals();
+	});
+
+	it("shows the server's error inside the dialog on a failed attempt", async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(jsonResponse(401, { error: 'invalid credentials' }))
+		);
+
+		render(ReloginDialog, {
+			props: { open: true, email: 'staffer@example.com', onSuccess: vi.fn(), onCancel: vi.fn() }
+		});
+
+		await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'wrong' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+		expect(await screen.findByText('invalid credentials')).toBeTruthy();
+
+		vi.unstubAllGlobals();
+	});
+
+	it('calls onCancel when Cancel is clicked', async () => {
+		vi.stubGlobal('fetch', vi.fn());
+		const onCancel = vi.fn();
+
+		render(ReloginDialog, {
+			props: { open: true, email: 'staffer@example.com', onSuccess: vi.fn(), onCancel }
+		});
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+		expect(onCancel).toHaveBeenCalledOnce();
+		expect(fetch).not.toHaveBeenCalled();
+
+		vi.unstubAllGlobals();
+	});
+});

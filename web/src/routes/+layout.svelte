@@ -3,14 +3,30 @@
 	import '../lib/styles/base.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { api, ApiError } from '../lib/api';
+	import { api, ApiError, registerReloginPrompt } from '../lib/api';
 	import { session, type MeResponse } from '../lib/session.svelte';
 	import { theme } from '../lib/theme.svelte';
 	import Button from '../lib/components/Button.svelte';
+	import ReloginDialog from '../lib/components/ReloginDialog.svelte';
 
 	let { children } = $props();
 	let loading = $state(true);
 	let error = $state('');
+
+	let reloginOpen = $state(false);
+	let resolveRelogin: ((ok: boolean) => void) | null = null;
+
+	function handleReloginSuccess() {
+		reloginOpen = false;
+		resolveRelogin?.(true);
+		resolveRelogin = null;
+	}
+
+	function handleReloginCancel() {
+		reloginOpen = false;
+		resolveRelogin?.(false);
+		resolveRelogin = null;
+	}
 
 	async function loadSession() {
 		error = '';
@@ -42,6 +58,18 @@
 		// mounts the org shell where the toggle lives.
 		theme.apply();
 
+		// api.ts's defaultOnUnauthorized already never calls this on /login
+		// itself, so registering it unconditionally is harmless there; a 401
+		// anywhere else now reopens this dialog in place instead of falling
+		// back to a redirect.
+		registerReloginPrompt(
+			() =>
+				new Promise<boolean>((resolve) => {
+					resolveRelogin = resolve;
+					reloginOpen = true;
+				})
+		);
+
 		// /login has no session to fetch yet; fetching /me there would just
 		// 401 and bounce back to the very page we're already on.
 		if (page.url.pathname === '/login') {
@@ -49,6 +77,8 @@
 			return;
 		}
 		loadSession();
+
+		return () => registerReloginPrompt(null);
 	});
 </script>
 
@@ -62,6 +92,13 @@
 {:else}
 	{@render children()}
 {/if}
+
+<ReloginDialog
+	bind:open={reloginOpen}
+	email={session.me?.user.email ?? ''}
+	onSuccess={handleReloginSuccess}
+	onCancel={handleReloginCancel}
+/>
 
 <style>
 	.session-error {

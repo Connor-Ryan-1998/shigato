@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -50,6 +51,11 @@ type Config struct {
 	// SMTP holds mail delivery configuration. SMTP.Host == "" means email
 	// is disabled.
 	SMTP SMTP
+	// TrustedProxy is the CIDR (SHIGOTO_TRUSTED_PROXY) whose
+	// X-Forwarded-For header is trusted when resolving a request's client
+	// IP for login rate limiting. nil means no proxy is trusted: the
+	// client IP is always RemoteAddr.
+	TrustedProxy *net.IPNet
 }
 
 // Load reads configuration from environment variables via getenv.
@@ -124,6 +130,14 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	c.SMTP = smtp
+
+	if tp := getenv("SHIGOTO_TRUSTED_PROXY"); tp != "" {
+		_, cidr, err := net.ParseCIDR(tp)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid SHIGOTO_TRUSTED_PROXY %q: %w", tp, err)
+		}
+		c.TrustedProxy = cidr
+	}
 
 	return c, nil
 }

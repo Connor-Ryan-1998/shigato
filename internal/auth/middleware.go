@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +18,22 @@ import (
 
 // sessionCookieName is the cookie holding the session token.
 const sessionCookieName = "shigoto_session"
+
+// Login rate limits (global-constraints.md "Rate limits"): at most 5 failed
+// logins per email, and 20 per client IP, in a trailing 15 minutes.
+const (
+	loginEmailLimit = 5
+	loginIPLimit    = 20
+	loginWindow     = 15 * time.Minute
+)
+
+// configuredSecureCookies is whether a session cookie should carry the
+// Secure attribute. New sets it once at process start (there is only ever
+// one *Auth per process), so StartSession - called from flows that don't
+// have an *Auth handy, like invite acceptance, OIDC callbacks and
+// magic-link exchange - can set the cookie identically without needing one
+// threaded through.
+var configuredSecureCookies bool
 
 // writeJSONError writes a JSON error body {"error":"<message>"}. It
 // duplicates module.WriteError rather than importing it: package module
@@ -30,13 +50,39 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 type Auth struct {
 	pool          *pgxpool.Pool
 	secureCookies bool
+	trustedProxy  *net.IPNet
+
+	limiter *Limiter
+}
+
+// Option configures optional Auth behaviour beyond New's required
+// parameters, without changing the signature existing callers already use.
+type Option func(*Auth)
+
+// WithClock overrides the clock Auth's login rate limiter uses. Production
+// code never needs this (New defaults to time.Now); tests inject a fake
+// clock to exercise the sliding window without a real sleep.
+func WithClock(now func() time.Time) Option {
+	return func(a *Auth) { a.limiter = NewLimiter(now) }
+}
+
+// WithTrustedProxy sets the CIDR whose X-Forwarded-For header is trusted
+// when resolving a request's client IP (config.Config.TrustedProxy, from
+// SHIGOTO_TRUSTED_PROXY). Unset, the client IP is always r.RemoteAddr.
+func WithTrustedProxy(trusted *net.IPNet) Option {
+	return func(a *Auth) { a.trustedProxy = trusted }
 }
 
 // New creates an Auth. secureCookies should be true when the app is served
 // over HTTPS (BaseURL starts with "https://"), so the session cookie is
 // marked Secure.
-func New(pool *pgxpool.Pool, secureCookies bool) *Auth {
-	return &Auth{pool: pool, secureCookies: secureCookies}
+func New(pool *pgxpool.Pool, secureCookies bool, opts ...Option) *Auth {
+	a := &Auth{pool: pool, secureCookies: secureCookies, limiter: NewLimiter(time.Now)}
+	for _, opt := range opts {
+		opt(a)
+	}
+	configuredSecureCookies = secureCookies
+	return a
 }
 
 // Principal identifies the authenticated user and their role within the
@@ -69,8 +115,25 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := Login(r.Context(), a.pool, body.Email, body.Password)
+	// Checked before touching the password, so an attacker who's already
+	// over a limit can't use further attempts to keep timing-probing it.
+	emailKey := "email:" + strings.ToLower(body.Email)
+	ipKey := "ip:" + ClientIP(r, a.trustedProxy)
+	if ok, retryAfter := a.limiter.Allow(emailKey, loginEmailLimit, loginWindow); !ok {
+		writeTooManyRequests(w, retryAfter)
+		return
+	}
+	if ok, retryAfter := a.limiter.Allow(ipKey, loginIPLimit, loginWindow); !ok {
+		writeTooManyRequests(w, retryAfter)
+		return
+	}
+
+	userID, err := verifyCredentials(r.Context(), a.pool, body.Email, body.Password)
 	if errors.Is(err, ErrInvalidCredentials) {
+		// Success never resets either count: an attacker who guesses
+		// right on attempt 4 still has only 1 try left in this window.
+		a.limiter.Fail(emailKey, loginWindow)
+		a.limiter.Fail(ipKey, loginWindow)
 		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -80,16 +143,23 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  time.Now().Add(sessionTTL),
-		HttpOnly: true,
-		Secure:   a.secureCookies,
-		SameSite: http.SameSiteLaxMode,
-	})
+	if err := StartSession(r.Context(), a.pool, w, userID); err != nil {
+		slog.Error("starting session failed", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeTooManyRequests writes the shared 429 body and a whole-seconds,
+// rounded-up Retry-After header.
+func writeTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(math.Ceil(retryAfter.Seconds()))
+	if seconds < 0 {
+		seconds = 0
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSONError(w, http.StatusTooManyRequests, "too many attempts, try again later")
 }
 
 // LogoutHandler handles POST /api/v1/auth/logout. It deletes the session

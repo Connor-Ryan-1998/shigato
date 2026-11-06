@@ -5,10 +5,12 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -301,6 +303,85 @@ func TestLoginHandlerSetsSecureCookieOnlyWhenConfigured(t *testing.T) {
 	}
 	if cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Errorf("SameSite = %v, want Lax", cookies[0].SameSite)
+	}
+}
+
+func loginRequest(email, password string) *http.Request {
+	body := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	return httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+}
+
+// TestLoginRateLimitedByEmail checks global-constraints.md's "at most 5
+// failed logins per email per 15 minutes": a 6th attempt (even with the
+// correct password) is 429'd, and the limit lifts once the window has
+// passed.
+func TestLoginRateLimitedByEmail(t *testing.T) {
+	pool := db.TestPool(t)
+	createTestUser(t, pool, "ratelimited@example.com", "correct-password")
+
+	now := time.Now()
+	a := New(pool, false, WithClock(func() time.Time { return now }))
+
+	for i := 0; i < 5; i++ {
+		rr := httptest.NewRecorder()
+		a.LoginHandler(rr, loginRequest("ratelimited@example.com", "wrong-password"))
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want %d", i, rr.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("ratelimited@example.com", "correct-password"))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("missing Retry-After header")
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
+	if body.Error != "too many attempts, try again later" {
+		t.Errorf("error = %q, want %q", body.Error, "too many attempts, try again later")
+	}
+
+	// Past the 15 minute window, the correct password succeeds again.
+	now = now.Add(15*time.Minute + time.Second)
+	rr = httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("ratelimited@example.com", "correct-password"))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status after window elapses = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+}
+
+// TestLoginRateLimitedByIP checks the 20-per-IP-per-15-minutes limit: 20
+// failed attempts against distinct (unknown) emails, all from the same
+// RemoteAddr (httptest.NewRequest's default), get a 21st attempt 429'd
+// regardless of which email it names.
+func TestLoginRateLimitedByIP(t *testing.T) {
+	pool := db.TestPool(t)
+
+	now := time.Now()
+	a := New(pool, false, WithClock(func() time.Time { return now }))
+
+	for i := 0; i < 20; i++ {
+		rr := httptest.NewRecorder()
+		a.LoginHandler(rr, loginRequest(fmt.Sprintf("unknown-%d@example.com", i), "whatever"))
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want %d", i, rr.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	a.LoginHandler(rr, loginRequest("yet-another@example.com", "whatever"))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("missing Retry-After header")
 	}
 }
 

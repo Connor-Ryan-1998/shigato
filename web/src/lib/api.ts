@@ -15,28 +15,74 @@ export class ApiError extends Error {
 
 const unsafeMethods = new Set(['POST', 'PUT', 'DELETE']);
 
-function defaultOnUnauthorized(): void {
+// OnUnauthorized handles a 401 from any api() call. It resolves true when
+// the caller should retry the original request (the user re-authenticated
+// in place) or false when it should give up (the default then falls back
+// to redirecting to /login).
+export type OnUnauthorized = () => Promise<boolean>;
+
+// ReloginPrompt asks the user to sign back in without leaving the page
+// they're on, and resolves with whether they did. The root layout
+// registers the mounted ReloginDialog as this via registerReloginPrompt.
+export type ReloginPrompt = () => Promise<boolean>;
+
+let reloginPrompt: ReloginPrompt | null = null;
+
+// registerReloginPrompt wires defaultOnUnauthorized up to the mounted
+// ReloginDialog. Pass null (component teardown, or no dialog mounted - e.g.
+// in tests) to fall back to the plain redirect.
+export function registerReloginPrompt(fn: ReloginPrompt | null): void {
+	reloginPrompt = fn;
+}
+
+function redirectToLogin(): void {
 	if (typeof window === 'undefined') return;
+	const next = window.location.pathname + window.location.search;
+	window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+}
+
+// pendingRelogin is shared across concurrent 401s so they open (and await)
+// one dialog instead of one each.
+let pendingRelogin: Promise<boolean> | null = null;
+
+async function defaultOnUnauthorized(): Promise<boolean> {
+	if (typeof window === 'undefined') return false;
 	// Already on /login: a 401 here is the login form's own failed attempt
 	// (or a stale /me call racing it), not a session that needs to bounce
 	// anywhere. Reloading /login would also wipe out the "invalid
 	// credentials" state the login page is about to render from this same
 	// rejection.
-	if (window.location.pathname === '/login') return;
-	const next = window.location.pathname + window.location.search;
-	window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+	if (window.location.pathname === '/login') return false;
+
+	if (!reloginPrompt) {
+		redirectToLogin();
+		return false;
+	}
+
+	if (!pendingRelogin) {
+		const prompt = reloginPrompt;
+		pendingRelogin = prompt().finally(() => {
+			pendingRelogin = null;
+		});
+	}
+	const reloggedIn = await pendingRelogin;
+	if (!reloggedIn) {
+		redirectToLogin();
+	}
+	return reloggedIn;
 }
 
-let onUnauthorized: () => void = defaultOnUnauthorized;
+let onUnauthorized: OnUnauthorized = defaultOnUnauthorized;
 
 // setOnUnauthorized swaps the 401 handler. Production code never needs to
-// call this (the default navigates to /login); tests use it to observe a
-// 401 without a real navigation.
-export function setOnUnauthorized(fn: () => void): void {
+// call this (the default opens ReloginDialog, or redirects to /login when
+// none is registered); tests use it to observe a 401 without a real dialog
+// or navigation.
+export function setOnUnauthorized(fn: OnUnauthorized): void {
 	onUnauthorized = fn;
 }
 
-// resetOnUnauthorized restores the default (window.location-based) 401
+// resetOnUnauthorized restores the default (ReloginDialog/redirect) 401
 // handler. Only api.test.ts calls this, to test the default itself rather
 // than a test double.
 export function resetOnUnauthorized(): void {
@@ -46,7 +92,11 @@ export function resetOnUnauthorized(): void {
 export async function api<T>(
 	method: 'GET' | 'POST' | 'PUT' | 'DELETE',
 	path: string,
-	body?: unknown | FormData
+	body?: unknown | FormData,
+	// Internal: set on api()'s own recursive call after a successful
+	// re-login, so a request that 401s again right after can't retry
+	// forever. Callers never pass this.
+	isRetry = false
 ): Promise<T> {
 	const headers: Record<string, string> = {};
 	let requestBody: BodyInit | undefined;
@@ -79,8 +129,11 @@ export async function api<T>(
 		} catch {
 			// Body wasn't JSON (or was empty): fall back to statusText.
 		}
-		if (res.status === 401) {
-			onUnauthorized();
+		if (res.status === 401 && !isRetry) {
+			const reloggedIn = await onUnauthorized();
+			if (reloggedIn) {
+				return api<T>(method, path, body, true);
+			}
 		}
 		throw new ApiError(res.status, message);
 	}

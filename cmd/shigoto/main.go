@@ -185,7 +185,7 @@ func serve() error {
 		return fmt.Errorf("migrating database: %w", err)
 	}
 
-	a := auth.New(pool, strings.HasPrefix(cfg.BaseURL, "https://"))
+	a := auth.New(pool, strings.HasPrefix(cfg.BaseURL, "https://"), auth.WithTrustedProxy(cfg.TrustedProxy))
 	deps := httpapi.Deps{Pool: pool, Auth: a, Cfg: cfg}
 	billingSvc := httpapi.DefaultBilling(deps)
 	deps.Billing = billingSvc

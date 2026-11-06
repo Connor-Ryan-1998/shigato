@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,20 @@ var ErrInvalidCredentials = errors.New("invalid credentials")
 // checks a dummy hash in the unknown-email case so the two take about the
 // same time.
 func Login(ctx context.Context, q core.Querier, email, password string) (string, error) {
+	userID, err := verifyCredentials(ctx, q, email, password)
+	if err != nil {
+		return "", err
+	}
+	return createSession(ctx, q, userID)
+}
+
+// verifyCredentials checks email and password against stored staff
+// credentials and returns the matching user's ID. It returns
+// ErrInvalidCredentials for both an unknown email and a wrong password, and
+// checks a dummy hash in the unknown-email case so the two take about the
+// same time. It creates no session; callers that need one call
+// createSession or StartSession.
+func verifyCredentials(ctx context.Context, q core.Querier, email, password string) (int64, error) {
 	var userID int64
 	var hash *string
 	err := q.QueryRow(ctx,
@@ -33,7 +48,7 @@ func Login(ctx context.Context, q core.Querier, email, password string) (string,
 		email,
 	).Scan(&userID, &hash)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
+		return 0, err
 	}
 
 	known := err == nil && hash != nil
@@ -44,9 +59,14 @@ func Login(ctx context.Context, q core.Querier, email, password string) (string,
 	valid := checkPassword(check, password)
 
 	if !known || !valid {
-		return "", ErrInvalidCredentials
+		return 0, ErrInvalidCredentials
 	}
+	return userID, nil
+}
 
+// createSession inserts a new 30-day session row for userID and returns its
+// token.
+func createSession(ctx context.Context, q core.Querier, userID int64) (string, error) {
 	token, tokenHash, err := newToken()
 	if err != nil {
 		return "", err
@@ -59,6 +79,28 @@ func Login(ctx context.Context, q core.Querier, email, password string) (string,
 		return "", err
 	}
 	return token, nil
+}
+
+// StartSession creates a new session for userID and sets the session cookie
+// on w with exactly the flags LoginHandler has always used. It's exported
+// so other flows that authenticate a user outside password Login - invite
+// acceptance, OIDC callbacks, magic-link exchange - can start a session the
+// same way, without duplicating the cookie plumbing.
+func StartSession(ctx context.Context, q core.Querier, w http.ResponseWriter, userID int64) error {
+	token, err := createSession(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  time.Now().Add(sessionTTL),
+		HttpOnly: true,
+		Secure:   configuredSecureCookies,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
 }
 
 // Logout deletes the session for token, if one exists.
