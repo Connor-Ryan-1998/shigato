@@ -2,6 +2,8 @@
 // control.
 package auth
 
+import "sort"
+
 // Role is a membership role within an org.
 type Role string
 
@@ -79,4 +81,18 @@ var rolePerms = map[Role]map[Perm]bool{
 // Can reports whether role r holds permission p.
 func Can(r Role, p Perm) bool {
 	return rolePerms[r][p]
+}
+
+// PermsFor returns every permission role r grants, sorted for stable
+// output (e.g. the /api/v1/me response).
+func PermsFor(r Role) []Perm {
+	granted := rolePerms[r]
+	perms := make([]Perm, 0, len(granted))
+	for p, ok := range granted {
+		if ok {
+			perms = append(perms, p)
+		}
+	}
+	sort.Slice(perms, func(i, j int) bool { return perms[i] < perms[j] })
+	return perms
 }

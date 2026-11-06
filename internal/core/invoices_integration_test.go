@@ -586,6 +586,7 @@ func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
 	issueDraft := func(source string) *httptest.ResponseRecorder {
 		draftID := createDraft(t, pool, org.ID, contactID, source, 1000)
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+		req.Header.Set("X-Shigoto-CSRF", "1")
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
@@ -656,6 +657,7 @@ func TestInvoiceValidation422(t *testing.T) {
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Shigoto-CSRF", "1")
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)

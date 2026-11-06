@@ -57,6 +57,7 @@ func settingsRequestJSON(t *testing.T, method, url, token string, body any) *htt
 	}
 	req := httptest.NewRequest(method, url, reader)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	if token != "" {
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	}
@@ -86,6 +87,7 @@ func TestSettingsPutThenIssueRent(t *testing.T) {
 	handler := newSettingsTestHandler(pool)
 
 	issueReq := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/invoices/"+strconv.FormatInt(invoiceID, 10)+"/issue", nil)
+	issueReq.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := doSettingsRequest(handler, issueReq)
 	if rr.Code != http.StatusUnprocessableEntity {
@@ -106,6 +108,7 @@ func TestSettingsPutThenIssueRent(t *testing.T) {
 	}
 
 	issueReq2 := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/invoices/"+strconv.FormatInt(invoiceID, 10)+"/issue", nil)
+	issueReq2.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq2.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr = doSettingsRequest(handler, issueReq2)
 	if rr.Code != http.StatusOK {

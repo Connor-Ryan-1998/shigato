@@ -217,6 +217,7 @@ func putJSON(handler http.Handler, token, path string, body any) *httptest.Respo
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

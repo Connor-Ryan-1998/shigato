@@ -221,6 +221,7 @@ func postJSON(handler http.Handler, token, path string, body any) *httptest.Resp
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -229,6 +230,7 @@ func postJSON(handler http.Handler, token, path string, body any) *httptest.Resp
 
 func deleteReq(handler http.Handler, token, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

@@ -323,6 +323,7 @@ func uploadFile(handler http.Handler, token string, data []byte, filename string
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/files", &body)
 	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -558,6 +559,7 @@ func TestDeleteExpenseRouteAuditsContents(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/orgs/acme/expenses/%d", exp.ID), nil)
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

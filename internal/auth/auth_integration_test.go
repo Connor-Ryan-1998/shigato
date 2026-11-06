@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,6 +204,74 @@ func TestRequireOrgBookkeeperCannotWriteContacts(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+}
+
+// TestAuthErrorsAreJSON checks that RequireOrg's 401, 403 and 404 responses
+// are all {"error":"<message>"} JSON bodies (not http.Error's plain text),
+// so the SPA can parse every API error the same way.
+func TestAuthErrorsAreJSON(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+
+	orgA := createTestOrg(t, pool, "org-a")
+	createTestOrg(t, pool, "org-b")
+	ownerID := createTestUser(t, pool, "owner-a@example.com", "correct-password")
+	addMembership(t, pool, ownerID, orgA.ID, Owner)
+	bookkeeperID := createTestUser(t, pool, "bookkeeper@example.com", "correct-password")
+	addMembership(t, pool, bookkeeperID, orgA.ID, Bookkeeper)
+
+	ownerToken, err := Login(ctx, pool, "owner-a@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	bookkeeperToken, err := Login(ctx, pool, "bookkeeper@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	a := New(pool, false)
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/orgs/{org}/probe", a.RequireOrg(PermContactsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	cases := []struct {
+		name       string
+		path       string
+		token      string
+		wantStatus int
+	}{
+		{"no session", "/api/v1/orgs/org-a/probe", "", http.StatusUnauthorized},
+		{"missing permission", "/api/v1/orgs/org-a/probe", bookkeeperToken, http.StatusForbidden},
+		{"not a member", "/api/v1/orgs/org-b/probe", ownerToken, http.StatusNotFound},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, c.path, nil)
+			if c.token != "" {
+				req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: c.token})
+			}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			if rr.Code != c.wantStatus {
+				t.Fatalf("status = %d, want %d", rr.Code, c.wantStatus)
+			}
+			if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+				t.Fatalf("decoding error body: %v", err)
+			}
+			if body.Error == "" {
+				t.Error("error body missing non-empty \"error\" key")
+			}
+		})
 	}
 }
 

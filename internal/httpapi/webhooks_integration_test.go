@@ -323,6 +323,7 @@ func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
 	draftID := draft.ID
 
 	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, issueReq)
@@ -342,6 +343,7 @@ func TestIssueSendFailureKeepsNumberAndRetries(t *testing.T) {
 	}
 
 	sendReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
+	sendReq.Header.Set("X-Shigoto-CSRF", "1")
 	sendReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, sendReq)
@@ -391,6 +393,7 @@ func TestSendAlreadySentRejected(t *testing.T) {
 	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
 
 	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, issueReq)
@@ -402,6 +405,7 @@ func TestSendAlreadySentRejected(t *testing.T) {
 	// A /send retry on an already-sent invoice must be rejected rather
 	// than sending a second time.
 	sendReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
+	sendReq.Header.Set("X-Shigoto-CSRF", "1")
 	sendReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, sendReq)
@@ -447,6 +451,7 @@ func TestSendPastDueRejected(t *testing.T) {
 	}
 
 	sendReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
+	sendReq.Header.Set("X-Shigoto-CSRF", "1")
 	sendReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, sendReq)
@@ -485,6 +490,7 @@ func TestSendUnknownOrCrossOrgInvoice404(t *testing.T) {
 
 	post := func(id int64) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", id), nil)
+		req.Header.Set("X-Shigoto-CSRF", "1")
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
@@ -518,6 +524,7 @@ func TestVoidCallsProviderVoidInvoice(t *testing.T) {
 	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
 
 	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, issueReq)
@@ -534,6 +541,7 @@ func TestVoidCallsProviderVoidInvoice(t *testing.T) {
 	}
 
 	voidReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/void", draftID), nil)
+	voidReq.Header.Set("X-Shigoto-CSRF", "1")
 	voidReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, voidReq)
@@ -575,6 +583,7 @@ func TestVoidRefusesInvoiceWithPayments(t *testing.T) {
 
 	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 10000)
 	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, issueReq)
@@ -589,6 +598,7 @@ func TestVoidRefusesInvoiceWithPayments(t *testing.T) {
 		t.Fatalf("marshaling payment body: %v", err)
 	}
 	payReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/payments", draftID), bytes.NewReader(payBody))
+	payReq.Header.Set("X-Shigoto-CSRF", "1")
 	payReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	payReq.Header.Set("Content-Type", "application/json")
 	rr = httptest.NewRecorder()
@@ -598,6 +608,7 @@ func TestVoidRefusesInvoiceWithPayments(t *testing.T) {
 	}
 
 	voidReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/void", draftID), nil)
+	voidReq.Header.Set("X-Shigoto-CSRF", "1")
 	voidReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, voidReq)
@@ -642,6 +653,7 @@ func TestVoidProviderFailureLeavesOpen(t *testing.T) {
 	draftID := webhookTestDraft(t, pool, org.ID, contactID, "manual", 1000)
 
 	issueReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
+	issueReq.Header.Set("X-Shigoto-CSRF", "1")
 	issueReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, issueReq)
@@ -652,6 +664,7 @@ func TestVoidProviderFailureLeavesOpen(t *testing.T) {
 	fake.VoidInvoiceErr = fmt.Errorf("stripe is down")
 
 	voidReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/void", draftID), nil)
+	voidReq.Header.Set("X-Shigoto-CSRF", "1")
 	voidReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, voidReq)

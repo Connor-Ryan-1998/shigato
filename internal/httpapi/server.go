@@ -118,6 +118,7 @@ func New(d Deps) http.Handler {
 	registerCoreRoutes(mux, d)
 	registerSettingsRoutes(mux, d)
 	registerWebhookRoutes(mux, d)
+	registerMeRoutes(mux, d)
 
 	md := module.Deps{Pool: d.Pool, Auth: d.Auth, Cfg: d.Cfg, Billing: d.Billing}
 	// Reports are core: always on, never gated by d.Cfg.Modules.
@@ -138,5 +139,5 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"modules": enabled})
 	})
 
-	return mux
+	return csrfMiddleware(d.Cfg.BaseURL, mux)
 }

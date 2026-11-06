@@ -408,6 +408,7 @@ func TestAutoMatchRouteAuditsActor(t *testing.T) {
 	testBankLineID(t, pool, orgID, 15000, mustDate(t, "2026-11-07"), "Transfer "+inv.PaymentReference)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/reconcile/auto", nil)
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

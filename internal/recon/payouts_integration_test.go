@@ -389,6 +389,7 @@ func TestMatchPayoutRouteRespondsWithOffendingRefs(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"payout_ref": "po_1"})
 	url := fmt.Sprintf("/api/v1/orgs/acme/bank-lines/%d/match-payout", lineID)
 	req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

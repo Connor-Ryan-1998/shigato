@@ -66,6 +66,7 @@ func postLease(handler http.Handler, token string, body any) *httptest.ResponseR
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/leases", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -145,6 +146,7 @@ func TestRentChangeWarningRoute(t *testing.T) {
 		b, _ := json.Marshal(map[string]any{"effective_date": effective, "amount": amount})
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/leases/%d/rent-changes", created.ID), bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Shigoto-CSRF", "1")
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -227,6 +229,7 @@ func TestRentRunAuditsActor(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/rent-run", nil)
+	req.Header.Set("X-Shigoto-CSRF", "1")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
