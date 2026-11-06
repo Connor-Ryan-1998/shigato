@@ -7,10 +7,17 @@
 	let {
 		open = $bindable(false),
 		label,
+		side = 'left',
+		width = '16rem',
 		children
 	}: {
 		open?: boolean;
 		label: string;
+		// 'left' is the mobile nav drawer's own slide-in side; 'right' is
+		// used for a details/record panel (e.g. reconciliation's line
+		// drawer), which conventionally opens from the trailing edge.
+		side?: 'left' | 'right';
+		width?: string;
 		children: Snippet;
 	} = $props();
 
@@ -45,26 +52,32 @@
 	onclose={handleClose}
 	onclick={handleBackdropClick}
 	aria-label={label}
-	class="drawer"
+	class="drawer {side}"
+	style:width="min({width}, 90vw)"
 >
-	<nav aria-label="Main">
-		{@render children()}
-	</nav>
+	{@render children()}
 </dialog>
 
 <style>
 	.drawer {
 		position: fixed;
-		inset: 0 auto 0 0;
+		inset: 0 0 0 auto;
 		margin: 0;
 		height: 100%;
 		max-height: 100%;
-		width: min(16rem, 80vw);
+		overflow-y: auto;
 		border: none;
-		border-right: 1px solid var(--border);
 		background: var(--surface);
 		color: var(--text);
 		padding: var(--space-4);
+	}
+	.drawer.left {
+		inset: 0 auto 0 0;
+		border-right: 1px solid var(--border);
+	}
+	.drawer.right {
+		inset: 0 0 0 auto;
+		border-left: 1px solid var(--border);
 	}
 	.drawer::backdrop {
 		background: rgb(0 0 0 / 0.5);

@@ -127,7 +127,9 @@
 </div>
 
 <Drawer bind:open={drawerOpen} label="Navigation">
-	{@render navList()}
+	<nav aria-label="Main">
+		{@render navList()}
+	</nav>
 </Drawer>
 
 <style>

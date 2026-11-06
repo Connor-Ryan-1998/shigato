@@ -1,0 +1,365 @@
+<script lang="ts" module>
+	// Category is the subset of GET /categories' fields this form needs.
+	export type Category = {
+		id: number;
+		name: string;
+		type: string;
+	};
+
+	export type SimpleOption = { id: number; name: string };
+
+	// NewExpenseLine is one split line as the create-expense request body
+	// wants it (internal/recon/routes.go expenseLineRequest).
+	export type NewExpenseLine = {
+		category_id: number;
+		amount: number;
+		gst_code?: string;
+		property_id?: number;
+		project_id?: number;
+	};
+
+	// NewExpense is the body ExpenseForm's onSubmit receives: spent_on is
+	// always included (defaulted to the bank line's date), matching both
+	// expenseRequest and expenseFromLineRequest's accepted shape.
+	export type NewExpense = {
+		spent_on: string;
+		supplier_contact_id?: number;
+		description: string;
+		receipt_file_id?: number;
+		lines: NewExpenseLine[];
+	};
+</script>
+
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import Field from '../../components/Field.svelte';
+	import Select from '../../components/Select.svelte';
+	import Button from '../../components/Button.svelte';
+	import { parseCents, money } from '../../format';
+
+	const GST_OVERRIDE_OPTIONS = [
+		{ value: '', label: 'Category default' },
+		{ value: 'GST', label: 'GST' },
+		{ value: 'FRE', label: 'GST-free' },
+		{ value: 'N-T', label: 'Not taxable (N-T)' }
+	];
+
+	type Row = {
+		id: number;
+		categoryId: string;
+		amount: string;
+		gstCode: string;
+		propertyId: string;
+		projectId: string;
+	};
+
+	let {
+		lineAmountCents,
+		lineDate,
+		categories,
+		suppliers = [],
+		properties,
+		projects,
+		busy = false,
+		error,
+		onReceiptUpload,
+		onSubmit
+	}: {
+		// The bank line's own signed amount in cents (negative for a debit,
+		// the only kind ExpenseForm is ever opened for) - split lines must
+		// sum to exactly its magnitude.
+		lineAmountCents: number;
+		lineDate: string;
+		categories: Category[];
+		suppliers?: SimpleOption[];
+		// undefined hides the column entirely (the property/timesheets
+		// module isn't enabled for this org); an empty array still shows it.
+		properties?: SimpleOption[];
+		projects?: SimpleOption[];
+		busy?: boolean;
+		error?: string;
+		// Uploads the chosen file (POST /files) and resolves to its id. Left
+		// undefined in tests that never touch the file input; the parent
+		// (which owns org/api access) supplies the real implementation.
+		onReceiptUpload?: (file: File) => Promise<number>;
+		onSubmit: (expense: NewExpense) => void;
+	} = $props();
+
+	let receiptError = $state('');
+	let uploadingReceipt = $state(false);
+
+	async function handleReceiptChange(e: Event) {
+		const file = (e.currentTarget as HTMLInputElement).files?.[0];
+		if (!file || !onReceiptUpload) return;
+		receiptError = '';
+		uploadingReceipt = true;
+		try {
+			receiptFileId = await onReceiptUpload(file);
+		} catch (err) {
+			receiptError = err instanceof Error ? err.message : 'Could not upload the receipt.';
+		} finally {
+			uploadingReceipt = false;
+		}
+	}
+
+	const uid = $props.id();
+	let nextId = 0;
+	function emptyRow(): Row {
+		return {
+			id: nextId++,
+			categoryId: categories[0] ? String(categories[0].id) : '',
+			amount: '',
+			gstCode: '',
+			propertyId: '',
+			projectId: ''
+		};
+	}
+
+	// Seeded once from lineDate at mount - this component is recreated
+	// fresh each time the drawer opens a different line (see LineDrawer),
+	// so that's the only time a default is needed; untrack makes the
+	// one-shot intent explicit rather than tracking lineDate ongoing.
+	let spentOn = $state(untrack(() => lineDate));
+	let supplierId = $state('');
+	let description = $state('');
+	let rows = $state<Row[]>([emptyRow()]);
+	let receiptFileId = $state<number | undefined>(undefined);
+
+	const categoryOptions = $derived(
+		categories.map((c) => ({ value: String(c.id), label: c.name }))
+	);
+	const supplierOptions = $derived([
+		{ value: '', label: 'No supplier' },
+		...suppliers.map((s) => ({ value: String(s.id), label: s.name }))
+	]);
+	const propertyOptions = $derived([
+		{ value: '', label: 'None' },
+		...(properties ?? []).map((p) => ({ value: String(p.id), label: p.name }))
+	]);
+	const projectOptions = $derived([
+		{ value: '', label: 'None' },
+		...(projects ?? []).map((p) => ({ value: String(p.id), label: p.name }))
+	]);
+
+	// targetCents is the magnitude of the bank line's amount: split lines
+	// must sum to this (a debit's lineAmountCents is negative; a split
+	// line's own amount is always entered - and sent - as a positive cost).
+	const targetCents = $derived(Math.abs(lineAmountCents));
+
+	// Integer-cents sum of the parsed split lines - the only client-side
+	// money arithmetic in this form, done solely to validate against the
+	// bank line's amount before submitting; the server is still the only
+	// source of truth for every stored total.
+	const parsedAmounts = $derived(rows.map((r) => parseCents(r.amount)));
+	const linesTotalCents = $derived(
+		parsedAmounts.reduce((sum: number, c) => sum + (c ?? 0), 0)
+	);
+	const allAmountsValid = $derived(parsedAmounts.every((c) => c !== null && c > 0));
+	const totalMismatch = $derived(
+		allAmountsValid && rows.length > 0 && linesTotalCents !== targetCents
+	);
+
+	function rowValid(row: Row): boolean {
+		if (row.categoryId === '') return false;
+		return parseCents(row.amount) !== null && (parseCents(row.amount) ?? 0) > 0;
+	}
+
+	const valid = $derived(
+		description.trim() !== '' &&
+			spentOn !== '' &&
+			rows.length > 0 &&
+			rows.every(rowValid) &&
+			linesTotalCents === targetCents &&
+			!busy
+	);
+
+	function addRow() {
+		rows.push(emptyRow());
+	}
+
+	function removeRow(id: number) {
+		rows = rows.filter((r) => r.id !== id);
+	}
+
+	function submit() {
+		if (!valid) return;
+		const lines: NewExpenseLine[] = rows.map((r) => {
+			const line: NewExpenseLine = {
+				category_id: Number(r.categoryId),
+				amount: parseCents(r.amount)!
+			};
+			if (r.gstCode !== '') line.gst_code = r.gstCode;
+			if (r.propertyId !== '') line.property_id = Number(r.propertyId);
+			if (r.projectId !== '') line.project_id = Number(r.projectId);
+			return line;
+		});
+		const expense: NewExpense = {
+			spent_on: spentOn,
+			description,
+			lines
+		};
+		if (supplierId !== '') expense.supplier_contact_id = Number(supplierId);
+		if (receiptFileId !== undefined) expense.receipt_file_id = receiptFileId;
+		onSubmit(expense);
+	}
+</script>
+
+<div class="expense-form">
+	<div class="fields">
+		<Field label="Spent on" id={`expense-${uid}-spent-on`}>
+			<input id={`expense-${uid}-spent-on`} type="date" bind:value={spentOn} />
+		</Field>
+		<Field label="Supplier" id={`expense-${uid}-supplier`}>
+			<Select id={`expense-${uid}-supplier`} bind:value={supplierId} options={supplierOptions} />
+		</Field>
+		<Field label="Description" id={`expense-${uid}-description`}>
+			<input id={`expense-${uid}-description`} bind:value={description} />
+		</Field>
+	</div>
+
+	<h3>Lines</h3>
+	{#each rows as row, i (row.id)}
+		<div class="row">
+			<Field label="Category" id={`expense-${uid}-${row.id}-category`}>
+				<Select
+					id={`expense-${uid}-${row.id}-category`}
+					bind:value={row.categoryId}
+					options={categoryOptions}
+				/>
+			</Field>
+			<Field label="Amount ($)" id={`expense-${uid}-${row.id}-amount`}>
+				<input
+					id={`expense-${uid}-${row.id}-amount`}
+					inputmode="decimal"
+					bind:value={row.amount}
+				/>
+			</Field>
+			<Field label="GST" id={`expense-${uid}-${row.id}-gst`}>
+				<Select
+					id={`expense-${uid}-${row.id}-gst`}
+					bind:value={row.gstCode}
+					options={GST_OVERRIDE_OPTIONS}
+				/>
+			</Field>
+			{#if properties !== undefined}
+				<Field label="Property" id={`expense-${uid}-${row.id}-property`}>
+					<Select
+						id={`expense-${uid}-${row.id}-property`}
+						bind:value={row.propertyId}
+						options={propertyOptions}
+					/>
+				</Field>
+			{/if}
+			{#if projects !== undefined}
+				<Field label="Project" id={`expense-${uid}-${row.id}-project`}>
+					<Select
+						id={`expense-${uid}-${row.id}-project`}
+						bind:value={row.projectId}
+						options={projectOptions}
+					/>
+				</Field>
+			{/if}
+			<Button variant="secondary" onclick={() => removeRow(row.id)}>
+				Remove<span class="visually-hidden"> line {i + 1}</span>
+			</Button>
+		</div>
+	{/each}
+
+	<div class="actions">
+		<Button variant="secondary" onclick={addRow}>Add line</Button>
+	</div>
+
+	<p class="total" class:mismatch={totalMismatch}>
+		Lines total {money(linesTotalCents)}
+		{#if totalMismatch}
+			but the bank line is {money(targetCents)}
+		{/if}
+	</p>
+
+	<Field
+		label="Receipt"
+		id={`expense-${uid}-receipt`}
+		hint="PDF, JPEG or PNG."
+		error={receiptError || undefined}
+	>
+		<input
+			id={`expense-${uid}-receipt`}
+			type="file"
+			accept="application/pdf,image/jpeg,image/png"
+			disabled={uploadingReceipt}
+			onchange={handleReceiptChange}
+		/>
+	</Field>
+	{#if uploadingReceipt}
+		<p class="uploading">Uploading…</p>
+	{:else if receiptFileId !== undefined}
+		<p class="uploaded">Receipt attached.</p>
+	{/if}
+
+	{#if error}
+		<p class="form-error" role="alert">{error}</p>
+	{/if}
+
+	<div class="actions">
+		<Button onclick={submit} disabled={!valid || uploadingReceipt}>Save</Button>
+	</div>
+</div>
+
+<style>
+	.expense-form {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4);
+	}
+	.fields {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+	}
+	h3 {
+		margin: var(--space-2) 0 0;
+		font-size: var(--text-md, 1rem);
+	}
+	.row {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+		gap: var(--space-3);
+		align-items: end;
+		padding-bottom: var(--space-3);
+		border-bottom: 1px solid var(--border);
+	}
+	.actions {
+		display: flex;
+		gap: var(--space-3);
+		justify-content: flex-end;
+	}
+	.actions:first-of-type {
+		justify-content: flex-start;
+	}
+	.total {
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.total.mismatch {
+		color: var(--danger);
+	}
+	.uploading,
+	.uploaded {
+		margin: 0;
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+	}
+	.form-error {
+		margin: 0;
+		padding: var(--space-2) var(--space-3);
+		border-radius: var(--radius-md);
+		background: var(--danger-subtle);
+		color: var(--danger);
+	}
+
+	@media (max-width: 639px) {
+		.row {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>
