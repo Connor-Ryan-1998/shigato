@@ -77,10 +77,15 @@ func (s *Service) InvoiceJSON(ctx context.Context, q core.Querier, inv core.Invo
 	).Scan(&paid); err != nil {
 		return InvoiceResponse{}, err
 	}
-	// Outstanding is floored at 0, matching the dashboard's own rule: an
-	// overpaid invoice (allowed - see MatchInvoice) must never report a
-	// negative balance owed.
-	outstanding := max(int64(inv.Total)-paid, 0)
+	// Only an open invoice owes anything (ruling 47): a draft was never
+	// issued, and a void, paid or uncollectible one is closed. For an open
+	// invoice, outstanding is floored at 0, matching the dashboard's own
+	// rule: an overpaid invoice (allowed - see MatchInvoice) must never
+	// report a negative balance owed.
+	var outstanding int64
+	if inv.Status == "open" {
+		outstanding = max(int64(inv.Total)-paid, 0)
+	}
 
 	resp := InvoiceResponse{
 		ID: inv.ID, ContactID: inv.ContactID, ContactName: contact.Name, Number: inv.Number, Source: inv.Source, Status: inv.Status,

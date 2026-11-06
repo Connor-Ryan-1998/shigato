@@ -136,3 +136,56 @@ func TestServiceIssueNoActorAudits(t *testing.T) {
 		t.Fatalf("audit_log rows with actor_user_id IS NULL = %d, want 1", n)
 	}
 }
+
+// TestInvoiceJSONOutstandingOnlyForOpen covers ruling 47: only an open
+// invoice owes anything. A draft (never issued) and a void invoice report
+// 0 outstanding, while an open, partly paid one reports total - paid.
+func TestInvoiceJSONOutstandingOnlyForOpen(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := testContact(t, pool, org.ID)
+	svc := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noProvider, Location: time.UTC}
+
+	outstanding := func(id int64) int64 {
+		t.Helper()
+		inv, err := core.GetInvoice(ctx, pool, org.ID, id)
+		if err != nil {
+			t.Fatalf("GetInvoice: %v", err)
+		}
+		resp, err := svc.InvoiceJSON(ctx, pool, inv)
+		if err != nil {
+			t.Fatalf("InvoiceJSON: %v", err)
+		}
+		return resp.Outstanding
+	}
+
+	draftID := testDraft(t, pool, org.ID, contactID, "manual", 1000)
+	if got := outstanding(draftID); got != 0 {
+		t.Errorf("draft outstanding = %d, want 0", got)
+	}
+
+	voidID := testDraft(t, pool, org.ID, contactID, "manual", 2000)
+	if _, err := svc.Issue(ctx, org.ID, "acme", voidID); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := svc.Void(ctx, org.ID, "acme", voidID); err != nil {
+		t.Fatalf("Void: %v", err)
+	}
+	if got := outstanding(voidID); got != 0 {
+		t.Errorf("void outstanding = %d, want 0", got)
+	}
+
+	openID := testDraft(t, pool, org.ID, contactID, "manual", 3000)
+	if _, err := svc.Issue(ctx, org.ID, "acme", openID); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
+		InvoiceID: openID, Amount: 1200, PaidOn: time.Now(), Method: "bank_transfer",
+	}); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+	if got := outstanding(openID); got != 1800 {
+		t.Errorf("open partly-paid outstanding = %d, want 1800", got)
+	}
+}
