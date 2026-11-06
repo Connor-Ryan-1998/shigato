@@ -9,3 +9,8 @@ docs
 web/node_modules
 web/.svelte-kit
 web/build
+web/test-results
+web/playwright-report
+# Built by the Dockerfile's web stage; a host build must not leak in.
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep

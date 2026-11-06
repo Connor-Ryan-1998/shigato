@@ -22,8 +22,11 @@ tasks:
 
   build:
     desc: Build the shigoto binary.
-    deps: [web:build]
     cmds:
+      # Sequential, not deps: web:build needs web:install's node_modules,
+      # so a fresh checkout builds in one step.
+      - task: web:install
+      - task: web:build
       - go build -trimpath -o bin/shigoto ./cmd/shigoto
 
   dev:
@@ -54,6 +57,13 @@ tasks:
     cmds:
       - npm run check
       - npm test -- --run
+
+  web:e2e:
+    desc: Run the Playwright smoke test against a freshly built binary and compose Postgres.
+    dir: web
+    cmds:
+      - task: build
+      - npx playwright test
 
   web:check:
     desc: Type-check the web app (no tests).

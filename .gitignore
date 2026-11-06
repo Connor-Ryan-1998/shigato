@@ -15,3 +15,5 @@
 /web/node_modules/
 /web/.svelte-kit/
 /web/build/
+/web/test-results/
+/web/playwright-report/
