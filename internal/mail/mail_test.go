@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"mime"
 	"strings"
 	"testing"
 
@@ -52,6 +53,66 @@ func TestBuildMessageContainsBothParts(t *testing.T) {
 	if !strings.Contains(s, "Content-Type: multipart/alternative;") {
 		t.Errorf("message missing multipart/alternative content type:\n%s", s)
 	}
+	if got := strings.Count(s, "Content-Transfer-Encoding: quoted-printable"); got != 2 {
+		t.Errorf("Content-Transfer-Encoding: quoted-printable appears %d times, want 2 (one per part):\n%s", got, s)
+	}
+}
+
+func TestBuildMessageEncodesPartsQuotedPrintable(t *testing.T) {
+	raw, err := buildMessage("noreply@example.com", Message{
+		To:      "someone@example.com",
+		Subject: "Hello",
+		Text:    "100% = done",
+		HTML:    "<p>100% = done</p>",
+	})
+	if err != nil {
+		t.Fatalf("buildMessage: %v", err)
+	}
+	s := string(raw)
+	// '=' is quoted-printable's escape character, so a literal '=' in the
+	// body must itself be encoded as "=3D", never passed through raw.
+	if !strings.Contains(s, "=3D") {
+		t.Errorf("want literal '=' encoded as quoted-printable \"=3D\", got:\n%s", s)
+	}
+}
+
+func TestBuildMessageEncodesNonASCIISubject(t *testing.T) {
+	subject := "Héllo wörld"
+	raw, err := buildMessage("noreply@example.com", Message{
+		To:      "someone@example.com",
+		Subject: subject,
+		Text:    "body",
+	})
+	if err != nil {
+		t.Fatalf("buildMessage: %v", err)
+	}
+	s := string(raw)
+	if strings.Contains(s, "Subject: "+subject) {
+		t.Errorf("want non-ASCII subject RFC 2047 encoded, found it raw in:\n%s", s)
+	}
+	headerVal := headerValue(t, raw, "Subject")
+	dec := new(mime.WordDecoder)
+	got, err := dec.DecodeHeader(headerVal)
+	if err != nil {
+		t.Fatalf("decoding Subject header %q: %v", headerVal, err)
+	}
+	if got != subject {
+		t.Errorf("decoded Subject = %q, want %q", got, subject)
+	}
+}
+
+// headerValue extracts the value of the first "name: value" header line
+// from a raw message built by buildMessage.
+func headerValue(t *testing.T, raw []byte, name string) string {
+	t.Helper()
+	prefix := name + ": "
+	for _, line := range strings.Split(string(raw), "\r\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+	t.Fatalf("no %q header found in:\n%s", name, raw)
+	return ""
 }
 
 func TestBuildMessageUsesCRLF(t *testing.T) {

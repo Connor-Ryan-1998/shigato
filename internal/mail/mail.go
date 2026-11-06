@@ -6,7 +6,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net"
 	"net/smtp"
 	"net/textproto"
@@ -26,9 +29,8 @@ type Message struct {
 	To, Subject, Text, HTML string
 }
 
-// Mailer sends Messages. Send is nil-safe to call through only when the
-// Mailer itself is non-nil; New returns nil when SMTP isn't configured, so
-// callers must check for a nil *Mailer before calling Send.
+// Mailer sends Messages via Send. New returns nil when SMTP isn't
+// configured, so callers must check for a nil *Mailer before calling Send.
 type Mailer struct {
 	From string
 	Send func(ctx context.Context, m Message) error
@@ -61,31 +63,49 @@ func crlf(s string) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
+// writeQuotedPrintable writes s to w quoted-printable encoded, matching the
+// part's Content-Transfer-Encoding: quoted-printable header.
+func writeQuotedPrintable(w io.Writer, s string) error {
+	qw := quotedprintable.NewWriter(w)
+	if _, err := qw.Write([]byte(crlf(s))); err != nil {
+		return err
+	}
+	return qw.Close()
+}
+
 // buildMessage renders msg as a multipart/alternative message with CRLF
 // line endings throughout.
 func buildMessage(from string, msg Message) ([]byte, error) {
 	to := sanitizeHeader(msg.To)
-	subject := sanitizeHeader(msg.Subject)
+	// mime.QEncoding.Encode returns its input unchanged when it's already a
+	// valid ASCII string, so a plain-ASCII subject is left untouched.
+	subject := mime.QEncoding.Encode("utf-8", sanitizeHeader(msg.Subject))
 
 	var parts bytes.Buffer
 	mw := multipart.NewWriter(&parts)
 	boundary := mw.Boundary()
 
-	textHeader := textproto.MIMEHeader{"Content-Type": {"text/plain; charset=utf-8"}}
+	textHeader := textproto.MIMEHeader{
+		"Content-Type":              {"text/plain; charset=utf-8"},
+		"Content-Transfer-Encoding": {"quoted-printable"},
+	}
 	textPart, err := mw.CreatePart(textHeader)
 	if err != nil {
 		return nil, fmt.Errorf("mail: text part: %w", err)
 	}
-	if _, err := textPart.Write([]byte(crlf(msg.Text))); err != nil {
+	if err := writeQuotedPrintable(textPart, msg.Text); err != nil {
 		return nil, fmt.Errorf("mail: writing text part: %w", err)
 	}
 
-	htmlHeader := textproto.MIMEHeader{"Content-Type": {"text/html; charset=utf-8"}}
+	htmlHeader := textproto.MIMEHeader{
+		"Content-Type":              {"text/html; charset=utf-8"},
+		"Content-Transfer-Encoding": {"quoted-printable"},
+	}
 	htmlPart, err := mw.CreatePart(htmlHeader)
 	if err != nil {
 		return nil, fmt.Errorf("mail: html part: %w", err)
 	}
-	if _, err := htmlPart.Write([]byte(crlf(msg.HTML))); err != nil {
+	if err := writeQuotedPrintable(htmlPart, msg.HTML); err != nil {
 		return nil, fmt.Errorf("mail: writing html part: %w", err)
 	}
 
