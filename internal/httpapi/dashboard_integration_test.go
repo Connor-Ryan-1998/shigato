@@ -302,6 +302,76 @@ func TestInvoiceListFiltersAndTotal(t *testing.T) {
 	}
 }
 
+// TestInvoiceDetailIncludesPaymentsAndProviderURL covers GET
+// /invoices/{id}'s detail-only fields: the payments list (with no
+// provider_ref leaked) and provider_url, present as "" when the invoice
+// never reached a payment provider (GetEnv returns "" so no org ever
+// resolves one). GET /invoices (the list) must not carry either field.
+func TestInvoiceDetailIncludesPaymentsAndProviderURL(t *testing.T) {
+	pool := db.TestPool(t)
+	org := webhookTestOrg(t, pool, "acme")
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
+	contactID := webhookTestContact(t, pool, org.ID)
+	handler := newDashboardTestHandler(pool, map[string]bool{})
+	ctx := context.Background()
+
+	inv := dashboardIssueInvoice(t, pool, org.ID, contactID, 10000, 14)
+	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
+		InvoiceID: inv.ID, Amount: 4000, PaidOn: time.Now(), Method: "cash",
+	}); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/invoices/"+strconv.FormatInt(inv.ID, 10), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /invoices/%d: status = %d, want 200, body=%s", inv.ID, rr.Code, rr.Body.String())
+	}
+	rawBody := rr.Body.String()
+	if strings.Contains(rawBody, "provider_ref") {
+		t.Fatalf("detail response leaked provider_ref: %s", rawBody)
+	}
+
+	var body struct {
+		Payments []struct {
+			ID     int64  `json:"id"`
+			Amount int64  `json:"amount"`
+			PaidOn string `json:"paid_on"`
+			Method string `json:"method"`
+		} `json:"payments"`
+		ProviderURL string `json:"provider_url"`
+	}
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(body.Payments) != 1 {
+		t.Fatalf("payments = %+v, want exactly 1", body.Payments)
+	}
+	payment := body.Payments[0]
+	if payment.Amount != 4000 || payment.Method != "cash" {
+		t.Fatalf("payment = %+v, want amount=4000 method=cash", payment)
+	}
+	if body.ProviderURL != "" {
+		t.Fatalf("provider_url = %q, want empty (no provider configured in this test)", body.ProviderURL)
+	}
+
+	// GET /invoices (the list) must not carry payments/provider_url at all.
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/invoices", nil)
+	listReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	listRR := httptest.NewRecorder()
+	handler.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("GET /invoices: status = %d, want 200, body=%s", listRR.Code, listRR.Body.String())
+	}
+	if strings.Contains(listRR.Body.String(), "payments") || strings.Contains(listRR.Body.String(), "provider_url") {
+		t.Fatalf("list response leaked detail-only fields: %s", listRR.Body.String())
+	}
+}
+
 // TestBankLineMatchLabel covers the bank-line JSON's "match" field for a
 // line matched to an invoice: kind "invoice", with the invoice's number as
 // the label.

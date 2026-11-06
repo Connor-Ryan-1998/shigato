@@ -104,3 +104,44 @@ func (s *Service) InvoiceJSON(ctx context.Context, q core.Querier, inv core.Invo
 	}
 	return resp, nil
 }
+
+// PaymentSummary is one payment as shown on an invoice's detail page.
+// provider_ref is deliberately left out - it's an internal reconciliation
+// key, not something the web UI needs.
+type PaymentSummary struct {
+	ID     int64  `json:"id"`
+	Amount int64  `json:"amount"`
+	PaidOn string `json:"paid_on"`
+	Method string `json:"method"`
+}
+
+// InvoiceDetailResponse is GET /invoices/{id}'s response shape: an
+// InvoiceResponse plus the fields only the single-invoice detail view
+// needs - the payments list and the hosted Stripe link (empty if none).
+// List responses (GET /invoices) use InvoiceResponse directly and never
+// carry these.
+type InvoiceDetailResponse struct {
+	InvoiceResponse
+	Payments    []PaymentSummary `json:"payments"`
+	ProviderURL string           `json:"provider_url"`
+}
+
+// InvoiceDetailJSON builds inv's detail-view API representation: the same
+// fields as InvoiceJSON, plus its payments and provider URL.
+func (s *Service) InvoiceDetailJSON(ctx context.Context, q core.Querier, inv core.Invoice) (InvoiceDetailResponse, error) {
+	resp, err := s.InvoiceJSON(ctx, q, inv)
+	if err != nil {
+		return InvoiceDetailResponse{}, err
+	}
+
+	payments, err := core.ListPayments(ctx, q, inv.OrgID, inv.ID)
+	if err != nil {
+		return InvoiceDetailResponse{}, err
+	}
+	summaries := make([]PaymentSummary, len(payments))
+	for i, p := range payments {
+		summaries[i] = PaymentSummary{ID: p.ID, Amount: int64(p.Amount), PaidOn: p.PaidOn.Format(dateLayout), Method: p.Method}
+	}
+
+	return InvoiceDetailResponse{InvoiceResponse: resp, Payments: summaries, ProviderURL: inv.ProviderURL}, nil
+}

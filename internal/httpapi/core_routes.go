@@ -293,7 +293,7 @@ func getInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 		return
 	}
 
-	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
+	resp, err := d.Billing.InvoiceDetailJSON(r.Context(), d.Pool, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

@@ -106,3 +106,28 @@ func RecordPayment(ctx context.Context, tx Querier, orgID int64, in NewPayment) 
 
 	return p, created, nil
 }
+
+// ListPayments lists an invoice's payments, oldest first. Scoped to orgID.
+func ListPayments(ctx context.Context, q Querier, orgID, invoiceID int64) ([]Payment, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, org_id, invoice_id, amount, paid_on, method, coalesce(provider_ref,'')
+		FROM payments WHERE org_id = $1 AND invoice_id = $2 ORDER BY paid_on, id`,
+		orgID, invoiceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Payment
+	for rows.Next() {
+		var p Payment
+		var amount int64
+		if err := rows.Scan(&p.ID, &p.OrgID, &p.InvoiceID, &amount, &p.PaidOn, &p.Method, &p.ProviderRef); err != nil {
+			return nil, err
+		}
+		p.Amount = Cents(amount)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
