@@ -7,6 +7,11 @@
 		overdue_count: number;
 		overdue_outstanding: number;
 		draft_count: number;
+		// Every invoice in the org regardless of status - unlike the counts
+		// above, which are each scoped to one status. Lets the dashboard page
+		// tell "no invoices at all" apart from "fully settled" (open/overdue/
+		// draft all 0, but some are paid/void).
+		invoice_count: number;
 	};
 </script>
 

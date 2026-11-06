@@ -91,6 +91,7 @@ type dashboardCoreBody struct {
 	OverdueCount       int   `json:"overdue_count"`
 	OverdueOutstanding int64 `json:"overdue_outstanding"`
 	DraftCount         int   `json:"draft_count"`
+	InvoiceCount       int   `json:"invoice_count"`
 }
 
 type dashboardBody struct {
@@ -164,8 +165,43 @@ func TestDashboardCore(t *testing.T) {
 	if body.Core.OverdueOutstanding != 6000 {
 		t.Fatalf("overdue_outstanding = %d, want 6000 (10000 total - 4000 partial)", body.Core.OverdueOutstanding)
 	}
+	if body.Core.InvoiceCount != 4 {
+		t.Fatalf("invoice_count = %d, want 4 (draft, open, overdue, paid)", body.Core.InvoiceCount)
+	}
 	if len(body.Modules) != 0 {
 		t.Fatalf("modules = %v, want none (no modules enabled)", body.Modules)
+	}
+}
+
+// TestDashboardInvoiceCountIncludesSettledInvoices proves invoice_count
+// counts every invoice regardless of status, not just open/overdue/draft -
+// an org whose only invoice is fully paid has open_count/overdue_count/
+// draft_count all 0, but invoice_count must still be 1, so the web
+// dashboard can tell "no invoices at all" apart from "fully settled"
+// (see internal/httpapi/dashboard.go's coreDashboard.InvoiceCount doc).
+func TestDashboardInvoiceCountIncludesSettledInvoices(t *testing.T) {
+	pool := db.TestPool(t)
+	org := webhookTestOrg(t, pool, "acme")
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
+	contactID := webhookTestContact(t, pool, org.ID)
+	handler := newDashboardTestHandler(pool, map[string]bool{})
+	ctx := context.Background()
+
+	paid := dashboardIssueInvoice(t, pool, org.ID, contactID, 2000, 14)
+	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
+		InvoiceID: paid.ID, Amount: 2000, PaidOn: time.Now(), Method: "cash",
+	}); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+
+	body := decodeDashboard(t, getDashboard(handler, token))
+	if body.Core.OpenCount != 0 || body.Core.OverdueCount != 0 || body.Core.DraftCount != 0 {
+		t.Fatalf("core = %+v, want open/overdue/draft all 0 (invoice is paid)", body.Core)
+	}
+	if body.Core.InvoiceCount != 1 {
+		t.Fatalf("invoice_count = %d, want 1 (the paid invoice still counts)", body.Core.InvoiceCount)
 	}
 }
 

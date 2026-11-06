@@ -46,6 +46,13 @@ type coreDashboard struct {
 	OverdueCount       int   `json:"overdue_count"`
 	OverdueOutstanding int64 `json:"overdue_outstanding"`
 	DraftCount         int   `json:"draft_count"`
+	// InvoiceCount is every invoice in the org regardless of status (draft,
+	// open, paid, void, uncollectible) - unlike the other counts, which are
+	// each scoped to one status. It exists so the web dashboard can tell
+	// "no invoices at all" (invoice_count == 0) apart from "fully settled"
+	// (open/overdue/draft all 0, but invoice_count > 0 from paid/void ones)
+	// without guessing from the status-scoped counts alone.
+	InvoiceCount int `json:"invoice_count"`
 }
 
 // buildCoreDashboard computes coreDashboard in a single aggregate query: a
@@ -57,6 +64,7 @@ func buildCoreDashboard(ctx context.Context, q core.Querier, orgID int64, today 
 	var d coreDashboard
 	err := q.QueryRow(ctx, `
 		SELECT
+			count(*) AS invoice_count,
 			count(*) FILTER (WHERE status = 'draft') AS draft_count,
 			count(*) FILTER (WHERE status = 'open') AS open_count,
 			coalesce(sum(GREATEST(total - paid, 0)) FILTER (WHERE status = 'open'), 0) AS open_outstanding,
@@ -68,7 +76,7 @@ func buildCoreDashboard(ctx context.Context, q core.Querier, orgID int64, today 
 			FROM invoices i WHERE i.org_id = $1
 		) s`,
 		orgID, today,
-	).Scan(&d.DraftCount, &d.OpenCount, &d.OpenOutstanding, &d.OverdueCount, &d.OverdueOutstanding)
+	).Scan(&d.InvoiceCount, &d.DraftCount, &d.OpenCount, &d.OpenOutstanding, &d.OverdueCount, &d.OverdueOutstanding)
 	return d, err
 }
 

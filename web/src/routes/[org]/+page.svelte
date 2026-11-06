@@ -58,14 +58,13 @@
 
 	onMount(load);
 
-	// An org with no open, overdue or draft invoices at all is either brand
-	// new or fully settled either way, there's nothing actionable on this
-	// screen, so show the onboarding empty state instead of three zero
-	// tiles. The dashboard response has no separate "total invoices" count
-	// to check instead.
-	const isEmpty = $derived(
-		core !== null && core.open_count === 0 && core.overdue_count === 0 && core.draft_count === 0
-	);
+	// An org with zero invoices of any status (draft, open, paid, void,
+	// uncollectible) has nothing to work with yet, so show the onboarding
+	// empty state instead of three zero tiles. invoice_count (unlike
+	// open/overdue/draft_count) isn't scoped to one status, so a settled
+	// org (every invoice paid or void) correctly stays on the normal tiles
+	// view instead of being mistaken for a brand-new one.
+	const isEmpty = $derived(core !== null && core.invoice_count === 0);
 </script>
 
 <PageHeader title="Dashboard" />

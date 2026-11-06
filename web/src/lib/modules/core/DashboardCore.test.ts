@@ -7,7 +7,8 @@ const core = {
 	open_outstanding: 123456,
 	overdue_count: 1,
 	overdue_outstanding: 7890,
-	draft_count: 2
+	draft_count: 2,
+	invoice_count: 7
 };
 
 describe('DashboardCore', () => {
