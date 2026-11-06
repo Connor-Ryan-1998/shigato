@@ -99,10 +99,33 @@ The server is configured by environment variables, all prefixed `SHIGOTO_`:
 | `SHIGOTO_SCHEDULER` | no | `on` | `on` or `off`. Enables the in-process hourly scheduler (rent runs and session pruning). |
 | `SHIGOTO_STRIPE_<ORGSLUG>_SECRET_KEY` | no | | Stripe secret key for the org identified by slug. |
 | `SHIGOTO_STRIPE_<ORGSLUG>_WEBHOOK_SECRET` | no | | Stripe webhook signing secret for the org. |
+| `SHIGOTO_SMTP_HOST` | no | | SMTP server host. Unset disables email: invite/magic-link endpoints return 422 and hand the link back for manual sharing. |
+| `SHIGOTO_SMTP_PORT` | no | `587`/`465`/`1025` by `SHIGOTO_SMTP_TLS` | SMTP server port. |
+| `SHIGOTO_SMTP_USERNAME` | no | | SMTP auth username. |
+| `SHIGOTO_SMTP_PASSWORD` | no | | SMTP auth password. |
+| `SHIGOTO_SMTP_FROM` | yes, if `SHIGOTO_SMTP_HOST` is set | | `From` address for outgoing mail. |
+| `SHIGOTO_SMTP_TLS` | no | `starttls` | `starttls`, `tls` (implicit TLS, e.g. port 465) or `none`. `none` is only accepted for host `localhost`, `127.0.0.1`, `::1` or `mailpit`. |
 
 `<ORGSLUG>` is the org slug upper-cased with `-` replaced by `_`. Point each
 org's Stripe webhook at `https://<SHIGOTO_BASE_URL>/webhooks/stripe/<org-slug>`
 (the plain, lower-cased slug, not the env var form).
+
+### Email in development
+
+`docker compose up` also starts [mailpit](https://mailpit.axllent.org/) as a
+local SMTP catcher, with its SMTP port (1025) and web UI (8025) bound to
+`127.0.0.1` only. The `app` service is pre-configured to send through it
+(`SHIGOTO_SMTP_HOST=mailpit`, `SHIGOTO_SMTP_TLS=none`); open
+`http://localhost:8025` to see mail sent by the running app. `task dev` runs
+the Go server on the host rather than in compose, so point it at mailpit the
+same way if you need outgoing mail locally:
+
+```bash
+docker compose up -d --wait db mailpit
+SHIGOTO_SMTP_HOST=localhost SHIGOTO_SMTP_PORT=1025 \
+  SHIGOTO_SMTP_FROM=noreply@shigoto.local SHIGOTO_SMTP_TLS=none \
+  task dev
+```
 
 ## Commands
 

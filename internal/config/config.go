@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,6 +17,19 @@ var Known = []string{"property", "timesheets", "reconciliation"}
 type StripeOrg struct {
 	SecretKey     string
 	WebhookSecret string
+}
+
+// SMTP holds the mail delivery configuration. A zero-value Host means email
+// is disabled.
+type SMTP struct {
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
+	// TLS is one of "starttls" (default), "tls" (implicit TLS, e.g. port
+	// 465) or "none". "none" is only accepted for a loopback/mailpit host.
+	TLS string
 }
 
 // Config is shigoto's runtime configuration.
@@ -33,6 +47,9 @@ type Config struct {
 	// SchedulerEnabled controls the in-process hourly scheduler (rent
 	// runs and session pruning). Defaults to true.
 	SchedulerEnabled bool
+	// SMTP holds mail delivery configuration. SMTP.Host == "" means email
+	// is disabled.
+	SMTP SMTP
 }
 
 // Load reads configuration from environment variables via getenv.
@@ -102,7 +119,74 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("invalid SHIGOTO_SCHEDULER %q (want \"on\" or \"off\")", scheduler)
 	}
 
+	smtp, err := loadSMTP(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	c.SMTP = smtp
+
 	return c, nil
+}
+
+// loopbackSMTPHosts are the only hosts SHIGOTO_SMTP_TLS=none is accepted
+// for: a plaintext loopback or compose-network mail catcher, never a real
+// mail server.
+var loopbackSMTPHosts = map[string]bool{
+	"localhost": true,
+	"127.0.0.1": true,
+	"::1":       true,
+	"mailpit":   true,
+}
+
+func loadSMTP(getenv func(string) string) (SMTP, error) {
+	s := SMTP{
+		Host:     getenv("SHIGOTO_SMTP_HOST"),
+		Username: getenv("SHIGOTO_SMTP_USERNAME"),
+		Password: getenv("SHIGOTO_SMTP_PASSWORD"),
+		From:     getenv("SHIGOTO_SMTP_FROM"),
+		TLS:      getenv("SHIGOTO_SMTP_TLS"),
+	}
+	if s.Host == "" {
+		// Email disabled; the rest of SMTP's fields are irrelevant.
+		return SMTP{}, nil
+	}
+
+	if s.TLS == "" {
+		s.TLS = "starttls"
+	}
+	switch s.TLS {
+	case "starttls", "tls":
+	case "none":
+		if !loopbackSMTPHosts[s.Host] {
+			return SMTP{}, fmt.Errorf("SHIGOTO_SMTP_TLS=none is only allowed for a loopback or mailpit host, got %q", s.Host)
+		}
+	default:
+		return SMTP{}, fmt.Errorf("invalid SHIGOTO_SMTP_TLS %q (want \"starttls\", \"tls\" or \"none\")", s.TLS)
+	}
+
+	if s.From == "" {
+		return SMTP{}, fmt.Errorf("SHIGOTO_SMTP_FROM is required when SHIGOTO_SMTP_HOST is set")
+	}
+
+	portStr := getenv("SHIGOTO_SMTP_PORT")
+	if portStr == "" {
+		switch s.TLS {
+		case "tls":
+			s.Port = 465
+		case "none":
+			s.Port = 1025
+		default:
+			s.Port = 587
+		}
+	} else {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return SMTP{}, fmt.Errorf("invalid SHIGOTO_SMTP_PORT %q", portStr)
+		}
+		s.Port = port
+	}
+
+	return s, nil
 }
 
 func isKnownModule(name string) bool {

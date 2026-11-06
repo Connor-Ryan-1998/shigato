@@ -194,3 +194,77 @@ func TestStripeFor(t *testing.T) {
 		t.Error("expected ok=false for unconfigured org")
 	}
 }
+
+func TestLoadSMTPDisabledByDefault(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.SMTP.Host != "" {
+		t.Errorf("SMTP.Host = %q, want empty (email disabled)", c.SMTP.Host)
+	}
+}
+
+func TestLoadSMTPDefaultTLSIsStarttls(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_SMTP_HOST":    "smtp.example.com",
+		"SHIGOTO_SMTP_FROM":    "noreply@example.com",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.SMTP.TLS != "starttls" {
+		t.Errorf("SMTP.TLS = %q, want %q", c.SMTP.TLS, "starttls")
+	}
+}
+
+func TestLoadSMTPNoneRejectedForRealHost(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_SMTP_HOST":    "smtp.example.com",
+		"SHIGOTO_SMTP_FROM":    "noreply@example.com",
+		"SHIGOTO_SMTP_TLS":     "none",
+	}))
+	if err == nil {
+		t.Fatal("expected error for SHIGOTO_SMTP_TLS=none with a non-loopback host, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "SHIGOTO_SMTP_TLS") {
+		t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_SMTP_TLS")
+	}
+}
+
+func TestLoadSMTPNoneAllowedForMailpit(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_SMTP_HOST":    "mailpit",
+		"SHIGOTO_SMTP_FROM":    "noreply@example.com",
+		"SHIGOTO_SMTP_TLS":     "none",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.SMTP.TLS != "none" {
+		t.Errorf("SMTP.TLS = %q, want %q", c.SMTP.TLS, "none")
+	}
+}
+
+func TestLoadSMTPMissingFromIsError(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_SMTP_HOST":    "smtp.example.com",
+	}))
+	if err == nil {
+		t.Fatal("expected error for missing SHIGOTO_SMTP_FROM, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "SHIGOTO_SMTP_FROM") {
+		t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_SMTP_FROM")
+	}
+}

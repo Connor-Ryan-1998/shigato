@@ -16,6 +16,17 @@ services:
       timeout: 5s
       retries: 10
 
+  mailpit:
+    image: axllent/mailpit:v1.33.0
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8025/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   app:
     build: .
     depends_on:
@@ -25,6 +36,10 @@ services:
       SHIGOTO_LISTEN: ":8080"
       SHIGOTO_DATABASE_URL: "postgres://shigoto:shigoto@db:5432/shigoto?sslmode=disable"
       SHIGOTO_BASE_URL: "http://localhost:8080"
+      SHIGOTO_SMTP_HOST: "mailpit"
+      SHIGOTO_SMTP_PORT: "1025"
+      SHIGOTO_SMTP_FROM: "noreply@shigoto.local"
+      SHIGOTO_SMTP_TLS: "none"
     ports:
       - "8080:8080"
 
