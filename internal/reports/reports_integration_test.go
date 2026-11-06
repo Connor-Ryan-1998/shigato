@@ -4,7 +4,8 @@
 // (through httpapi.New), so it needs to import httpapi, auth, property,
 // timesheets and recon alongside reports without an import cycle: reports
 // itself must not import property/timesheets/recon (they're toggleable
-// modules), but its tests can use them to set up fixtures.
+// modules), but its tests can use them - and billing/payments' Fake - to
+// set up fixtures.
 package reports_test
 
 import (
@@ -14,18 +15,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
+	"shigoto/internal/billing"
 	"shigoto/internal/config"
 	"shigoto/internal/core"
 	"shigoto/internal/db"
 	"shigoto/internal/httpapi"
+	"shigoto/internal/importers"
+	"shigoto/internal/module"
+	"shigoto/internal/payments"
 	"shigoto/internal/property"
 	"shigoto/internal/recon"
+	"shigoto/internal/reports"
 )
 
 // sessionCookieName mirrors the unexported constant of the same name in
@@ -533,5 +541,150 @@ func TestReportsExcludeDraftAndVoid(t *testing.T) {
 	}
 	if bas.FiguresCents.A1 != 0 {
 		t.Errorf("1A = %d, want 0 (the draft/voided GST must not count)", bas.FiguresCents.A1)
+	}
+}
+
+// reportTotals is the subset of a quarter's figures the exactly-once test
+// checks: BAS G1/1A/G11/1B plus P&L (ex-GST) income and expenses for the
+// whole org, along with how many rows fed them.
+type reportTotals struct {
+	G1, A1, G11, B1             core.Cents
+	PnLIncome, PnLExpenses      core.Cents
+	IncomeRows, ExpenseRowCount int
+}
+
+func quarterTotals(t *testing.T, pool *pgxpool.Pool, orgID int64) reportTotals {
+	t.Helper()
+	ctx := context.Background()
+	from, to := mustDate(t, "2026-07-01"), mustDate(t, "2026-09-30")
+	income, err := reports.IncomeRows(ctx, pool, orgID, from, to)
+	if err != nil {
+		t.Fatalf("IncomeRows: %v", err)
+	}
+	exp, err := reports.ExpenseRows(ctx, pool, orgID, from, to)
+	if err != nil {
+		t.Fatalf("ExpenseRows: %v", err)
+	}
+	bas := reports.BAS(income, exp)
+	got := reportTotals{G1: bas.G1, A1: bas.A1, G11: bas.G11, B1: bas.B1, IncomeRows: len(income), ExpenseRowCount: len(exp)}
+	for _, g := range reports.PnL(income, exp, "org") {
+		got.PnLIncome += g.TotalIncome
+		got.PnLExpenses += g.TotalExpenses
+	}
+	return got
+}
+
+// TestReconciledMovementsCountExactlyOnce drives every reconciliation path
+// in one GST-registered quarter and checks each money movement reaches BAS
+// and the P&L exactly once:
+//   - invoice A ($220, GST $20) paid by a bank credit via MatchInvoice;
+//   - invoice B ($110, GST $10) paid by a Stripe webhook payment, then
+//     reconciled via MatchPayout, which books a $1.10 (GST $0.10) fee;
+//   - an ignored $50 debit (drawings) - never counted;
+//   - a $33 (GST $3) expense created from a debit line, plus a standalone
+//     $55 (GST $5) expense.
+//
+// It then unmatches the bank match and the payout: payment A (created by
+// the match) disappears, payment B stays (it came from the webhook, so it's
+// still income), and the fee expense disappears - so the figures move by
+// exactly those amounts and nothing else.
+func TestReconciledMovementsCountExactlyOnce(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	client := testContact(t, pool, org.ID, "client", "Client")
+	repairs := testCategoryID(t, pool, org.ID, "Repairs & maintenance")
+
+	invA := testInvoice(t, pool, org.ID, client, "manual", 1000, 22000, "GST", nil, nil)
+	invB := testInvoice(t, pool, org.ID, client, "timesheet", 1000, 11000, "GST", nil, nil)
+	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
+		InvoiceID: invB.ID, Amount: 11000, PaidOn: mustDate(t, "2026-07-12"), Method: "stripe", ProviderRef: "pi_b",
+	}); err != nil {
+		t.Fatalf("RecordPayment (webhook): %v", err)
+	}
+
+	mapping, _ := importers.Preset("commbank")
+	account, err := recon.CreateBankAccount(ctx, pool, org.ID, "Everyday", mapping)
+	if err != nil {
+		t.Fatalf("CreateBankAccount: %v", err)
+	}
+	statement := "10/07/2026,220.00,Transfer from client\n" +
+		"15/07/2026,108.90,Stripe payout\n" +
+		"20/07/2026,-50.00,Owner drawings\n" +
+		"22/07/2026,-33.00,Plumber\n"
+	if _, err := recon.Import(ctx, pool, org.ID, account.ID, strings.NewReader(statement)); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	lines, err := recon.ListBankLines(ctx, pool, org.ID, recon.BankLineFilter{})
+	if err != nil {
+		t.Fatalf("ListBankLines: %v", err)
+	}
+	lineID := map[string]int64{}
+	for _, l := range lines {
+		lineID[l.Description] = l.ID
+	}
+
+	run := func(name string, fn func(tx pgx.Tx) error) {
+		t.Helper()
+		if err := module.RunInTx(ctx, pool, fn); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	run("MatchInvoice", func(tx pgx.Tx) error {
+		_, err := recon.MatchInvoice(ctx, tx, org.ID, lineID["Transfer from client"], invA.ID, "bank_transfer")
+		return err
+	})
+	payoutOn := mustDate(t, "2026-07-15")
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_b": {Ref: "po_b", Amount: 10890, ArrivalOn: payoutOn, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_b": {{Ref: "txn_b", Type: "charge", PaymentRef: "pi_b", Amount: 11000, Fee: 110}},
+		},
+	}
+	b := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: func(string) (payments.Provider, error) { return fake, nil }}
+	if _, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID["Stripe payout"], "po_b"); err != nil {
+		t.Fatalf("MatchPayout: %v", err)
+	}
+	run("Ignore", func(tx pgx.Tx) error {
+		return recon.Ignore(ctx, tx, org.ID, lineID["Owner drawings"], "drawings")
+	})
+	run("CreateExpenseFromLine", func(tx pgx.Tx) error {
+		_, _, err := recon.CreateExpenseFromLine(ctx, tx, org.ID, lineID["Plumber"], recon.NewExpense{
+			Description: "Plumber", Lines: []recon.NewExpenseLine{{CategoryID: repairs, Amount: 3300}},
+		})
+		return err
+	})
+	testExpense(t, pool, org.ID, repairs, 5500, mustDate(t, "2026-07-25"), nil)
+
+	want := reportTotals{
+		G1: 22000 + 11000, A1: 2000 + 1000,
+		G11: 110 + 3300 + 5500, B1: 10 + 300 + 500,
+		PnLIncome: 20000 + 10000, PnLExpenses: 100 + 3000 + 5000,
+		IncomeRows: 2, ExpenseRowCount: 3,
+	}
+	if got := quarterTotals(t, pool, org.ID); got != want {
+		t.Fatalf("after reconciling:\n got  %+v\n want %+v", got, want)
+	}
+
+	run("Unmatch bank match", func(tx pgx.Tx) error {
+		return recon.Unmatch(ctx, tx, org.ID, lineID["Transfer from client"])
+	})
+	run("Unmatch payout", func(tx pgx.Tx) error {
+		return recon.Unmatch(ctx, tx, org.ID, lineID["Stripe payout"])
+	})
+
+	want.G1 -= 22000
+	want.A1 -= 2000
+	want.PnLIncome -= 20000
+	want.IncomeRows--
+	want.G11 -= 110
+	want.B1 -= 10
+	want.PnLExpenses -= 100
+	want.ExpenseRowCount--
+	if got := quarterTotals(t, pool, org.ID); got != want {
+		t.Fatalf("after unmatching:\n got  %+v\n want %+v", got, want)
 	}
 }
