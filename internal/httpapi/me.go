@@ -13,6 +13,11 @@ type meOrg struct {
 	Name  string   `json:"name"`
 	Role  string   `json:"role"`
 	Perms []string `json:"perms"`
+	// Portal is true for a tenant or client membership (which otherwise
+	// appears here with an empty Perms list, same as any other role with
+	// no staff permissions): it tells the SPA this org belongs in the
+	// portal nav rather than looking like a staff org with no access.
+	Portal bool `json:"portal,omitempty"`
 }
 
 // registerMeRoutes mounts GET /api/v1/me: the current user's identity and
@@ -68,7 +73,8 @@ func registerMeRoutes(mux *http.ServeMux, d Deps) {
 			for i, p := range perms {
 				permStrs[i] = string(p)
 			}
-			orgs = append(orgs, meOrg{Slug: slug, Name: name, Role: role, Perms: permStrs})
+			isPortal := role == string(auth.Tenant) || role == string(auth.Client)
+			orgs = append(orgs, meOrg{Slug: slug, Name: name, Role: role, Perms: permStrs, Portal: isPortal})
 		}
 		if err := rows.Err(); err != nil {
 			slog.Error("iterating current user's orgs failed", "error", err)

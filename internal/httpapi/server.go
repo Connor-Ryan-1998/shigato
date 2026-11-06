@@ -1,21 +1,31 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"html"
+	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
 	"shigoto/internal/billing"
 	"shigoto/internal/config"
+	"shigoto/internal/core"
 	"shigoto/internal/mail"
 	"shigoto/internal/module"
 	"shigoto/internal/payments"
 	"shigoto/internal/payments/stripe"
+	"shigoto/internal/portal"
 	"shigoto/internal/property"
 	"shigoto/internal/recon"
 	"shigoto/internal/reports"
@@ -127,6 +137,14 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", d.Auth.LogoutHandler)
 	mux.HandleFunc("GET /api/v1/auth/oidc/start", d.Auth.OIDCStartHandler)
 	mux.HandleFunc("GET /api/v1/auth/oidc/callback", d.Auth.OIDCCallbackHandler)
+	mux.HandleFunc("POST /api/v1/auth/magic", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		requestMagicLink(w, r, d)
+	})
+	mux.HandleFunc("POST /api/v1/auth/magic/verify", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		verifyMagicLink(w, r, d)
+	})
 
 	registerCoreRoutes(mux, d)
 	registerSettingsRoutes(mux, d)
@@ -134,8 +152,13 @@ func New(d Deps) http.Handler {
 	registerMeRoutes(mux, d)
 	registerDashboardRoutes(mux, d)
 	registerMemberRoutes(mux, d)
+	mux.Handle("POST /api/v1/orgs/{org}/contacts/{id}/portal-invite",
+		d.Auth.RequireOrg(auth.PermContactsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			createPortalInvite(w, r, d)
+		})))
 
 	md := module.Deps{Pool: d.Pool, Auth: d.Auth, Cfg: d.Cfg, Billing: d.Billing}
+	portal.RegisterRoutes(mux, md)
 	// Reports are core: always on, never gated by d.Cfg.Modules.
 	reports.RegisterRoutes(mux, md)
 	var enabled []string
@@ -182,4 +205,224 @@ func routeWebUI(mux *http.ServeMux) http.Handler {
 			ui.ServeHTTP(w, r)
 		}
 	})
+}
+
+// --- magic-link sign-in ---
+
+// writeTooManyRequests writes the shared 429 body and a whole-seconds,
+// rounded-up Retry-After header - the same shape internal/auth's own
+// writeTooManyRequests uses for login rate limiting, duplicated here
+// because that one is unexported and specific to package auth's own JSON
+// error helper.
+func writeTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(math.Ceil(retryAfter.Seconds()))
+	if seconds < 0 {
+		seconds = 0
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
+}
+
+// sendMagicLinkEmail sends link to email, if d.Mailer is configured, and
+// reports whether it actually went out. requestMagicLink never surfaces
+// this result to the caller (the response is always 202 {}, per
+// global-constraints.md's no-enumeration rule); createPortalInvite does
+// surface it, the same way sendInviteEmail's result feeds createInvite's
+// response.
+func sendMagicLinkEmail(ctx context.Context, d Deps, email, link string) bool {
+	if d.Mailer == nil {
+		return false
+	}
+	safeLink := html.EscapeString(link)
+	msg := mail.Message{
+		To:      email,
+		Subject: "Sign in to shigoto",
+		Text:    fmt.Sprintf("Use this link to sign in to shigoto. It expires in 15 minutes: %s", link),
+		HTML:    fmt.Sprintf(`<p>Use this link to sign in to shigoto. It expires in 15 minutes.</p><p><a href="%s">Sign in</a></p>`, safeLink),
+	}
+	if err := d.Mailer.Send(ctx, msg); err != nil {
+		slog.Error("sending magic link email failed", "error", err)
+		return false
+	}
+	return true
+}
+
+// requestMagicLink handles POST /api/v1/auth/magic with body {email}.
+// Ruling 58: with no mailer configured, this always 422s ("email is not
+// configured") regardless of the email given - a config-level failure, not
+// something that could leak whether an account exists. Otherwise it always
+// responds 202 {}, whether or not the email is known, belongs to a staff-
+// only user, or is rate limited into silence: global-constraints.md's
+// no-enumeration rule extends to every one of those cases being
+// indistinguishable from the outside.
+func requestMagicLink(w http.ResponseWriter, r *http.Request, d Deps) {
+	if d.Mailer == nil {
+		writeError(w, http.StatusUnprocessableEntity, "email is not configured")
+		return
+	}
+
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	email := strings.TrimSpace(body.Email)
+
+	// Checked (and reserved) before the lookup: every request counts
+	// towards the limit, eligible or not (global-constraints.md "Rate
+	// limits"), and a rate-limited request still gets the same 202 {} as
+	// any other - it's simply never sent.
+	if ok, retryAfter := d.Auth.AllowMagicRequest(email); !ok {
+		writeTooManyRequests(w, retryAfter)
+		return
+	}
+
+	token, err := auth.RequestMagicLink(r.Context(), d.Pool, email)
+	if err != nil {
+		slog.Error("requesting magic link failed", "error", err)
+		writeJSON(w, http.StatusAccepted, map[string]any{})
+		return
+	}
+	if token != "" {
+		link := strings.TrimRight(d.Cfg.BaseURL, "/") + "/auth/magic?token=" + token
+		sendMagicLinkEmail(r.Context(), d, email, link)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{})
+}
+
+// verifyMagicLink handles POST /api/v1/auth/magic/verify with body {token}:
+// the SPA's own /auth/magic?token=... page posts here. On success it sets
+// the session cookie (via auth.Auth.VerifyMagicLink) and tells the SPA
+// where to go next.
+func verifyMagicLink(w http.ResponseWriter, r *http.Request, d Deps) {
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	err := d.Auth.VerifyMagicLink(r.Context(), w, body.Token)
+	if errors.Is(err, auth.ErrMagicLinkInvalid) {
+		writeError(w, http.StatusGone, err.Error())
+		return
+	}
+	if err != nil {
+		slog.Error("verifying magic link failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"redirect": "/portal"})
+}
+
+// --- portal invite ---
+
+// errPortalContactConflict is the public 409 for inviting a contact to the
+// portal when the matching user (found or created by email) already holds a
+// membership in this org for a *different* contact, or a staff role (which
+// always has a nil contact_id, so it can never match contact.ID either).
+var errPortalContactConflict = &core.PublicError{
+	Err: core.ErrInvalidState,
+	Msg: "this email already belongs to a different member of this organisation",
+}
+
+// createPortalInvite handles POST
+// /api/v1/orgs/{org}/contacts/{id}/portal-invite: it finds or creates a
+// (passwordless) user account for the contact's email, gives it a
+// tenant/client membership tied to this contact, and emails a magic sign-in
+// link. Re-inviting the same already-portal-linked contact is idempotent
+// (200, link resent); a conflicting existing membership (a different
+// contact, or any staff role) is a 409.
+func createPortalInvite(w http.ResponseWriter, r *http.Request, d Deps) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	p := auth.From(r.Context())
+	contact, err := core.GetContact(r.Context(), d.Pool, p.OrgID, id)
+	if err != nil {
+		writeCoreError(w, err)
+		return
+	}
+	if contact.Kind != "tenant" && contact.Kind != "client" {
+		writeError(w, http.StatusUnprocessableEntity, "contact must be a tenant or client")
+		return
+	}
+	if contact.Email == "" {
+		writeError(w, http.StatusUnprocessableEntity, "contact has no email")
+		return
+	}
+
+	var userID int64
+	err = runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var newUser bool
+		err := tx.QueryRow(r.Context(), "SELECT id FROM users WHERE email = $1", contact.Email).Scan(&userID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			if err := tx.QueryRow(r.Context(),
+				"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, NULL) RETURNING id",
+				contact.Email, contact.Name,
+			).Scan(&userID); err != nil {
+				return err
+			}
+			newUser = true
+		case err != nil:
+			return err
+		}
+
+		var existingRole string
+		var existingContactID *int64
+		err = tx.QueryRow(r.Context(),
+			"SELECT role, contact_id FROM memberships WHERE org_id = $1 AND user_id = $2",
+			p.OrgID, userID,
+		).Scan(&existingRole, &existingContactID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			if _, err := tx.Exec(r.Context(),
+				"INSERT INTO memberships (user_id, org_id, role, contact_id) VALUES ($1, $2, $3, $4)",
+				userID, p.OrgID, contact.Kind, contact.ID,
+			); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case existingContactID == nil || *existingContactID != contact.ID:
+			// A different contact, or a staff role (always nil
+			// contact_id): never silently relinked to this contact.
+			return errPortalContactConflict
+		}
+		// Else: same contact already a member - idempotent, fall through
+		// to resend the link.
+
+		if newUser {
+			if err := core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "user", userID, "create", map[string]string{"email": contact.Email}); err != nil {
+				return err
+			}
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "membership", userID, "portal_invite", map[string]any{"contact_id": contact.ID})
+	})
+	if err != nil {
+		writeCoreError(w, err)
+		return
+	}
+
+	token, err := auth.IssueMagicLinkForUser(r.Context(), d.Pool, userID)
+	if err != nil {
+		slog.Error("issuing portal magic link failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	link := strings.TrimRight(d.Cfg.BaseURL, "/") + "/auth/magic?token=" + token
+	emailed := sendMagicLinkEmail(r.Context(), d, contact.Email, link)
+
+	resp := map[string]any{"emailed": emailed}
+	if !emailed {
+		resp["link"] = link
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

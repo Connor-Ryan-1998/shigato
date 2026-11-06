@@ -112,6 +112,9 @@ func (j Jobs) Tick(ctx context.Context, now time.Time) error {
 	if err := auth.PruneOIDCStates(ctx, j.Pool, now); err != nil {
 		slog.Error("pruning OIDC states failed", "error", err)
 	}
+	if err := auth.PruneMagicLinks(ctx, j.Pool, now); err != nil {
+		slog.Error("pruning magic links failed", "error", err)
+	}
 
 	return nil
 }

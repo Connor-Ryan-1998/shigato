@@ -244,6 +244,59 @@ func (a *Auth) RequireOrg(p Perm) func(http.Handler) http.Handler {
 	}
 }
 
+// RequirePortal returns middleware for the contact-scoped portal API: a
+// session is still required (401, as RequireOrg), but unlike RequireOrg it
+// requires the membership's role to be tenant or client rather than a
+// permission - any other case (no membership, or a staff role) is 404, not
+// 403, so a portal route never reveals that a staff-only org or membership
+// exists (global-constraints.md "Portal isolation"). The leases route's
+// tenant-only restriction isn't checked here: a client gets a 404 there
+// too, which that handler enforces itself from the stored Principal.
+func (a *Auth) RequirePortal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(sessionCookieName)
+		if err != nil {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		ctx := r.Context()
+		userID, err := userIDForToken(ctx, a.pool, c.Value)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if err != nil {
+			slog.Error("resolving session failed", "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		m, err := membershipFor(ctx, a.pool, userID, r.PathValue("org"))
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		if err != nil {
+			slog.Error("resolving membership failed", "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if m.Role != Tenant && m.Role != Client {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+
+		principal := Principal{
+			UserID:    userID,
+			OrgID:     m.OrgID,
+			Role:      m.Role,
+			ContactID: m.ContactID,
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, principalKey{}, principal)))
+	})
+}
+
 type userIDKey struct{}
 
 // UserIDFrom reads the user ID that RequireUser stored in ctx.
