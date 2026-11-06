@@ -179,59 +179,71 @@ func (s csvSource) Lines(r io.Reader) ([]Line, error) {
 // arithmetic only (no float parsing, so there's no rounding error to
 // worry about). A blank cell is 0. Accepted forms: "1234.56",
 // "1,234.56", "-12.30", "(12.30)" (parentheses mean negative), "+5.00",
-// "$12.30", with at most two decimal places.
+// "$12.30", "-$12.30" and "$-12.30" (one sign, before or after the $).
+// After those are stripped the integer part must be 1-15 ASCII digits and
+// the fraction 0-2 ASCII digits, so a stray sign inside the number
+// ("1.-5", "1-2") or a value too large for cents is rejected.
 func parseAmountCents(raw string) (core.Cents, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return 0, nil
 	}
+	invalid := fmt.Errorf("%w: invalid amount %q", core.ErrInvalidInput, raw)
 
 	neg := false
 	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
 		neg = true
 		s = s[1 : len(s)-1]
 	}
-	switch {
-	case strings.HasPrefix(s, "+"):
-		s = s[1:]
-	case strings.HasPrefix(s, "-"):
-		neg = !neg
-		s = s[1:]
-	}
-	s = strings.TrimPrefix(s, "$")
-	s = strings.ReplaceAll(s, ",", "")
-	if s == "" {
-		return 0, fmt.Errorf("%w: empty amount", core.ErrInvalidInput)
-	}
-
-	intPart, fracPart := s, ""
-	if idx := strings.IndexByte(s, '.'); idx >= 0 {
-		intPart, fracPart = s[:idx], s[idx+1:]
-		if len(fracPart) > 2 {
-			return 0, fmt.Errorf("%w: amount %q has more than two decimal places", core.ErrInvalidInput, raw)
+	signed := false
+	takeSign := func() {
+		if signed || s == "" {
+			return
 		}
+		switch s[0] {
+		case '-':
+			neg = !neg
+		case '+':
+		default:
+			return
+		}
+		signed = true
+		s = s[1:]
 	}
-	if intPart == "" {
-		intPart = "0"
+	takeSign()
+	s = strings.TrimPrefix(s, "$")
+	takeSign()
+	s = strings.ReplaceAll(s, ",", "")
+
+	intPart, fracPart, _ := strings.Cut(s, ".")
+	if len(fracPart) > 2 {
+		return 0, fmt.Errorf("%w: amount %q has more than two decimal places", core.ErrInvalidInput, raw)
+	}
+	if len(intPart) < 1 || len(intPart) > 15 || !allDigits(intPart) || !allDigits(fracPart) {
+		return 0, invalid
 	}
 	for len(fracPart) < 2 {
 		fracPart += "0"
 	}
 
-	iv, err := strconv.ParseInt(intPart, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%w: invalid amount %q", core.ErrInvalidInput, raw)
-	}
-	fv, err := strconv.ParseInt(fracPart, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%w: invalid amount %q", core.ErrInvalidInput, raw)
-	}
-
+	// Both parts are bounded digit strings, so neither parse can fail.
+	iv, _ := strconv.ParseInt(intPart, 10, 64)
+	fv, _ := strconv.ParseInt(fracPart, 10, 64)
 	cents := iv*100 + fv
 	if neg {
 		cents = -cents
 	}
 	return core.Cents(cents), nil
+}
+
+// allDigits reports whether s is made only of ASCII digits (true for "").
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // DedupeKeys returns one sha256 dedupe key per line in lines, in order.

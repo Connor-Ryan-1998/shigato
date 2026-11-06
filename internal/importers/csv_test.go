@@ -133,6 +133,13 @@ func TestAmountFormats(t *testing.T) {
 		{"(12.30)", -1230},
 		{"+5.00", 500},
 		{"$12.30", 1230},
+		{"$-12.30", -1230},
+		{"-$12.30", -1230},
+		{"+$5.00", 500},
+		{"$+5.00", 500},
+		{"($12.30)", -1230},
+		{"5.", 500},
+		{"999999999999999.99", 99999999999999999},
 		{"", 0},
 	}
 	amountCol := 1
@@ -161,6 +168,26 @@ func TestAmountFormats(t *testing.T) {
 			}
 			if lines[0].Amount != tc.want {
 				t.Fatalf("Amount = %d, want %d", lines[0].Amount, tc.want)
+			}
+		})
+	}
+}
+
+// TestAmountRejectsMalformed covers signs or other non-digits inside the
+// number, doubled signs, and integer parts too long to fit safely in cents.
+func TestAmountRejectsMalformed(t *testing.T) {
+	amountCol := 1
+	m := importers.CSVMapping{
+		DateColumn: 0, DateFormat: "2006-01-02", AmountColumn: &amountCol, DescriptionColumn: 2,
+	}
+	for _, in := range []string{
+		"1.-5", "--5", "1-2", "-", "$", "$-", "-$-5", "$$5", "1.2.3", "1e5", " 1 2", "0x10",
+		"1234567890123456", "12.+5", "(-5)x", ".", "-.", "12.3a", "+-5", "5-", ".5",
+	} {
+		t.Run(in, func(t *testing.T) {
+			csv := `2026-03-01,"` + in + `",desc` + "\n"
+			if _, err := importers.NewCSV(m).Lines(strings.NewReader(csv)); !errors.Is(err, core.ErrInvalidInput) {
+				t.Fatalf("err = %v, want ErrInvalidInput", err)
 			}
 		})
 	}
