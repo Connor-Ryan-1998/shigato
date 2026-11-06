@@ -11,12 +11,6 @@ body {
 	min-height: 100%;
 }
 
-html {
-	/* Below 640px, children (e.g. a drawer's off-canvas panel) must never
-	   force the page itself to scroll sideways. */
-	overflow-x: hidden;
-}
-
 body {
 	background: var(--bg);
 	color: var(--text);

@@ -63,7 +63,7 @@
 	/* Below 640px a row becomes a card: each cell stacks with its column
 	   label in front of it, rather than scrolling a cramped table
 	   sideways. */
-	@media (max-width: 640px) {
+	@media (max-width: 639px) {
 		thead {
 			display: none;
 		}

@@ -7,8 +7,8 @@ shipped as one Go binary plus Postgres. See `docs/design.md` for the design.
 
 Docker plus [go-task](https://taskfile.dev), with Go on the host. Node 24 is
 only needed to build or develop the web UI (`task web:*`); `go build`/`go
-test` work without it against the committed placeholder in
-`internal/webui/dist`.
+test` work without it (`internal/webui` serves a built-in placeholder page
+when `internal/webui/dist` has no build in it).
 
 On a machine where Docker build traffic is TLS-intercepted (a corporate
 laptop CA), pass it as a build secret:
@@ -64,10 +64,11 @@ origin is Vite's port, not the backend's.
 In production the SPA is built (`task web:build`) into
 `internal/webui/dist` and embedded in the Go binary
 (`internal/webui/webui.go`), served for any path that isn't `/api/`,
-`/webhooks/` or `/healthz`. `go build`/`go test` don't need Node: a
-placeholder `internal/webui/dist/index.html` is committed so the embed
-always has something to build with; `task web:build` overwrites it with the
-real build (harmless locally - that file is otherwise gitignored).
+`/webhooks/` or `/healthz`. `go build`/`go test` don't need Node: only
+`internal/webui/dist/.gitkeep` is committed (everything else under `dist`
+is gitignored, since `task web:build` empties the directory before writing
+to it), and `webui.Handler()` serves a built-in "Web UI not built" page
+when `index.html` is missing.
 
 ## Configuration
 

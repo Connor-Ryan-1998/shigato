@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { session } from '../../lib/session.svelte';
+	import { theme } from '../../lib/theme.svelte';
 	import { visibleNav } from '../../lib/modules/registry';
 	import { core } from '../../lib/modules/core/manifest';
 	import { property } from '../../lib/modules/property/manifest';
@@ -20,58 +21,37 @@
 
 	let drawerOpen = $state(false);
 
-	type Theme = 'system' | 'light' | 'dark';
-	const THEME_KEY = 'shigoto-theme';
-
-	function readStoredTheme(): Theme {
-		try {
-			const saved = localStorage.getItem(THEME_KEY);
-			if (saved === 'light' || saved === 'dark') return saved;
-		} catch {
-			// Private browsing or blocked storage: fall back to system.
-		}
-		return 'system';
-	}
-
-	let theme = $state<Theme>('system');
-
+	// Closing on every navigation (not just an explicit link click) also
+	// covers browser back/forward and the org switcher, which navigates
+	// without going through a nav link at all.
 	$effect(() => {
-		theme = readStoredTheme();
+		page.url.pathname;
+		drawerOpen = false;
 	});
 
-	$effect(() => {
-		if (theme === 'system') {
-			document.documentElement.removeAttribute('data-theme');
-		} else {
-			document.documentElement.setAttribute('data-theme', theme);
-		}
-		try {
-			if (theme === 'system') {
-				localStorage.removeItem(THEME_KEY);
-			} else {
-				localStorage.setItem(THEME_KEY, theme);
-			}
-		} catch {
-			// Private browsing or blocked storage: the toggle still works
-			// for this page load, it just won't persist.
-		}
-	});
-
-	function cycleTheme() {
-		theme = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system';
-	}
+	const themeLabel = $derived(
+		theme.current === 'system' ? 'Auto' : theme.current === 'light' ? 'Light' : 'Dark'
+	);
 
 	const nav = $derived(
 		session.currentOrg ? visibleNav(manifests, session.modules, session.currentOrg.perms) : []
 	);
 
 	async function logout() {
-		await api('POST', '/api/v1/auth/logout');
-		goto('/login');
+		try {
+			await api('POST', '/api/v1/auth/logout');
+		} catch {
+			// The session cookie may already be gone (expired, or cleared by
+			// a previous attempt); either way the user wants out, so clear
+			// client state and leave regardless of whether the server call
+			// itself succeeded.
+		} finally {
+			session.clear();
+			goto('/login');
+		}
 	}
 
 	function switchOrg(slug: string) {
-		drawerOpen = false;
 		goto(`/${slug}`);
 	}
 </script>
@@ -84,7 +64,9 @@
 				<ul>
 					{#each group.items as item (item.href)}
 						<li>
-							<a href={`/${page.params.org}/${item.href}`}>{item.label}</a>
+							<a href={`/${page.params.org}/${item.href}`} onclick={() => (drawerOpen = false)}
+							>{item.label}</a
+						>
 						</li>
 					{/each}
 				</ul>
@@ -123,10 +105,10 @@
 			<button
 				type="button"
 				class="icon-button"
-				onclick={cycleTheme}
-				aria-label={`Theme: ${theme} (click to change)`}
+				onclick={() => theme.cycle()}
+				aria-label={`Theme: ${themeLabel} (click to change)`}
 			>
-				{theme === 'system' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
+				{themeLabel}
 			</button>
 			<div class="user-menu">
 				<span>{session.me?.user.name}</span>
@@ -160,8 +142,9 @@
 	.topbar {
 		grid-area: topbar;
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
-		gap: var(--space-4);
+		gap: var(--space-2) var(--space-4);
 		padding: var(--space-3) var(--space-4);
 		background: var(--surface);
 		border-bottom: 1px solid var(--border);
@@ -174,24 +157,33 @@
 		border-radius: var(--radius-md);
 		padding: var(--space-2) var(--space-3);
 		cursor: pointer;
+		flex-shrink: 0;
 	}
 
 	.org-switcher {
 		display: flex;
 		align-items: center;
 		gap: var(--space-2);
+		min-width: 0;
 	}
 
 	.org-switcher label {
 		font-size: var(--text-sm);
 		color: var(--text-muted);
+		white-space: nowrap;
+	}
+
+	.org-switcher select {
+		min-width: 0;
+		max-width: 10rem;
 	}
 
 	.topbar-actions {
 		margin-left: auto;
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
+		gap: var(--space-2);
+		flex-wrap: wrap;
 	}
 
 	.icon-button,
@@ -207,6 +199,13 @@
 		display: flex;
 		align-items: center;
 		gap: var(--space-2);
+	}
+
+	.user-menu span {
+		max-width: 8rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.sidebar {
@@ -256,7 +255,7 @@
 		min-width: 0;
 	}
 
-	@media (max-width: 768px) {
+	@media (max-width: 767px) {
 		.shell {
 			grid-template-columns: 1fr;
 			grid-template-areas: 'topbar' 'main';
@@ -266,6 +265,12 @@
 		}
 		.menu-button {
 			display: inline-flex;
+		}
+	}
+
+	@media (max-width: 374px) {
+		.user-menu span {
+			display: none;
 		}
 	}
 </style>

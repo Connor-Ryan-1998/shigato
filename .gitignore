@@ -3,12 +3,14 @@
 .env
 .superpowers/
 
-# internal/webui/dist is `task web:build`'s output. The committed
-# index.html is a placeholder so `go build`/`go test` work without node;
-# `task web:build` overwrites it with the real build (git then shows it as
-# modified, not deleted - that's expected after a local build).
+# internal/webui/dist is `task web:build`'s output. Only .gitkeep is
+# tracked, so a fresh checkout has an empty dist/ (go:embed still needs the
+# directory to exist) and `go build`/`go test` work without Node: webui.go
+# serves a built-in "not built" page when index.html is absent.
+# `task web:build` empties this directory (adapter-static's own behaviour)
+# and recreates .gitkeep afterwards, so `git status` stays clean.
 /internal/webui/dist/*
-!/internal/webui/dist/index.html
+!/internal/webui/dist/.gitkeep
 
 /web/node_modules/
 /web/.svelte-kit/

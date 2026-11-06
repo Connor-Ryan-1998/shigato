@@ -11,6 +11,16 @@
 	let error = $state('');
 	let submitting = $state(false);
 
+	// Only a same-site, absolute path is a safe redirect target: a bare
+	// "//evil.com" is parsed by browsers as a protocol-relative URL (an
+	// open redirect), and anything not starting with "/" could be an
+	// absolute URL to another origin entirely.
+	function safeNext(raw: string | null): string | null {
+		if (!raw || raw === '/login') return null;
+		if (!raw.startsWith('/') || raw.startsWith('//')) return null;
+		return raw;
+	}
+
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
 		error = '';
@@ -24,13 +34,13 @@
 			session.setMe(me);
 			session.setModules(meta.modules);
 
-			const next = page.url.searchParams.get('next');
-			if (next && next !== '/login') {
+			const next = safeNext(page.url.searchParams.get('next'));
+			if (next) {
 				goto(next);
 			} else if (me.orgs[0]) {
 				goto(`/${me.orgs[0].slug}`);
 			} else {
-				goto('/login');
+				goto('/');
 			}
 		} catch (err) {
 			error = err instanceof ApiError ? err.message : 'Something went wrong.';

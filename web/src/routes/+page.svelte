@@ -3,11 +3,14 @@
 	import { session } from '../lib/session.svelte';
 
 	$effect(() => {
-		if (session.me) {
-			const first = session.me.orgs[0];
-			goto(first ? `/${first.slug}` : '/login');
+		if (session.me && session.me.orgs.length > 0) {
+			goto(`/${session.me.orgs[0].slug}`);
 		}
 	});
 </script>
 
-<p>Loading…</p>
+{#if session.me && session.me.orgs.length === 0}
+	<p>You don't have access to any organisation yet.</p>
+{:else}
+	<p>Loading…</p>
+{/if}

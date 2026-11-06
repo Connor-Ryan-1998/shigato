@@ -158,6 +158,9 @@ func TestKnownAPIPathWrongMethodIsJSON405(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", ct)
 	}
+	if allow := rec.Header().Get("Allow"); allow == "" {
+		t.Fatal("Allow header is empty, want the methods GET /api/v1/meta supports")
+	}
 	var body struct {
 		Error string `json:"error"`
 	}
@@ -166,6 +169,46 @@ func TestKnownAPIPathWrongMethodIsJSON405(t *testing.T) {
 	}
 	if body.Error == "" {
 		t.Fatal("error message is empty")
+	}
+}
+
+// TestMatchedAPIRouteStreamsThrough checks jsonAPIFallback never buffers a
+// matched route's response: a route whose handler sets a custom
+// Content-Type and writes a body in several chunks must come back with
+// that exact Content-Type and the exact bytes written, byte for byte.
+func TestMatchedAPIRouteStreamsThrough(t *testing.T) {
+	saved := modules
+	defer func() { modules = saved }()
+
+	const chunk1, chunk2 = "id,amount\n", "1,2500\n"
+	modules = []module.Module{
+		{
+			Name: "property",
+			Routes: func(mux *http.ServeMux, d module.Deps) {
+				mux.HandleFunc("GET /api/v1/property/export.csv", func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "text/csv")
+					_, _ = w.Write([]byte(chunk1))
+					_, _ = w.Write([]byte(chunk2))
+				})
+			},
+		},
+	}
+
+	d := Deps{Cfg: config.Config{Modules: map[string]bool{"property": true}}}
+	handler := New(d)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/property/export.csv", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/csv" {
+		t.Fatalf("Content-Type = %q, want text/csv", ct)
+	}
+	if got, want := rec.Body.String(), chunk1+chunk2; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
 	}
 }
 

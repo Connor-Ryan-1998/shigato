@@ -43,6 +43,10 @@ tasks:
     dir: web
     cmds:
       - npm run build
+      # adapter-static empties the output dir before writing to it, which
+      # would also delete the tracked .gitkeep; recreate it so `git status`
+      # stays clean after a local build.
+      - touch ../internal/webui/dist/.gitkeep
 
   web:test:
     desc: Type-check and unit-test the web app.

@@ -15,6 +15,11 @@
 		onclose?: () => void;
 	} = $props();
 
+	// Unique per instance, so two Dialogs on the same page never collide on
+	// id="dialog-title".
+	const uid = $props.id();
+	const titleId = `dialog-title-${uid}`;
+
 	let dialogEl: HTMLDialogElement | undefined;
 
 	$effect(() => {
@@ -32,8 +37,8 @@
 	}
 </script>
 
-<dialog bind:this={dialogEl} onclose={handleClose} aria-labelledby="dialog-title">
-	<h2 id="dialog-title">{title}</h2>
+<dialog bind:this={dialogEl} onclose={handleClose} aria-labelledby={titleId}>
+	<h2 id={titleId}>{title}</h2>
 	{@render children()}
 </dialog>
 

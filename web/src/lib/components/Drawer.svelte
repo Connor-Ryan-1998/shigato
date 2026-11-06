@@ -28,10 +28,28 @@
 	function handleClose() {
 		open = false;
 	}
+
+	// A native <dialog>'s backdrop isn't a real DOM node, so a click there
+	// can't get its own listener; the browser instead dispatches the click
+	// at the <dialog> element itself when it lands outside the dialog's own
+	// box (the drawer panel), which is what this checks.
+	function handleBackdropClick(e: MouseEvent) {
+		if (e.target === dialogEl) {
+			open = false;
+		}
+	}
 </script>
 
-<dialog bind:this={dialogEl} onclose={handleClose} aria-label={label} class="drawer">
-	{@render children()}
+<dialog
+	bind:this={dialogEl}
+	onclose={handleClose}
+	onclick={handleBackdropClick}
+	aria-label={label}
+	class="drawer"
+>
+	<nav aria-label="Main">
+		{@render children()}
+	</nav>
 </dialog>
 
 <style>
