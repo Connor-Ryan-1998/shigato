@@ -29,6 +29,15 @@ const stripeFeesCategoryName = "Stripe fees"
 // provider predicted.
 const payoutArrivalWindowDays = 5
 
+// dollars renders c as "$d.dd" (or "-$d.dd") for client-facing messages.
+func dollars(c core.Cents) string {
+	sign := ""
+	if c < 0 {
+		sign, c = "-", -c
+	}
+	return fmt.Sprintf("%s$%d.%02d", sign, int64(c)/100, int64(c)%100)
+}
+
 // PayoutResult summarises a successful MatchPayout.
 type PayoutResult struct {
 	PaymentsLinked int
@@ -95,16 +104,17 @@ func MatchPayout(ctx context.Context, pool *pgxpool.Pool, b *billing.Service, or
 			return err
 		}
 		if line.Status != "unmatched" {
-			return core.ErrInvalidState
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("bank line is already %s", line.Status)}
 		}
 		if line.Amount <= 0 {
 			return fmt.Errorf("%w: bank line is not a credit", core.ErrInvalidInput)
 		}
 		if payout.Amount != line.Amount {
-			return fmt.Errorf("%w: payout amount does not match the bank line", core.ErrInvalidState)
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout amount %s does not match the bank line amount %s", dollars(payout.Amount), dollars(line.Amount))}
 		}
 		if daysBetween(payout.ArrivalOn, line.PostedOn) > payoutArrivalWindowDays {
-			return fmt.Errorf("%w: payout arrival date is too far from the bank line's posted date", core.ErrInvalidState)
+			return &core.PublicError{Err: core.ErrInvalidState, Msg: fmt.Sprintf("payout arrived %s, more than %d days from the bank line's date %s",
+				payout.ArrivalOn.Format("2006-01-02"), payoutArrivalWindowDays, line.PostedOn.Format("2006-01-02"))}
 		}
 
 		// Guards both a genuine retry (the same payout ref matched to a

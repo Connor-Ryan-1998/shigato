@@ -179,7 +179,7 @@ func MatchExpense(ctx context.Context, tx core.Querier, orgID, lineID, expenseID
 		return err
 	}
 	if expBankLineID != nil {
-		return fmt.Errorf("%w: expense is already linked to a bank line", core.ErrInvalidState)
+		return &core.PublicError{Err: core.ErrInvalidState, Msg: "expense is already linked to a bank line"}
 	}
 
 	// A "Stripe fees" expense MatchPayout created is linked via
@@ -192,7 +192,7 @@ func MatchExpense(ctx context.Context, tx core.Querier, orgID, lineID, expenseID
 		return err
 	}
 	if isFeeExpense {
-		return fmt.Errorf("%w: expense is a Stripe payout fee; it can't be matched directly", core.ErrInvalidState)
+		return &core.PublicError{Err: core.ErrInvalidState, Msg: "expense is a Stripe payout fee; it can't be matched directly"}
 	}
 
 	exp, err := GetExpense(ctx, tx, orgID, expenseID)
@@ -465,7 +465,7 @@ func Suggest(ctx context.Context, q core.Querier, b *billing.Service, orgID int6
 			}
 			score := 100
 			reason := "payment reference matches"
-			if !strings.Contains(strings.ToLower(line.Description), strings.ToLower(ref)) {
+			if !containsReference(line.Description, ref) {
 				score = 50
 				reason = "amount matches"
 				if issueDate != nil {
@@ -493,7 +493,9 @@ func Suggest(ctx context.Context, q core.Querier, b *billing.Service, orgID int6
 				slog.Error("listing payouts for suggestions failed", "error", err)
 			} else {
 				for _, p := range payouts {
-					if p.Amount != line.Amount {
+					// Only a paid payout can be matched (MatchPayout
+					// rejects anything else), so don't offer the rest.
+					if p.Status != "paid" || p.Amount != line.Amount {
 						continue
 					}
 					matched, err := payoutAlreadyMatched(ctx, q, orgID, p.Ref)
@@ -555,14 +557,39 @@ func Suggest(ctx context.Context, q core.Querier, b *billing.Service, orgID int6
 	return suggestions, nil
 }
 
+// alnumUpper returns s with everything but ASCII letters and digits
+// removed, upper-cased, so "inv abcd1234" and "INV-ABCD1234" compare equal.
+func alnumUpper(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r - 'a' + 'A')
+		}
+	}
+	return b.String()
+}
+
+// containsReference reports whether payment reference ref appears in bank
+// description desc, comparing alphanumerics only and ignoring case (the
+// same rule autoMatchCandidates applies in SQL).
+func containsReference(desc, ref string) bool {
+	r := alnumUpper(ref)
+	return r != "" && strings.Contains(alnumUpper(desc), r)
+}
+
 // autoMatchCandidates returns the ids of open invoices whose
-// payment_reference appears (case-insensitively) in line's description and
-// whose outstanding balance equals line's amount.
+// payment_reference appears in line's description (alphanumerics only,
+// ignoring case - see containsReference) and whose outstanding balance
+// equals line's amount.
 func autoMatchCandidates(ctx context.Context, tx core.Querier, orgID int64, line BankLine) ([]int64, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id FROM invoices i
 		WHERE org_id = $1 AND status = 'open'
-			AND position(upper(payment_reference) in upper($2)) > 0
+			AND regexp_replace(payment_reference, '[^A-Za-z0-9]', '', 'g') <> ''
+			AND position(upper(regexp_replace(payment_reference, '[^A-Za-z0-9]', '', 'g')) in upper(regexp_replace($2, '[^A-Za-z0-9]', '', 'g'))) > 0
 			AND (total - coalesce((SELECT sum(amount) FROM payments p WHERE p.org_id = i.org_id AND p.invoice_id = i.id), 0)) = $3`,
 		orgID, line.Description, int64(line.Amount),
 	)

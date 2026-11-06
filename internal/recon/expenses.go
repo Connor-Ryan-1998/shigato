@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/property"
 	"shigoto/internal/timesheets"
@@ -349,13 +350,17 @@ func ListExpenses(ctx context.Context, q core.Querier, orgID int64, filter Expen
 	return expenses, nil
 }
 
-// DeleteExpense deletes orgID's expense id (cascading to its lines). It
-// returns core.ErrNotFound if no such expense exists in that org, or
-// core.ErrInvalidState (409) if the expense is linked to a bank line - it
-// must be unreconciled first.
+// DeleteExpense deletes orgID's expense id (cascading to its lines) and
+// audits what was deleted, with billing.ActorFrom(ctx) as the actor. The
+// expense row is locked FOR UPDATE first, so a concurrent MatchExpense
+// either links it before this sees it (409) or finds it gone (404) - never
+// a deleted expense behind a "matched" line. It returns core.ErrNotFound
+// if no such expense exists in that org, or core.ErrInvalidState (409,
+// with a core.PublicError message) if the expense is linked to a bank
+// line or is a payout's Stripe fee expense.
 func DeleteExpense(ctx context.Context, q core.Querier, orgID, id int64) error {
 	var bankLineID *int64
-	err := q.QueryRow(ctx, `SELECT bank_line_id FROM expenses WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&bankLineID)
+	err := q.QueryRow(ctx, `SELECT bank_line_id FROM expenses WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&bankLineID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.ErrNotFound
 	}
@@ -363,8 +368,32 @@ func DeleteExpense(ctx context.Context, q core.Querier, orgID, id int64) error {
 		return err
 	}
 	if bankLineID != nil {
-		return fmt.Errorf("%w: expense is linked to a bank line", core.ErrInvalidState)
+		return &core.PublicError{Err: core.ErrInvalidState, Msg: "expense is linked to a bank line; unmatch the line first"}
 	}
-	_, err = q.Exec(ctx, `DELETE FROM expenses WHERE org_id = $1 AND id = $2`, orgID, id)
-	return err
+	var isFeeExpense bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payouts WHERE org_id = $1 AND fee_expense_id = $2)`, orgID, id).Scan(&isFeeExpense); err != nil {
+		return err
+	}
+	if isFeeExpense {
+		return &core.PublicError{Err: core.ErrInvalidState, Msg: "this is a Stripe payout fee; unmatch the payout instead"}
+	}
+
+	exp, err := GetExpense(ctx, q, orgID, id)
+	if err != nil {
+		return err
+	}
+	if _, err := q.Exec(ctx, `DELETE FROM expenses WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
+		return err
+	}
+
+	lines := make([]map[string]any, len(exp.Lines))
+	for i, l := range exp.Lines {
+		lines[i] = map[string]any{
+			"category_id": l.CategoryID, "amount": int64(l.Amount),
+			"gst_code": string(l.GSTCode), "gst_amount": int64(l.GSTAmount),
+		}
+	}
+	return core.Audit(ctx, q, orgID, billing.ActorFrom(ctx), "expense", id, "delete", map[string]any{
+		"spent_on": exp.SpentOn.Format("2006-01-02"), "description": exp.Description, "lines": lines,
+	})
 }

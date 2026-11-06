@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
@@ -21,6 +23,7 @@ import (
 	"shigoto/internal/core"
 	"shigoto/internal/db"
 	"shigoto/internal/httpapi"
+	"shigoto/internal/module"
 	"shigoto/internal/payments"
 	"shigoto/internal/recon"
 )
@@ -719,5 +722,114 @@ func TestSuggestExcludesFeeExpenseAndMatchedPayout(t *testing.T) {
 		if s.Kind == "payout" && s.Ref == "po_1" {
 			t.Fatalf("Suggest offered already-matched payout %q again", s.Ref)
 		}
+	}
+}
+
+// matchFeePayout records a $100 webhook payment and matches a payout for it
+// that carries a $1.10 fee, returning the payout's bank line and the "Stripe
+// fees" expense MatchPayout booked.
+func matchFeePayout(t *testing.T, pool *pgxpool.Pool, orgID int64) (payoutLineID, feeExpenseID int64) {
+	t.Helper()
+	ctx := context.Background()
+	contactID := createContact(t, pool, orgID)
+	testStripePayment(t, pool, orgID, contactID, 10000, mustDate(t, "2026-11-01"), "pi_fee")
+	arrival := mustDate(t, "2026-11-03")
+	payoutLineID = testBankLineID(t, pool, orgID, 10000-110, arrival, "Stripe payout")
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_fee": {Ref: "po_fee", Amount: 10000 - 110, ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_fee": {{Ref: "txn_fee", Type: "charge", PaymentRef: "pi_fee", Amount: 10000, Fee: 110}},
+		},
+	}
+	result, err := recon.MatchPayout(ctx, pool, testBillingService(pool, fake), orgID, "acme", payoutLineID, "po_fee")
+	if err != nil {
+		t.Fatalf("MatchPayout: %v", err)
+	}
+	if result.FeeExpenseID == nil {
+		t.Fatalf("FeeExpenseID = nil, want set")
+	}
+	return payoutLineID, *result.FeeExpenseID
+}
+
+// wantPublicConflict fails t unless err is a 409 core.PublicError whose
+// message contains want.
+func wantPublicConflict(t *testing.T, err error, want string) {
+	t.Helper()
+	var pub *core.PublicError
+	if !errors.Is(err, core.ErrInvalidState) || !errors.As(err, &pub) {
+		t.Fatalf("err = %v, want a core.PublicError wrapping ErrInvalidState", err)
+	}
+	if !strings.Contains(pub.Msg, want) {
+		t.Fatalf("message = %q, want it to contain %q", pub.Msg, want)
+	}
+}
+
+// TestMatchPayoutPublicConflicts covers that each explanatory 409 from
+// MatchPayout reaches the client with its reason (core.PublicError), not
+// the generic "invalid state" text.
+func TestMatchPayoutPublicConflicts(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	testStripePayment(t, pool, org.ID, contactID, 10000, mustDate(t, "2026-11-01"), "pi_1")
+	arrival := mustDate(t, "2026-11-05")
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_1": {Ref: "po_1", Amount: 10000, ArrivalOn: arrival, Status: "paid"},
+		},
+		Transactions: map[string][]payments.BalanceTxn{
+			"po_1": {{Ref: "txn_1", Type: "charge", PaymentRef: "pi_1", Amount: 10000}},
+		},
+	}
+	b := testBillingService(pool, fake)
+
+	mismatch := testBankLineID(t, pool, org.ID, 9000, arrival, "Stripe payout")
+	_, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", mismatch, "po_1")
+	wantPublicConflict(t, err, "payout amount $100.00 does not match the bank line amount $90.00")
+
+	late := testBankLineID(t, pool, org.ID, 10000, mustDate(t, "2026-11-20"), "Stripe payout")
+	_, err = recon.MatchPayout(ctx, pool, b, org.ID, "acme", late, "po_1")
+	wantPublicConflict(t, err, "more than 5 days")
+
+	ignored := testBankLineID(t, pool, org.ID, 10000, arrival, "Stripe payout")
+	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.Ignore(ctx, tx, org.ID, ignored, "other")
+	}); err != nil {
+		t.Fatalf("Ignore: %v", err)
+	}
+	_, err = recon.MatchPayout(ctx, pool, b, org.ID, "acme", ignored, "po_1")
+	wantPublicConflict(t, err, "bank line is already ignored")
+}
+
+// TestSuggestOnlyPaidPayouts covers that a payout still in transit (or
+// otherwise not "paid") is never offered as a suggestion, since
+// MatchPayout would only reject it.
+func TestSuggestOnlyPaidPayouts(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	arrival := mustDate(t, "2026-11-05")
+	lineID := testBankLineID(t, pool, org.ID, 10000, arrival, "Stripe payout")
+	fake := &payments.Fake{
+		Payouts: map[string]payments.Payout{
+			"po_paid":    {Ref: "po_paid", Amount: 10000, ArrivalOn: arrival, Status: "paid"},
+			"po_transit": {Ref: "po_transit", Amount: 10000, ArrivalOn: arrival, Status: "in_transit"},
+		},
+	}
+	suggestions, err := recon.Suggest(ctx, pool, testBillingService(pool, fake), org.ID, "acme", lineID)
+	if err != nil {
+		t.Fatalf("Suggest: %v", err)
+	}
+	var refs []string
+	for _, s := range suggestions {
+		if s.Kind == "payout" {
+			refs = append(refs, s.Ref)
+		}
+	}
+	if len(refs) != 1 || refs[0] != "po_paid" {
+		t.Fatalf("payout suggestions = %v, want [po_paid]", refs)
 	}
 }

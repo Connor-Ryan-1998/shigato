@@ -346,3 +346,25 @@ func postJSON(handler http.Handler, token, path string, body any) *httptest.Resp
 	handler.ServeHTTP(rr, req)
 	return rr
 }
+
+// TestImportRouteAuditsActor covers that a route-triggered import records
+// the uploading user as the bank_import audit entry's actor, not NULL.
+func TestImportRouteAuditsActor(t *testing.T) {
+	pool, handler, token, orgID := reconTestSetup(t)
+	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+	if rr := uploadCSV(handler, token, account.ID, []byte(fixtureCSV)); rr.Code != http.StatusOK {
+		t.Fatalf("import: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var actorID *int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT actor_user_id FROM audit_log
+		WHERE org_id = $1 AND entity = 'bank_import' AND action = 'create'`,
+		orgID,
+	).Scan(&actorID); err != nil {
+		t.Fatalf("reading audit_log: %v", err)
+	}
+	if actorID == nil {
+		t.Fatalf("audit_log actor_user_id = nil, want the uploading user's id")
+	}
+}

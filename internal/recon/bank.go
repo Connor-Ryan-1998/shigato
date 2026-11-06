@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/importers"
 )
@@ -115,7 +116,8 @@ func GetBankAccount(ctx context.Context, q core.Querier, orgID, id int64) (BankA
 // ever adds genuinely new rows; the unique constraint, not an
 // application-level check, is what makes this correct under concurrent
 // imports of the same file. The bank_imports row and an audit entry are
-// recorded in the same transaction.
+// recorded in the same transaction, with billing.ActorFrom(ctx) as the
+// actor.
 func Import(ctx context.Context, pool *pgxpool.Pool, orgID, accountID int64, file io.Reader) (ImportResult, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -175,7 +177,7 @@ func Import(ctx context.Context, pool *pgxpool.Pool, orgID, accountID int64, fil
 		return ImportResult{}, err
 	}
 
-	if err := core.Audit(ctx, tx, orgID, nil, "bank_import", importID, "create", map[string]any{
+	if err := core.Audit(ctx, tx, orgID, billing.ActorFrom(ctx), "bank_import", importID, "create", map[string]any{
 		"bank_account_id": accountID, "rows_total": result.RowsTotal, "rows_new": result.RowsNew,
 	}); err != nil {
 		return ImportResult{}, err

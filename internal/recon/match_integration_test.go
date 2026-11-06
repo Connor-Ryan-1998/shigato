@@ -9,15 +9,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/db"
+	"shigoto/internal/module"
 	"shigoto/internal/payments"
 	"shigoto/internal/recon"
 )
@@ -535,5 +538,176 @@ func TestMatchExpenseAlreadyLinked(t *testing.T) {
 	err = recon.MatchExpense(ctx, tx2, org.ID, line2, exp.ID)
 	if !errors.Is(err, core.ErrInvalidState) {
 		t.Fatalf("already-linked expense: err = %v, want ErrInvalidState", err)
+	}
+}
+
+// TestMatchExpensePublicConflicts covers that MatchExpense's two
+// explanatory 409s (expense already linked; expense is a payout fee) carry
+// their reason to the client via core.PublicError.
+func TestMatchExpensePublicConflicts(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
+	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
+		SpentOn: mustDate(t, "2026-11-09"), Description: "Plumber",
+		Lines: []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 9900}},
+	})
+	if err != nil {
+		t.Fatalf("CreateExpense: %v", err)
+	}
+	line1 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber")
+	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.MatchExpense(ctx, tx, org.ID, line1, exp.ID)
+	}); err != nil {
+		t.Fatalf("MatchExpense: %v", err)
+	}
+
+	line2 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber again")
+	err = module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.MatchExpense(ctx, tx, org.ID, line2, exp.ID)
+	})
+	wantPublicConflict(t, err, "expense is already linked to a bank line")
+
+	_, feeExpenseID := matchFeePayout(t, pool, org.ID)
+	feeLine := testBankLineID(t, pool, org.ID, -110, mustDate(t, "2026-11-03"), "Unrelated debit")
+	err = module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.MatchExpense(ctx, tx, org.ID, feeLine, feeExpenseID)
+	})
+	wantPublicConflict(t, err, "Stripe payout fee")
+}
+
+// TestReferenceMatchIgnoresPunctuationAndCase covers that Suggest and
+// AutoMatch find an invoice's payment reference (e.g. "INV-ABCD1234") in a
+// bank description that spaces, drops or lower-cases it ("inv abcd1234",
+// "INVABCD1234"), comparing alphanumerics only.
+func TestReferenceMatchIgnoresPunctuationAndCase(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	spaced := testInvoice(t, pool, org.ID, contactID, 30000)
+	testInvoice(t, pool, org.ID, contactID, 30000) // same amount, other reference
+	joined := testInvoice(t, pool, org.ID, contactID, 45000)
+
+	spacedLine := testBankLineID(t, pool, org.ID, 30000, mustDate(t, "2026-11-04"),
+		"Transfer "+strings.ToLower(strings.ReplaceAll(spaced.PaymentReference, "-", " ")))
+	testBankLineID(t, pool, org.ID, 45000, mustDate(t, "2026-11-04"),
+		"Transfer "+strings.ReplaceAll(joined.PaymentReference, "-", ""))
+
+	b := testBillingService(pool, nil)
+	suggestions, err := recon.Suggest(ctx, pool, b, org.ID, "acme", spacedLine)
+	if err != nil {
+		t.Fatalf("Suggest: %v", err)
+	}
+	if len(suggestions) == 0 || suggestions[0].ID != spaced.ID || suggestions[0].Score != 100 {
+		t.Fatalf("suggestions = %+v, want invoice %d first with score 100", suggestions, spaced.ID)
+	}
+
+	matched, err := recon.AutoMatch(ctx, pool, org.ID)
+	if err != nil {
+		t.Fatalf("AutoMatch: %v", err)
+	}
+	if matched != 2 {
+		t.Fatalf("matched = %d, want 2", matched)
+	}
+	for _, id := range []int64{spaced.ID, joined.ID} {
+		if n := countPayments(t, pool, org.ID, id); n != 1 {
+			t.Errorf("invoice %d payments = %d, want 1", id, n)
+		}
+	}
+}
+
+// TestMatchInvoiceOtherOrgInvoice404 covers that a bank line can't be
+// matched to another org's invoice: it's not found, and no payment is
+// recorded against either org.
+func TestMatchInvoiceOtherOrgInvoice404(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	other := testOrg(t, pool, "other")
+	otherInv := testInvoice(t, pool, other.ID, createContact(t, pool, other.ID), 20000)
+	lineID := testBankLineID(t, pool, org.ID, 20000, mustDate(t, "2026-11-02"), "Transfer "+otherInv.PaymentReference)
+
+	err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		_, err := recon.MatchInvoice(ctx, tx, org.ID, lineID, otherInv.ID, "bank_transfer")
+		return err
+	})
+	if !errors.Is(err, core.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if n := countPayments(t, pool, other.ID, otherInv.ID); n != 0 {
+		t.Fatalf("payments on other org's invoice = %d, want 0", n)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payments WHERE org_id = $1`, org.ID).Scan(&n); err != nil {
+		t.Fatalf("counting payments: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("payments in org = %d, want 0", n)
+	}
+	if status, _ := bankLineStatus(t, pool, lineID); status != "unmatched" {
+		t.Fatalf("line status = %s, want unmatched", status)
+	}
+}
+
+// TestUnmatchExpenseLineKeepsExpense covers that unmatching a line linked
+// to an expense unlinks the expense but keeps it.
+func TestUnmatchExpenseLineKeepsExpense(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
+	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
+		SpentOn: mustDate(t, "2026-11-09"), Description: "Plumber",
+		Lines: []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 9900}},
+	})
+	if err != nil {
+		t.Fatalf("CreateExpense: %v", err)
+	}
+	lineID := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber")
+	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.MatchExpense(ctx, tx, org.ID, lineID, exp.ID)
+	}); err != nil {
+		t.Fatalf("MatchExpense: %v", err)
+	}
+	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.Unmatch(ctx, tx, org.ID, lineID)
+	}); err != nil {
+		t.Fatalf("Unmatch: %v", err)
+	}
+
+	stored, err := recon.GetExpense(ctx, pool, org.ID, exp.ID)
+	if err != nil {
+		t.Fatalf("GetExpense after unmatch: %v", err)
+	}
+	if stored.BankLineID != nil {
+		t.Fatalf("expense bank_line_id = %d, want nil", *stored.BankLineID)
+	}
+	if status, _ := bankLineStatus(t, pool, lineID); status != "unmatched" {
+		t.Fatalf("line status = %s, want unmatched", status)
+	}
+}
+
+// TestUnmatchIgnoredLineClearsReason covers that unmatching an ignored line
+// returns it to unmatched with no ignore reason.
+func TestUnmatchIgnoredLineClearsReason(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	lineID := testBankLineID(t, pool, org.ID, -5000, mustDate(t, "2026-11-06"), "Owner drawings")
+	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.Ignore(ctx, tx, org.ID, lineID, "drawings")
+	}); err != nil {
+		t.Fatalf("Ignore: %v", err)
+	}
+	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.Unmatch(ctx, tx, org.ID, lineID)
+	}); err != nil {
+		t.Fatalf("Unmatch: %v", err)
+	}
+	if status, reason := bankLineStatus(t, pool, lineID); status != "unmatched" || reason != nil {
+		t.Fatalf("line = (%s, %v), want (unmatched, nil)", status, reason)
 	}
 }

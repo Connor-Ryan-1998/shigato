@@ -11,13 +11,16 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/core"
 	"shigoto/internal/db"
+	"shigoto/internal/module"
 	"shigoto/internal/property"
 	"shigoto/internal/recon"
 	"shigoto/internal/timesheets"
@@ -426,3 +429,174 @@ func TestFileDownloadOtherOrg404(t *testing.T) {
 		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestDeleteFeeExpense409 covers that a "Stripe fees" expense MatchPayout
+// booked (referenced by payouts.fee_expense_id) can't be deleted directly:
+// it's a 409 telling the user to unmatch the payout, not a 500 from the
+// foreign key.
+func TestDeleteFeeExpense409(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	setGSTRegistered(t, pool, org.ID, true)
+	_, feeExpenseID := matchFeePayout(t, pool, org.ID)
+
+	err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
+		return recon.DeleteExpense(ctx, tx, org.ID, feeExpenseID)
+	})
+	wantPublicConflict(t, err, "this is a Stripe payout fee; unmatch the payout instead")
+	if _, err := recon.GetExpense(ctx, pool, org.ID, feeExpenseID); err != nil {
+		t.Fatalf("fee expense after rejected delete: %v", err)
+	}
+}
+
+// waitUntilBlockedBy polls until some backend is waiting on a lock held by
+// backend pid, so a test can commit pid's transaction knowing the other
+// request has already reached its lock.
+func waitUntilBlockedBy(ctx context.Context, pool *pgxpool.Pool, pid uint32) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`, int32(pid)).Scan(&blocked); err == nil && blocked {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// TestDeleteExpenseRacesMatchExpense covers DeleteExpense and MatchExpense
+// racing on the same expense, in both orders: the first transaction holds
+// its locks until the second is provably waiting on them, then commits.
+// Either way the result is consistent - linked and not deleted, or deleted
+// with the line still unmatched - never a deleted expense on a "matched"
+// line.
+func TestDeleteExpenseRacesMatchExpense(t *testing.T) {
+	for _, first := range []string{"match", "delete"} {
+		t.Run(first+" first", func(t *testing.T) {
+			pool := db.TestPool(t)
+			ctx := context.Background()
+			org := testOrg(t, pool, "acme")
+			repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
+			exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
+				SpentOn: mustDate(t, "2026-11-01"), Description: "Plumber",
+				Lines: []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 11000}},
+			})
+			if err != nil {
+				t.Fatalf("CreateExpense: %v", err)
+			}
+			lineID := testBankLineID(t, pool, org.ID, -11000, mustDate(t, "2026-11-01"), "Plumber")
+
+			match := func(tx pgx.Tx) error { return recon.MatchExpense(ctx, tx, org.ID, lineID, exp.ID) }
+			del := func(tx pgx.Tx) error { return recon.DeleteExpense(ctx, tx, org.ID, exp.ID) }
+			firstFn, secondFn := match, del
+			if first == "delete" {
+				firstFn, secondFn = del, match
+			}
+
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			if err := firstFn(tx); err != nil {
+				t.Fatalf("first %s: %v", first, err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- module.RunInTx(ctx, pool, secondFn) }()
+			if !waitUntilBlockedBy(ctx, pool, tx.Conn().PgConn().PID()) {
+				tx.Rollback(ctx)
+				<-done
+				t.Fatalf("second request never blocked on the first's locks")
+			}
+			if err := tx.Commit(ctx); err != nil {
+				<-done
+				t.Fatalf("commit: %v", err)
+			}
+			secondErr := <-done
+
+			status, _ := bankLineStatus(t, pool, lineID)
+			stored, getErr := recon.GetExpense(ctx, pool, org.ID, exp.ID)
+			if first == "match" {
+				if !errors.Is(secondErr, core.ErrInvalidState) {
+					t.Fatalf("delete after match: err = %v, want ErrInvalidState", secondErr)
+				}
+				if getErr != nil || stored.BankLineID == nil || *stored.BankLineID != lineID || status != "matched" {
+					t.Fatalf("want linked and kept: expense err=%v link=%v, line status %s", getErr, stored.BankLineID, status)
+				}
+				return
+			}
+			if !errors.Is(secondErr, core.ErrNotFound) {
+				t.Fatalf("match after delete: err = %v, want ErrNotFound", secondErr)
+			}
+			if !errors.Is(getErr, core.ErrNotFound) || status != "unmatched" {
+				t.Fatalf("want deleted and line unmatched: expense err=%v, line status %s", getErr, status)
+			}
+		})
+	}
+}
+
+// TestDeleteExpenseRouteAuditsContents covers that deleting an expense
+// leaves an audit entry (with the requesting user as actor) recording what
+// was deleted - date, description and every line - since the rows are
+// gone afterwards.
+func TestDeleteExpenseRouteAuditsContents(t *testing.T) {
+	pool, handler, token, orgID := reconTestSetup(t)
+	ctx := context.Background()
+	setGSTRegistered(t, pool, orgID, true)
+	repairs := categoryByName(t, pool, orgID, "Repairs & maintenance")
+	exp, _, err := recon.CreateExpense(ctx, pool, orgID, recon.NewExpense{
+		SpentOn: mustDate(t, "2026-11-01"), Description: "Plumber",
+		Lines: []recon.NewExpenseLine{
+			{CategoryID: repairs.ID, Amount: 11000},
+			{CategoryID: repairs.ID, Amount: 500, GSTCode: ptrGST(core.FRE)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateExpense: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/orgs/acme/expenses/%d", exp.ID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", rr.Code, rr.Body.String())
+	}
+
+	rows, err := pool.Query(ctx, `SELECT actor_user_id, diff FROM audit_log WHERE org_id = $1 AND entity = 'expense' AND entity_id = $2 AND action = 'delete'`, orgID, exp.ID)
+	if err != nil {
+		t.Fatalf("reading audit_log: %v", err)
+	}
+	var actors []*int64
+	var diff []byte
+	for rows.Next() {
+		var actor *int64
+		if err := rows.Scan(&actor, &diff); err != nil {
+			t.Fatalf("scanning audit_log: %v", err)
+		}
+		actors = append(actors, actor)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("audit_log rows: %v", err)
+	}
+	if len(actors) != 1 || actors[0] == nil {
+		t.Fatalf("delete audit actors = %v, want exactly one with the requesting user", actors)
+	}
+	want := fmt.Sprintf(`{"spent_on":"2026-11-01","description":"Plumber","lines":[`+
+		`{"category_id":%d,"amount":11000,"gst_code":"GST","gst_amount":1000},`+
+		`{"category_id":%d,"amount":500,"gst_code":"FRE","gst_amount":0}]}`, repairs.ID, repairs.ID)
+	var got, wantJSON any
+	if err := json.Unmarshal(diff, &got); err != nil {
+		t.Fatalf("decoding diff %s: %v", diff, err)
+	}
+	if err := json.Unmarshal([]byte(want), &wantJSON); err != nil {
+		t.Fatalf("decoding want: %v", err)
+	}
+	if !reflect.DeepEqual(got, wantJSON) {
+		t.Fatalf("diff = %s, want %s", diff, want)
+	}
+}
+
+func ptrGST(c core.GSTCode) *core.GSTCode { return &c }

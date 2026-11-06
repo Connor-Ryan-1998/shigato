@@ -268,7 +268,7 @@ func importBankLines(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	defer file.Close()
 
 	p := auth.From(r.Context())
-	result, err := Import(r.Context(), d.Pool, p.OrgID, accountID, file)
+	result, err := Import(billing.WithActor(r.Context(), p.UserID), d.Pool, p.OrgID, accountID, file)
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return
@@ -751,11 +751,9 @@ func deleteExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps)
 		return
 	}
 	p := auth.From(r.Context())
-	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
-		if err := DeleteExpense(r.Context(), tx, p.OrgID, id); err != nil {
-			return err
-		}
-		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "expense", id, "delete", nil)
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	err := module.RunInTx(ctx, d.Pool, func(tx pgx.Tx) error {
+		return DeleteExpense(ctx, tx, p.OrgID, id)
 	})
 	if err != nil {
 		module.WriteCoreError(w, err)
