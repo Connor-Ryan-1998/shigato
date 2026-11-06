@@ -156,6 +156,9 @@ func MatchExpense(ctx context.Context, tx core.Querier, orgID, lineID, expenseID
 	if line.Status != "unmatched" {
 		return core.ErrInvalidState
 	}
+	if line.Amount >= 0 {
+		return fmt.Errorf("%w: bank line is not a debit", core.ErrInvalidInput)
+	}
 
 	// Lock the expense row too (bank line first, then expense, per the
 	// package's lock order) so two concurrent requests linking the same
@@ -205,6 +208,9 @@ func CreateExpenseFromLine(ctx context.Context, tx core.Querier, orgID, lineID i
 	}
 	if line.Status != "unmatched" {
 		return Expense{}, nil, core.ErrInvalidState
+	}
+	if line.Amount >= 0 {
+		return Expense{}, nil, fmt.Errorf("%w: bank line is not a debit", core.ErrInvalidInput)
 	}
 
 	if in.SpentOn.IsZero() {
@@ -261,12 +267,23 @@ func Ignore(ctx context.Context, tx core.Querier, orgID, lineID int64, reason st
 	return core.Audit(ctx, tx, orgID, billing.ActorFrom(ctx), "bank_line", lineID, "ignore", map[string]any{"reason": reason})
 }
 
+// deletedPayment is one payment Unmatch deleted, recorded in its audit
+// diff so a hard delete of money-moving rows leaves a traceable record of
+// exactly what was removed.
+type deletedPayment struct {
+	ID        int64 `json:"id"`
+	InvoiceID int64 `json:"invoice_id"`
+	Amount    int64 `json:"amount"`
+}
+
 // Unmatch reverts a matched or ignored line back to unmatched. Only
 // payments this module created (method bank_transfer or payid) are
 // deleted - a payout link recorded by a later task's Stripe webhook flow
 // is untouched. If deleting a payment leaves a previously-paid invoice
 // below its total, that invoice is reopened. Any linked expense is
-// unlinked, and any ignore reason is cleared.
+// unlinked, and any ignore reason is cleared. The audit diff records
+// exactly what was deleted/reopened/unlinked, since this is the one
+// action in the package that hard-deletes money-moving rows.
 func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 	line, err := lockBankLine(ctx, tx, orgID, lineID)
 	if err != nil {
@@ -277,21 +294,24 @@ func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT DISTINCT invoice_id FROM payments
-		WHERE org_id = $1 AND bank_line_id = $2 AND method IN ('bank_transfer', 'payid')`,
+		DELETE FROM payments
+		WHERE org_id = $1 AND bank_line_id = $2 AND method IN ('bank_transfer', 'payid')
+		RETURNING id, invoice_id, amount`,
 		orgID, lineID,
 	)
 	if err != nil {
 		return err
 	}
-	var invoiceIDs []int64
+	var deleted []deletedPayment
+	invoiceIDs := map[int64]bool{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var p deletedPayment
+		if err := rows.Scan(&p.ID, &p.InvoiceID, &p.Amount); err != nil {
 			rows.Close()
 			return err
 		}
-		invoiceIDs = append(invoiceIDs, id)
+		deleted = append(deleted, p)
+		invoiceIDs[p.InvoiceID] = true
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -299,14 +319,8 @@ func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 	}
 	rows.Close()
 
-	if _, err := tx.Exec(ctx, `
-		DELETE FROM payments WHERE org_id = $1 AND bank_line_id = $2 AND method IN ('bank_transfer', 'payid')`,
-		orgID, lineID,
-	); err != nil {
-		return err
-	}
-
-	for _, invID := range invoiceIDs {
+	var reopened []int64
+	for invID := range invoiceIDs {
 		var status string
 		var total int64
 		err := tx.QueryRow(ctx, `SELECT status, total FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, invID).Scan(&status, &total)
@@ -327,7 +341,20 @@ func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 			if _, err := tx.Exec(ctx, `UPDATE invoices SET status = 'open' WHERE org_id = $1 AND id = $2`, orgID, invID); err != nil {
 				return err
 			}
+			reopened = append(reopened, invID)
 		}
+	}
+
+	var unlinkedExpenseID *int64
+	var expID int64
+	err = tx.QueryRow(ctx, `SELECT id FROM expenses WHERE org_id = $1 AND bank_line_id = $2`, orgID, lineID).Scan(&expID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// no linked expense
+	case err != nil:
+		return err
+	default:
+		unlinkedExpenseID = &expID
 	}
 
 	if _, err := tx.Exec(ctx, `UPDATE expenses SET bank_line_id = NULL WHERE org_id = $1 AND bank_line_id = $2`, orgID, lineID); err != nil {
@@ -337,7 +364,20 @@ func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 		return err
 	}
 
-	return core.Audit(ctx, tx, orgID, billing.ActorFrom(ctx), "bank_line", lineID, "unmatch", nil)
+	if deleted == nil {
+		deleted = []deletedPayment{}
+	}
+	if reopened == nil {
+		reopened = []int64{}
+	}
+
+	return core.Audit(ctx, tx, orgID, billing.ActorFrom(ctx), "bank_line", lineID, "unmatch", map[string]any{
+		"deleted_payments":       deleted,
+		"reopened_invoice_ids":   reopened,
+		"unlinked_expense_id":    unlinkedExpenseID,
+		"previous_status":        line.Status,
+		"previous_ignore_reason": line.IgnoreReason,
+	})
 }
 
 // daysBetween returns the absolute number of whole days between a and b.
@@ -517,7 +557,12 @@ func AutoMatch(ctx context.Context, pool *pgxpool.Pool, orgID int64) (int, error
 			return err
 		})
 		if err != nil {
-			if errors.Is(err, errAmbiguous) {
+			// errAmbiguous is this loop's own skip signal; ErrInvalidState
+			// from MatchInvoice means the candidate invoice (checked
+			// un-locked by autoMatchCandidates) was paid or voided by a
+			// concurrent request between that check and MatchInvoice's own
+			// lock - also a skip, not a reason to abort the whole run.
+			if errors.Is(err, errAmbiguous) || errors.Is(err, core.ErrInvalidState) {
 				continue
 			}
 			return matched, err

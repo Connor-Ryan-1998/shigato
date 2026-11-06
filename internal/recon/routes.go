@@ -546,19 +546,17 @@ type expenseRequest struct {
 	Lines             []expenseLineRequest `json:"lines"`
 }
 
-func (body expenseRequest) toNewExpense() (NewExpense, error) {
-	spentOn, err := parseDate(body.SpentOn)
-	if err != nil {
-		return NewExpense{}, fmt.Errorf("%w: spent_on must be YYYY-MM-DD", core.ErrInvalidInput)
-	}
-
-	lines := make([]NewExpenseLine, len(body.Lines))
-	for i, l := range body.Lines {
+// toNewExpenseLines converts the shared expenseLineRequest shape into
+// NewExpenseLine, used by both expenseRequest.toNewExpense (spent_on
+// required) and expenseFromLineRequest.toNewExpense (spent_on optional).
+func toNewExpenseLines(reqs []expenseLineRequest) ([]NewExpenseLine, error) {
+	lines := make([]NewExpenseLine, len(reqs))
+	for i, l := range reqs {
 		var code *core.GSTCode
 		if l.GSTCode != nil {
 			parsed, err := core.ParseGSTCode(*l.GSTCode)
 			if err != nil {
-				return NewExpense{}, fmt.Errorf("%w: line %d: %v", core.ErrInvalidInput, i, err)
+				return nil, fmt.Errorf("%w: line %d: %v", core.ErrInvalidInput, i, err)
 			}
 			code = &parsed
 		}
@@ -566,6 +564,19 @@ func (body expenseRequest) toNewExpense() (NewExpense, error) {
 			CategoryID: l.CategoryID, Amount: core.Cents(l.Amount), GSTCode: code,
 			PropertyID: l.PropertyID, ProjectID: l.ProjectID,
 		}
+	}
+	return lines, nil
+}
+
+func (body expenseRequest) toNewExpense() (NewExpense, error) {
+	spentOn, err := parseDate(body.SpentOn)
+	if err != nil {
+		return NewExpense{}, fmt.Errorf("%w: spent_on must be YYYY-MM-DD", core.ErrInvalidInput)
+	}
+
+	lines, err := toNewExpenseLines(body.Lines)
+	if err != nil {
+		return NewExpense{}, err
 	}
 
 	return NewExpense{
@@ -844,20 +855,9 @@ func (body expenseFromLineRequest) toNewExpense() (NewExpense, error) {
 		spentOn = t
 	}
 
-	lines := make([]NewExpenseLine, len(body.Lines))
-	for i, l := range body.Lines {
-		var code *core.GSTCode
-		if l.GSTCode != nil {
-			parsed, err := core.ParseGSTCode(*l.GSTCode)
-			if err != nil {
-				return NewExpense{}, fmt.Errorf("%w: line %d: %v", core.ErrInvalidInput, i, err)
-			}
-			code = &parsed
-		}
-		lines[i] = NewExpenseLine{
-			CategoryID: l.CategoryID, Amount: core.Cents(l.Amount), GSTCode: code,
-			PropertyID: l.PropertyID, ProjectID: l.ProjectID,
-		}
+	lines, err := toNewExpenseLines(body.Lines)
+	if err != nil {
+		return NewExpense{}, err
 	}
 
 	return NewExpense{
@@ -990,7 +990,8 @@ type autoMatchResponse struct {
 
 func autoMatchHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	p := auth.From(r.Context())
-	matched, err := AutoMatch(r.Context(), d.Pool, p.OrgID)
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	matched, err := AutoMatch(ctx, d.Pool, p.OrgID)
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return

@@ -4,8 +4,11 @@ package recon_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -383,5 +386,151 @@ func TestIgnoreReasonValidated(t *testing.T) {
 	status, reason := bankLineStatus(t, pool, lineID)
 	if status != "ignored" || reason == nil || *reason != "drawings" {
 		t.Fatalf("bank line = (%s, %v), want (ignored, drawings)", status, reason)
+	}
+}
+
+// TestAutoMatchRouteAuditsActor covers that a route-triggered auto-match
+// carries the requesting user as the match_invoice audit's actor, not
+// NULL - AutoMatch runs as business logic shared with other, actor-less
+// callers, so the HTTP handler is responsible for putting the actor on the
+// context before calling it.
+func TestAutoMatchRouteAuditsActor(t *testing.T) {
+	pool, handler, token, orgID := reconTestSetup(t)
+	ctx := context.Background()
+	contactID := createContact(t, pool, orgID)
+	inv := testInvoice(t, pool, orgID, contactID, 15000)
+	testBankLineID(t, pool, orgID, 15000, mustDate(t, "2026-11-07"), "Transfer "+inv.PaymentReference)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/reconcile/auto", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	var actorID *int64
+	if err := pool.QueryRow(ctx, `
+		SELECT actor_user_id FROM audit_log
+		WHERE org_id = $1 AND entity = 'bank_line' AND action = 'match_invoice'
+		ORDER BY id DESC LIMIT 1`,
+		orgID,
+	).Scan(&actorID); err != nil {
+		t.Fatalf("reading audit_log: %v", err)
+	}
+	if actorID == nil {
+		t.Fatalf("audit_log actor_user_id = nil, want the requesting user's id")
+	}
+}
+
+// TestUnmatchAuditRecordsDeletedPayment covers that Unmatch's audit diff
+// names exactly what it deleted/reopened - not just that something
+// changed - since it's the one action in this package that hard-deletes
+// money-moving rows.
+func TestUnmatchAuditRecordsDeletedPayment(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := createContact(t, pool, org.ID)
+	inv := testInvoice(t, pool, org.ID, contactID, 12000)
+	lineID := testBankLineID(t, pool, org.ID, 12000, mustDate(t, "2026-11-08"), "Transfer")
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	payment, err := recon.MatchInvoice(ctx, tx, org.ID, lineID, inv.ID, "bank_transfer")
+	if err != nil {
+		t.Fatalf("MatchInvoice: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := recon.Unmatch(ctx, tx2, org.ID, lineID); err != nil {
+		t.Fatalf("Unmatch: %v", err)
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var diff []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT diff FROM audit_log
+		WHERE org_id = $1 AND entity = 'bank_line' AND entity_id = $2 AND action = 'unmatch'
+		ORDER BY id DESC LIMIT 1`,
+		org.ID, lineID,
+	).Scan(&diff); err != nil {
+		t.Fatalf("reading audit_log diff: %v", err)
+	}
+
+	var parsed struct {
+		DeletedPayments []struct {
+			ID        int64 `json:"id"`
+			InvoiceID int64 `json:"invoice_id"`
+			Amount    int64 `json:"amount"`
+		} `json:"deleted_payments"`
+		ReopenedInvoiceIDs []int64 `json:"reopened_invoice_ids"`
+	}
+	if err := json.Unmarshal(diff, &parsed); err != nil {
+		t.Fatalf("unmarshaling diff: %v", err)
+	}
+	if len(parsed.DeletedPayments) != 1 {
+		t.Fatalf("deleted_payments = %v, want exactly 1", parsed.DeletedPayments)
+	}
+	if parsed.DeletedPayments[0].ID != payment.ID || parsed.DeletedPayments[0].Amount != 12000 || parsed.DeletedPayments[0].InvoiceID != inv.ID {
+		t.Fatalf("deleted_payments[0] = %+v, want {id:%d, invoice_id:%d, amount:12000}", parsed.DeletedPayments[0], payment.ID, inv.ID)
+	}
+	if len(parsed.ReopenedInvoiceIDs) != 1 || parsed.ReopenedInvoiceIDs[0] != inv.ID {
+		t.Fatalf("reopened_invoice_ids = %v, want [%d]", parsed.ReopenedInvoiceIDs, inv.ID)
+	}
+}
+
+// TestMatchExpenseAlreadyLinked covers the full MatchExpense happy path
+// (link, mark matched) and then that a second line can't be matched to the
+// same already-linked expense (409).
+func TestMatchExpenseAlreadyLinked(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
+
+	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
+		SpentOn:     mustDate(t, "2026-11-09"),
+		Description: "Plumber",
+		Lines:       []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 9900}},
+	})
+	if err != nil {
+		t.Fatalf("CreateExpense: %v", err)
+	}
+
+	line1 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber payment")
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := recon.MatchExpense(ctx, tx, org.ID, line1, exp.ID); err != nil {
+		t.Fatalf("MatchExpense: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if status, _ := bankLineStatus(t, pool, line1); status != "matched" {
+		t.Fatalf("line1 status = %s, want matched", status)
+	}
+
+	line2 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber payment duplicate")
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx2.Rollback(ctx)
+	err = recon.MatchExpense(ctx, tx2, org.ID, line2, exp.ID)
+	if !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("already-linked expense: err = %v, want ErrInvalidState", err)
 	}
 }
