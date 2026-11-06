@@ -15,7 +15,10 @@ export type ModuleManifest = {
 	name: ModuleName;
 	label: string;
 	nav: NavItem[];
-	dashboardCard?: () => Promise<{ default: Component }>;
+	// `any` props: each module's dashboard card takes its own `data` prop
+	// shaped like that module's dashboard response section, which varies
+	// per module - the dashboard page passes it straight through unopened.
+	dashboardCard?: () => Promise<{ default: Component<any> }>;
 };
 
 // MODULE_ORDER fixes the sidebar's group order: core first (it's not a

@@ -45,8 +45,20 @@ export default defineConfig({
 			'/webhooks': rewriteOrigin({ target: backend, changeOrigin: true })
 		}
 	},
+	// Vitest doesn't set Vite's ssr flag, so without this Svelte resolves to
+	// its server-rendering build (index-server.js) even under jsdom -
+	// component tests then fail with "mount(...) is not available on the
+	// server". Forcing the browser condition under vitest only (leaving
+	// `resolve` untouched for `vite build`, which needs its own default
+	// conditions to split the client/server bundles correctly) picks the
+	// client build that mount() needs.
+	...(process.env.VITEST ? { resolve: { conditions: ['browser'] } } : {}),
 	test: {
 		environment: 'jsdom',
-		include: ['src/**/*.test.ts']
+		include: ['src/**/*.test.ts'],
+		// Auto-unmounts/cleans up the DOM after every component test so one
+		// test's rendered markup (e.g. a second "Overdue" link) can't leak
+		// into the next test's queries.
+		setupFiles: ['@testing-library/svelte/vitest']
 	}
 });

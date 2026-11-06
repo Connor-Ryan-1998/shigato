@@ -6,5 +6,6 @@ import type { ModuleManifest } from '../registry';
 export const timesheets: ModuleManifest = {
 	name: 'timesheets',
 	label: 'Timesheets',
-	nav: []
+	nav: [],
+	dashboardCard: () => import('./DashboardCard.svelte')
 };

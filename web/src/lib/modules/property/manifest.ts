@@ -6,5 +6,6 @@ import type { ModuleManifest } from '../registry';
 export const property: ModuleManifest = {
 	name: 'property',
 	label: 'Property',
-	nav: []
+	nav: [],
+	dashboardCard: () => import('./DashboardCard.svelte')
 };
