@@ -32,6 +32,10 @@
 	let newContactName = $state('');
 	let newContactKind = $state('client');
 	let creatingContact = $state(false);
+	// Shown inside the New contact dialog itself - a page-level Toast sits
+	// behind a native <dialog>'s backdrop and would be invisible while it's
+	// open.
+	let contactError = $state('');
 
 	async function loadContacts() {
 		try {
@@ -49,9 +53,15 @@
 
 	const contactOptions = $derived(contacts.map((c) => ({ value: String(c.id), label: c.name })));
 
+	function openNewContactDialog() {
+		contactError = '';
+		newContactOpen = true;
+	}
+
 	async function createContact() {
 		if (newContactName.trim() === '') return;
 		creatingContact = true;
+		contactError = '';
 		try {
 			const org = page.params.org;
 			const created = await api<Contact>('POST', `/api/v1/orgs/${org}/contacts`, {
@@ -64,11 +74,26 @@
 			newContactName = '';
 			newContactKind = 'client';
 		} catch (e) {
-			saveError = e instanceof ApiError ? e.message : 'Something went wrong.';
+			contactError = e instanceof ApiError ? e.message : 'Something went wrong.';
 		} finally {
 			creatingContact = false;
 		}
 	}
+
+	// parseDueInDays accepts only a plain non-negative whole number - an
+	// empty/blank field must be reported as invalid, not silently treated
+	// as 0 (Number('') is 0, which is why this doesn't just do
+	// Number(dueInDays)).
+	function parseDueInDays(v: string): number | null {
+		const t = v.trim();
+		if (!/^\d+$/.test(t)) return null;
+		const n = Number(t);
+		return Number.isSafeInteger(n) ? n : null;
+	}
+
+	const dueInDaysError = $derived(
+		parseDueInDays(dueInDays) === null ? 'Enter a whole number of days (0 or more).' : undefined
+	);
 
 	async function save(lines: ManualLine[]) {
 		if (saving) return;
@@ -76,9 +101,9 @@
 			saveError = 'Choose a contact first.';
 			return;
 		}
-		const days = Number(dueInDays);
-		if (!Number.isInteger(days) || days < 0) {
-			saveError = 'Due in days must be a non-negative whole number.';
+		const days = parseDueInDays(dueInDays);
+		if (days === null) {
+			saveError = 'Enter a whole number of days (0 or more).';
 			return;
 		}
 		saving = true;
@@ -108,12 +133,17 @@
 		<Field label="Contact" id="contact-select">
 			<div class="contact-row">
 				<Select id="contact-select" bind:value={contactId} options={contactOptions} />
-				<Button variant="secondary" onclick={() => (newContactOpen = true)}>New contact</Button>
+				<Button variant="secondary" onclick={openNewContactDialog}>New contact</Button>
 			</div>
 		</Field>
 
-		<Field label="Due in days" id="due-in-days" hint="Default 14 days from issue.">
-			<input id="due-in-days" type="number" min="0" step="1" bind:value={dueInDays} />
+		<Field
+			label="Due in days"
+			id="due-in-days"
+			hint="Default 14 days from issue."
+			error={dueInDaysError}
+		>
+			<input id="due-in-days" inputmode="numeric" bind:value={dueInDays} />
 		</Field>
 
 		<LineEditor onSave={save} />
@@ -133,6 +163,9 @@
 			<Select id="new-contact-kind" bind:value={newContactKind} options={CONTACT_KIND_OPTIONS} />
 		</Field>
 	</div>
+	{#if contactError}
+		<p class="dialog-error" role="alert">{contactError}</p>
+	{/if}
 	<div class="dialog-actions">
 		<Button variant="secondary" onclick={() => (newContactOpen = false)}>Cancel</Button>
 		<Button onclick={createContact} disabled={creatingContact || newContactName.trim() === ''}>
@@ -163,5 +196,12 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: var(--space-3);
+	}
+	.dialog-error {
+		margin: 0 0 var(--space-4);
+		padding: var(--space-2) var(--space-3);
+		border-radius: var(--radius-md);
+		background: var(--danger-subtle);
+		color: var(--danger);
 	}
 </style>

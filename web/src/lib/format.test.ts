@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { date, minutes, money, parseCents, parseQuantityMilli } from './format';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { date, minutes, money, parseCents, parseQuantityMilli, todayLocal } from './format';
 
 describe('money', () => {
 	it('formats positive cents as AUD', () => {
@@ -51,6 +51,38 @@ describe('parseCents', () => {
 	it('rejects a non-numeric string', () => {
 		expect(parseCents('abc')).toBeNull();
 	});
+
+	it('rejects internal spaces', () => {
+		expect(parseCents('1 200')).toBeNull();
+	});
+
+	it('rejects malformed thousands grouping (groups not 3 digits)', () => {
+		expect(parseCents('1,2,3')).toBeNull();
+	});
+
+	it('rejects a leading-zero group before a comma', () => {
+		expect(parseCents('0,100')).toBeNull();
+	});
+
+	it('rejects a decimal point with no leading digit', () => {
+		expect(parseCents('.5')).toBeNull();
+	});
+
+	it('rejects a decimal point with no digits after it', () => {
+		expect(parseCents('1.')).toBeNull();
+	});
+
+	it('rejects "-0"', () => {
+		expect(parseCents('-0')).toBeNull();
+	});
+
+	it('rejects a value over the server bound (100,000,000,000 cents)', () => {
+		expect(parseCents('2000000000.00')).toBeNull();
+	});
+
+	it('accepts exactly the server bound', () => {
+		expect(parseCents('1000000000.00')).toBe(100_000_000_000);
+	});
 });
 
 describe('parseQuantityMilli', () => {
@@ -76,5 +108,51 @@ describe('parseQuantityMilli', () => {
 
 	it('rejects a non-numeric string', () => {
 		expect(parseQuantityMilli('abc')).toBeNull();
+	});
+
+	it('rejects internal spaces', () => {
+		expect(parseQuantityMilli('1 5')).toBeNull();
+	});
+
+	it('rejects a decimal point with no leading digit', () => {
+		expect(parseQuantityMilli('.5')).toBeNull();
+	});
+
+	it('rejects a decimal point with no digits after it', () => {
+		expect(parseQuantityMilli('1.')).toBeNull();
+	});
+
+	it('rejects "-0"', () => {
+		expect(parseQuantityMilli('-0')).toBeNull();
+	});
+
+	it('rejects a value over the server bound (10,000,000 milli)', () => {
+		expect(parseQuantityMilli('20000.5')).toBeNull();
+	});
+
+	it('accepts exactly the server bound', () => {
+		expect(parseQuantityMilli('10000')).toBe(10_000_000);
+	});
+});
+
+describe('todayLocal', () => {
+	const originalTZ = process.env.TZ;
+
+	beforeEach(() => {
+		// Brisbane is UTC+10 with no daylight saving, so this is a fixed,
+		// deterministic offset regardless of the host machine's own
+		// timezone - the point of the test.
+		process.env.TZ = 'Australia/Brisbane';
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		process.env.TZ = originalTZ;
+	});
+
+	it('uses the local calendar date, not UTC, for a late-UTC/early-local instant', () => {
+		// 23:30 UTC on the 6th is already 09:30 on the 7th in Brisbane.
+		vi.setSystemTime(new Date('2026-11-06T23:30:00Z'));
+		expect(todayLocal()).toBe('2026-11-07');
 	});
 });

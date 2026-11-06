@@ -1,8 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { api, ApiError } from '../../../../lib/api';
-	import { money, date } from '../../../../lib/format';
+	import { date } from '../../../../lib/format';
 	import PageHeader from '../../../../lib/components/PageHeader.svelte';
 	import Button from '../../../../lib/components/Button.svelte';
 	import EmptyState from '../../../../lib/components/EmptyState.svelte';
@@ -10,6 +9,7 @@
 	import Money from '../../../../lib/components/Money.svelte';
 	import DateText from '../../../../lib/components/DateText.svelte';
 	import Toast from '../../../../lib/components/Toast.svelte';
+	import DataTable from '../../../../lib/components/DataTable.svelte';
 	import PaymentDialog, {
 		type NewPayment
 	} from '../../../../lib/modules/core/invoices/PaymentDialog.svelte';
@@ -68,6 +68,14 @@
 	let actionError = $state('');
 	let actionBusy = $state(false);
 	let paymentDialogOpen = $state(false);
+	let paymentError = $state('');
+	// True only for a background re-fetch after an action (issue/send/void/
+	// payment) succeeds. Kept separate from loadStatus so a successful
+	// action never drops the already-rendered invoice back to the
+	// full-page "Loading…" state - that would unmount the whole section
+	// (losing scroll position and keyboard focus) for a refresh the user
+	// didn't ask to wait through.
+	let refreshing = $state(false);
 
 	// canSend: an issued invoice can only be (re)sent to the payment
 	// provider if it never reached one (no provider_url yet) and the org's
@@ -80,20 +88,45 @@
 			invoice.pay_options.includes('stripe')
 	);
 
-	async function load() {
-		loadStatus = 'loading';
-		errorMessage = '';
+	async function load(opts: { background?: boolean } = {}) {
+		if (opts.background) {
+			refreshing = true;
+		} else {
+			loadStatus = 'loading';
+			errorMessage = '';
+		}
 		try {
 			const org = page.params.org;
-			invoice = await api<InvoiceDetail>('GET', `/api/v1/orgs/${org}/invoices/${page.params.id}`);
+			const result = await api<InvoiceDetail>(
+				'GET',
+				`/api/v1/orgs/${org}/invoices/${page.params.id}`
+			);
+			invoice = result;
 			loadStatus = 'ready';
 		} catch (e) {
-			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
-			loadStatus = 'error';
+			const message = e instanceof ApiError ? e.message : 'Something went wrong.';
+			if (opts.background) {
+				// The page is already showing the invoice from before the
+				// action - surface the refresh failure the same way an
+				// action failure is surfaced, without tearing the page down.
+				actionError = message;
+			} else {
+				errorMessage = message;
+				loadStatus = 'error';
+			}
+		} finally {
+			refreshing = false;
 		}
 	}
 
-	onMount(load);
+	// Loads on mount, and reloads (full loading state) if the route's own
+	// [id] param changes - e.g. navigating from one invoice's detail page
+	// straight to another's, which SvelteKit can do without remounting this
+	// component.
+	$effect(() => {
+		page.params.id;
+		load();
+	});
 
 	// quantity formats a line's quantity_milli (thousandths of a unit) back
 	// to a decimal for display only, e.g. 1500 -> "1.5" - never used for any
@@ -102,13 +135,16 @@
 		return (milli / 1000).toFixed(3).replace(/\.?0+$/, '') || '0';
 	}
 
+	// runAction is for the actions that have nowhere else to show an error
+	// (Issue/Send/Void aren't behind a dialog), so a page-level Toast is
+	// fine for them.
 	async function runAction(action: () => Promise<void>) {
 		if (actionBusy) return;
 		actionBusy = true;
 		actionError = '';
 		try {
 			await action();
-			await load();
+			await load({ background: true });
 		} catch (e) {
 			actionError = e instanceof ApiError ? e.message : 'Something went wrong.';
 		} finally {
@@ -138,21 +174,49 @@
 		});
 	}
 
-	function recordPayment(payment: NewPayment) {
-		const org = page.params.org;
-		runAction(async () => {
+	function openPaymentDialog() {
+		paymentError = '';
+		paymentDialogOpen = true;
+	}
+
+	// Record payment is handled separately from runAction: on failure (e.g.
+	// the 409 "invoice has payments; record a credit note instead"), the
+	// dialog must stay open and show the server's message inside itself -
+	// a page-level Toast would be invisible behind the native <dialog>'s
+	// backdrop.
+	async function recordPayment(payment: NewPayment) {
+		if (actionBusy) return;
+		actionBusy = true;
+		paymentError = '';
+		try {
+			const org = page.params.org;
 			await api('POST', `/api/v1/orgs/${org}/invoices/${page.params.id}/payments`, payment);
 			paymentDialogOpen = false;
-		});
+			await load({ background: true });
+		} catch (e) {
+			paymentError = e instanceof ApiError ? e.message : 'Something went wrong.';
+		} finally {
+			actionBusy = false;
+		}
 	}
 </script>
+
+{#snippet descCell(line: Line)}{line.description}{/snippet}
+{#snippet quantityCell(line: Line)}{quantity(line.quantity_milli)}{/snippet}
+{#snippet unitAmountCell(line: Line)}<Money cents={line.unit_amount} />{/snippet}
+{#snippet gstCodeCell(line: Line)}{line.gst_code}{/snippet}
+{#snippet lineAmountCell(line: Line)}<Money cents={line.amount} />{/snippet}
+
+{#snippet paidOnCell(payment: Payment)}{date(payment.paid_on)}{/snippet}
+{#snippet methodCell(payment: Payment)}{METHOD_LABEL[payment.method] ?? payment.method}{/snippet}
+{#snippet paymentAmountCell(payment: Payment)}<Money cents={payment.amount} />{/snippet}
 
 {#if loadStatus === 'loading'}
 	<p aria-live="polite">Loading invoice…</p>
 {:else if loadStatus === 'error'}
 	<EmptyState title="Couldn't load the invoice" description={errorMessage}>
 		{#snippet action()}
-			<Button onclick={load}>Retry</Button>
+			<Button onclick={() => load()}>Retry</Button>
 		{/snippet}
 	</EmptyState>
 {:else if invoice}
@@ -162,6 +226,10 @@
 			<StatusBadge status={inv.status} tone={STATUS_TONE[inv.status] ?? 'info'} />
 		{/snippet}
 	</PageHeader>
+
+	{#if refreshing}
+		<p class="refreshing" aria-live="polite">Refreshing…</p>
+	{/if}
 
 	<p class="contact">{inv.contact_name}</p>
 
@@ -178,7 +246,7 @@
 			{#if canSend}
 				<Button disabled={actionBusy} onclick={sendInvoice}>Send</Button>
 			{/if}
-			<Button variant="secondary" disabled={actionBusy} onclick={() => (paymentDialogOpen = true)}>
+			<Button variant="secondary" disabled={actionBusy} onclick={openPaymentDialog}>
 				Record payment
 			</Button>
 			<Button variant="danger" disabled={actionBusy} onclick={voidInvoice}>Void</Button>
@@ -186,28 +254,17 @@
 	</section>
 
 	<h2>Lines</h2>
-	<table class="lines">
-		<thead>
-			<tr>
-				<th scope="col">Description</th>
-				<th scope="col">Quantity</th>
-				<th scope="col">Unit price</th>
-				<th scope="col">GST</th>
-				<th scope="col">Amount</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each inv.lines as line (line.id)}
-				<tr>
-					<td>{line.description}</td>
-					<td>{quantity(line.quantity_milli)}</td>
-					<td><Money cents={line.unit_amount} /></td>
-					<td>{line.gst_code}</td>
-					<td><Money cents={line.amount} /></td>
-				</tr>
-			{/each}
-		</tbody>
-	</table>
+	<DataTable
+		columns={[
+			{ key: 'description', label: 'Description', cell: descCell },
+			{ key: 'quantity', label: 'Quantity', cell: quantityCell },
+			{ key: 'unit_amount', label: 'Unit price', cell: unitAmountCell },
+			{ key: 'gst_code', label: 'GST', cell: gstCodeCell },
+			{ key: 'amount', label: 'Amount', cell: lineAmountCell }
+		]}
+		rows={inv.lines}
+		rowKey={(line) => line.id}
+	/>
 
 	<dl class="totals">
 		<div><dt>Subtotal</dt><dd><Money cents={inv.subtotal} /></dd></div>
@@ -229,29 +286,22 @@
 	{#if inv.payments.length === 0}
 		<p class="no-payments">No payments recorded.</p>
 	{:else}
-		<table class="payments">
-			<thead>
-				<tr>
-					<th scope="col">Date</th>
-					<th scope="col">Method</th>
-					<th scope="col">Amount</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each inv.payments as payment (payment.id)}
-					<tr>
-						<td>{date(payment.paid_on)}</td>
-						<td>{METHOD_LABEL[payment.method] ?? payment.method}</td>
-						<td><Money cents={payment.amount} /></td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
+		<DataTable
+			columns={[
+				{ key: 'paid_on', label: 'Date', cell: paidOnCell },
+				{ key: 'method', label: 'Method', cell: methodCell },
+				{ key: 'amount', label: 'Amount', cell: paymentAmountCell }
+			]}
+			rows={inv.payments}
+			rowKey={(payment) => payment.id}
+		/>
 	{/if}
 
 	<PaymentDialog
 		bind:open={paymentDialogOpen}
 		outstandingCents={inv.outstanding}
+		error={paymentError}
+		busy={actionBusy}
 		onSubmit={recordPayment}
 	/>
 {/if}
@@ -274,24 +324,14 @@
 	}
 	.actions-row {
 		display: flex;
+		flex-wrap: wrap;
 		gap: var(--space-3);
 		margin-bottom: var(--space-6);
 	}
-	table {
-		width: 100%;
-		border-collapse: collapse;
-		margin-bottom: var(--space-6);
-	}
-	th,
-	td {
-		text-align: left;
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border);
-	}
-	th {
+	.refreshing {
 		color: var(--text-muted);
 		font-size: var(--text-sm);
-		font-weight: 600;
+		margin: 0 0 var(--space-3);
 	}
 	.totals {
 		display: flex;
@@ -315,26 +355,7 @@
 	.no-payments {
 		color: var(--text-muted);
 	}
-
-	@media (max-width: 639px) {
-		thead {
-			display: none;
-		}
-		table,
-		tbody,
-		tr,
-		td {
-			display: block;
-			width: 100%;
-		}
-		tr {
-			border: 1px solid var(--border);
-			border-radius: var(--radius-md);
-			margin-bottom: var(--space-3);
-			padding: var(--space-2);
-		}
-		td {
-			border-bottom: none;
-		}
+	h2 {
+		margin-top: var(--space-6);
 	}
 </style>

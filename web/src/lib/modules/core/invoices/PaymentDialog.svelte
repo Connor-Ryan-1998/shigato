@@ -11,7 +11,7 @@
 	import Field from '../../../components/Field.svelte';
 	import Select from '../../../components/Select.svelte';
 	import Button from '../../../components/Button.svelte';
-	import { parseCents } from '../../../format';
+	import { parseCents, todayLocal } from '../../../format';
 
 	// Matches the server's accepted methods (internal/httpapi/core_routes.go
 	// recordPayment).
@@ -24,19 +24,24 @@
 	let {
 		open = $bindable(false),
 		outstandingCents,
+		error,
+		busy = false,
 		onSubmit
 	}: {
 		open?: boolean;
 		outstandingCents: number;
+		// The server's error message from the last failed submit (e.g. the
+		// 409 "invoice has payments; record a credit note instead"). Shown
+		// inside the dialog itself - a native <dialog>'s backdrop sits above
+		// the rest of the page, so a page-level Toast would be invisible
+		// while this is open.
+		error?: string;
+		busy?: boolean;
 		onSubmit: (payment: NewPayment) => void;
 	} = $props();
 
-	function todayISO(): string {
-		return new Date().toISOString().slice(0, 10);
-	}
-
 	let amount = $state('');
-	let paidOn = $state(todayISO());
+	let paidOn = $state(todayLocal());
 	let method = $state('bank_transfer');
 
 	// Re-seed the form from the invoice's current outstanding balance every
@@ -45,7 +50,7 @@
 	$effect(() => {
 		if (!open) return;
 		amount = (outstandingCents / 100).toFixed(2);
-		paidOn = todayISO();
+		paidOn = todayLocal();
 		method = 'bank_transfer';
 	});
 
@@ -75,9 +80,12 @@
 			<Select id="payment-method" bind:value={method} options={METHOD_OPTIONS} />
 		</Field>
 	</div>
+	{#if error}
+		<p class="dialog-error" role="alert">{error}</p>
+	{/if}
 	<div class="actions">
-		<Button variant="secondary" onclick={() => (open = false)}>Cancel</Button>
-		<Button onclick={submit} disabled={!valid}>Record payment</Button>
+		<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+		<Button onclick={submit} disabled={!valid || busy}>Record payment</Button>
 	</div>
 </Dialog>
 
@@ -92,5 +100,12 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: var(--space-3);
+	}
+	.dialog-error {
+		margin: 0 0 var(--space-4);
+		padding: var(--space-2) var(--space-3);
+		border-radius: var(--radius-md);
+		background: var(--danger-subtle);
+		color: var(--danger);
 	}
 </style>

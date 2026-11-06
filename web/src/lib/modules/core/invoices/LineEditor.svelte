@@ -139,11 +139,24 @@
 	}
 	.row {
 		display: grid;
-		grid-template-columns: 2fr 1fr 1fr 1fr auto;
+		grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto;
 		gap: var(--space-3);
 		align-items: end;
 		padding-bottom: var(--space-3);
 		border-bottom: 1px solid var(--border);
+	}
+	.row input {
+		width: 100%;
+		box-sizing: border-box;
+	}
+	/* Select renders its own <select>, outside this component's scope - the
+	   extra .row class keeps this selector's specificity above Select's own
+	   scoped rule so the column can actually shrink instead of the select's
+	   content (the longest GST option text) forcing an overflow. */
+	.line-editor .row :global(select) {
+		width: 100%;
+		min-width: 0;
+		box-sizing: border-box;
 	}
 	.actions {
 		display: flex;

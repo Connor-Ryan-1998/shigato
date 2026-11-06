@@ -30,6 +30,11 @@
 	let errorMessage = $state('');
 	let invoices = $state<InvoiceListItem[]>([]);
 	let total = $state(0);
+	// Bumped on every load() call; a response is only applied if it's still
+	// the most recent request by the time it resolves - otherwise a slow
+	// earlier request (e.g. the previous tab) could land after a faster
+	// later one and clobber it with stale data.
+	let requestSeq = 0;
 
 	const activeTab = $derived(page.url.searchParams.get('status') ?? '');
 	const offset = $derived(Math.max(0, Number(page.url.searchParams.get('offset') ?? '0') || 0));
@@ -39,6 +44,7 @@
 	}
 
 	async function load() {
+		const seq = ++requestSeq;
 		loadStatus = 'loading';
 		errorMessage = '';
 		try {
@@ -52,10 +58,12 @@
 			params.set('limit', String(PAGE_SIZE));
 			params.set('offset', String(offset));
 			const res = await api<ListResponse>('GET', `/api/v1/orgs/${org}/invoices?${params}`);
+			if (seq !== requestSeq) return;
 			invoices = res.invoices;
 			total = res.total;
 			loadStatus = 'ready';
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
 			loadStatus = 'error';
 		}
@@ -105,6 +113,12 @@
 	<EmptyState title="Couldn't load invoices" description={errorMessage}>
 		{#snippet action()}
 			<Button onclick={load}>Retry</Button>
+		{/snippet}
+	</EmptyState>
+{:else if invoices.length === 0 && offset > 0}
+	<EmptyState title="No more invoices" description="You've gone past the last page.">
+		{#snippet action()}
+			<Button onclick={() => gotoOffset(0)}>Back to first page</Button>
 		{/snippet}
 	</EmptyState>
 {:else if invoices.length === 0}
