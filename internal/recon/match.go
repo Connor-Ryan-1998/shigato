@@ -18,6 +18,7 @@ import (
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/module"
+	"shigoto/internal/payments"
 )
 
 // errAmbiguous is AutoMatch's internal signal that a line was skipped
@@ -29,8 +30,12 @@ var errAmbiguous = errors.New("ambiguous or already matched")
 // Suggestion is one candidate match for a bank line, ranked by Score
 // (higher is better).
 type Suggestion struct {
-	Kind   string // "invoice" or "expense"
-	ID     int64
+	Kind string // "invoice", "expense" or "payout"
+	ID   int64
+	// Ref is the provider payout reference, set only when Kind == "payout"
+	// (a suggested payout has no shigoto row yet - it's created by
+	// MatchPayout - so there's no ID to give).
+	Ref    string
 	Score  int
 	Reason string
 }
@@ -293,6 +298,16 @@ func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 		return core.ErrInvalidState
 	}
 
+	// A payout line is detected and reversed first, since its payments
+	// (webhook-recorded) must never go through the delete path below.
+	payout, err := findPayoutForLine(ctx, tx, orgID, lineID)
+	if err != nil {
+		return err
+	}
+	if payout != nil {
+		return unmatchPayout(ctx, tx, orgID, lineID, payout)
+	}
+
 	rows, err := tx.Query(ctx, `
 		DELETE FROM payments
 		WHERE org_id = $1 AND bank_line_id = $2 AND method IN ('bank_transfer', 'payid')
@@ -391,8 +406,10 @@ func daysBetween(a, b time.Time) int {
 
 // Suggest ranks candidate invoices (for a credit line) or expenses (for a
 // debit line) that lineID might reconcile against, highest score first,
-// capped at 10.
-func Suggest(ctx context.Context, q core.Querier, orgID, lineID int64) ([]Suggestion, error) {
+// capped at 10. For a credit line it also asks orgSlug's payment provider
+// (via b) for payouts that could cover it; an org with no provider
+// configured simply gets none of those, not an error.
+func Suggest(ctx context.Context, q core.Querier, b *billing.Service, orgID int64, orgSlug string, lineID int64) ([]Suggestion, error) {
 	line, err := getBankLine(ctx, q, orgID, lineID)
 	if err != nil {
 		return nil, err
@@ -438,6 +455,23 @@ func Suggest(ctx context.Context, q core.Querier, orgID, lineID int64) ([]Sugges
 			suggestions = append(suggestions, Suggestion{Kind: "invoice", ID: id, Score: score, Reason: reason})
 		}
 		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		if provider, err := b.Payments(orgSlug); err == nil {
+			from := line.PostedOn.AddDate(0, 0, -5)
+			to := line.PostedOn.AddDate(0, 0, 5)
+			payouts, err := provider.ListPayouts(ctx, from, to)
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range payouts {
+				if p.Amount != line.Amount {
+					continue
+				}
+				suggestions = append(suggestions, Suggestion{Kind: "payout", Ref: p.Ref, Score: 90, Reason: "payout amount and arrival date match"})
+			}
+		} else if !errors.Is(err, payments.ErrNoProvider) {
 			return nil, err
 		}
 	case line.Amount < 0:

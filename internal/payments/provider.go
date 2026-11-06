@@ -42,6 +42,37 @@ type Provider interface {
 	// decodes it into an Event. It returns ErrBadSignature if the
 	// signature doesn't match.
 	ParseWebhook(payload []byte, sigHeader string) (Event, error)
+
+	// GetPayout fetches one payout by its provider reference.
+	GetPayout(ctx context.Context, payoutRef string) (Payout, error)
+	// ListPayouts lists payouts expected to arrive within [arrivalFrom,
+	// arrivalTo].
+	ListPayouts(ctx context.Context, arrivalFrom, arrivalTo time.Time) ([]Payout, error)
+	// PayoutTransactions lists the balance transactions that make up
+	// payoutRef, so recon.MatchPayout can map each one back to a
+	// recorded payment and total the provider's fees.
+	PayoutTransactions(ctx context.Context, payoutRef string) ([]BalanceTxn, error)
+}
+
+// Payout is a provider payout to the org's bank account.
+type Payout struct {
+	Ref       string
+	Amount    core.Cents
+	ArrivalOn time.Time
+	Status    string
+}
+
+// BalanceTxn is one balance transaction contributing to a Payout, as seen
+// by recon.MatchPayout. Type is one of "charge", "payment", "refund",
+// "stripe_fee", "adjustment", or another provider transaction type.
+// PaymentRef is the payment intent id for a "charge"/"payment" transaction
+// (empty otherwise).
+type BalanceTxn struct {
+	Ref        string
+	Type       string
+	PaymentRef string
+	Amount     core.Cents
+	Fee        core.Cents
 }
 
 // Event is a provider webhook event, normalized to what shigoto needs to

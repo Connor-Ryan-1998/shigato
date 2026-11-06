@@ -15,8 +15,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
 	"shigoto/internal/db"
+	"shigoto/internal/payments"
 	"shigoto/internal/recon"
 )
 
@@ -308,7 +310,8 @@ func TestSuggestRanksPaymentReference(t *testing.T) {
 	_ = other
 	lineID := testBankLineID(t, pool, org.ID, 30000, mustDate(t, "2026-11-04"), "Transfer "+match.PaymentReference)
 
-	suggestions, err := recon.Suggest(ctx, pool, org.ID, lineID)
+	b := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: func(string) (payments.Provider, error) { return nil, payments.ErrNoProvider }}
+	suggestions, err := recon.Suggest(ctx, pool, b, org.ID, "acme", lineID)
 	if err != nil {
 		t.Fatalf("Suggest: %v", err)
 	}

@@ -46,6 +46,16 @@ type Fake struct {
 	// call and then cleared, to simulate a one-off void failure.
 	VoidInvoiceErr error
 
+	// Payouts is keyed by Payout.Ref, settable by tests for GetPayout and
+	// ListPayouts.
+	Payouts map[string]Payout
+	// Transactions is keyed by payout ref, settable by tests for
+	// PayoutTransactions.
+	Transactions map[string][]BalanceTxn
+	// GetPayoutErr, if set, is returned once by the next GetPayout call
+	// and then cleared.
+	GetPayoutErr error
+
 	mu          sync.Mutex
 	nextID      int
 	customers   []core.Contact
@@ -144,6 +154,45 @@ func (f *Fake) VoidInvoice(_ context.Context, ref string) error {
 
 	f.voided = append(f.voided, ref)
 	return nil
+}
+
+// GetPayout returns the payout registered under f.Payouts[payoutRef], or
+// GetPayoutErr if set (once, then cleared).
+func (f *Fake) GetPayout(_ context.Context, payoutRef string) (Payout, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.GetPayoutErr != nil {
+		err := f.GetPayoutErr
+		f.GetPayoutErr = nil
+		return Payout{}, err
+	}
+	p, ok := f.Payouts[payoutRef]
+	if !ok {
+		return Payout{}, fmt.Errorf("fake: payout %q not found", payoutRef)
+	}
+	return p, nil
+}
+
+// ListPayouts returns every registered payout whose ArrivalOn falls within
+// [arrivalFrom, arrivalTo], inclusive.
+func (f *Fake) ListPayouts(_ context.Context, arrivalFrom, arrivalTo time.Time) ([]Payout, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Payout
+	for _, p := range f.Payouts {
+		if !p.ArrivalOn.Before(arrivalFrom) && !p.ArrivalOn.After(arrivalTo) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// PayoutTransactions returns the balance transactions registered under
+// f.Transactions[payoutRef].
+func (f *Fake) PayoutTransactions(_ context.Context, payoutRef string) ([]BalanceTxn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]BalanceTxn(nil), f.Transactions[payoutRef]...), nil
 }
 
 // Calls returns the successful SendInvoice calls made so far, for test

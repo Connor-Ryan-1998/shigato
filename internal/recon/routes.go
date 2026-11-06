@@ -104,6 +104,10 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			matchExpenseHandler(w, r, d)
 		})))
+	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/match-payout",
+		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			matchPayoutHandler(w, r, d)
+		})))
 	mux.Handle("POST /api/v1/orgs/{org}/bank-lines/{id}/expense",
 		d.Auth.RequireOrg(auth.PermReconWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			createExpenseFromLineHandler(w, r, d)
@@ -834,6 +838,40 @@ func matchExpenseHandler(w http.ResponseWriter, r *http.Request, d module.Deps) 
 	module.WriteJSON(w, http.StatusOK, expenseToResponse(updated))
 }
 
+type matchPayoutRequest struct {
+	PayoutRef string `json:"payout_ref"`
+}
+
+type matchPayoutResponse struct {
+	PaymentsLinked int    `json:"payments_linked"`
+	Fees           int64  `json:"fees"`
+	FeeExpenseID   *int64 `json:"fee_expense_id,omitempty"`
+}
+
+func matchPayoutHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	lineID, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body matchPayoutRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	result, err := MatchPayout(ctx, d.Pool, d.Billing, p.OrgID, r.PathValue("org"), lineID, body.PayoutRef)
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, matchPayoutResponse{
+		PaymentsLinked: result.PaymentsLinked, Fees: int64(result.Fees), FeeExpenseID: result.FeeExpenseID,
+	})
+}
+
 // expenseFromLineRequest is the POST .../expense body: the same shape as
 // expenseRequest, except SpentOn is optional - CreateExpenseFromLine
 // defaults it to the bank line's posted_on when omitted.
@@ -960,7 +998,8 @@ func unmatchHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 type suggestionResponse struct {
 	Kind   string `json:"kind"`
-	ID     int64  `json:"id"`
+	ID     int64  `json:"id,omitempty"`
+	Ref    string `json:"ref,omitempty"`
 	Score  int    `json:"score"`
 	Reason string `json:"reason"`
 }
@@ -972,14 +1011,14 @@ func suggestionsHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		return
 	}
 	p := auth.From(r.Context())
-	suggestions, err := Suggest(r.Context(), d.Pool, p.OrgID, lineID)
+	suggestions, err := Suggest(r.Context(), d.Pool, d.Billing, p.OrgID, r.PathValue("org"), lineID)
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return
 	}
 	resp := make([]suggestionResponse, len(suggestions))
 	for i, s := range suggestions {
-		resp[i] = suggestionResponse{Kind: s.Kind, ID: s.ID, Score: s.Score, Reason: s.Reason}
+		resp[i] = suggestionResponse{Kind: s.Kind, ID: s.ID, Ref: s.Ref, Score: s.Score, Reason: s.Reason}
 	}
 	module.WriteJSON(w, http.StatusOK, resp)
 }

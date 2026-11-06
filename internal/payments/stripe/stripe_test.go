@@ -372,6 +372,71 @@ func TestSendInvoicePastDueDateRejected(t *testing.T) {
 	}
 }
 
+// TestPayoutTransactionsMapsPaymentIntent covers that PayoutTransactions
+// expands a charge transaction's source far enough to read the payment
+// intent id into BalanceTxn.PaymentRef, and reports its fee. It runs
+// against a local httptest server, not the network.
+func TestPayoutTransactionsMapsPaymentIntent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/balance_transactions" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("payout"); got != "po_test_1" {
+			t.Errorf("payout query = %q, want po_test_1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"object": "list",
+			"has_more": false,
+			"url": "/v1/balance_transactions",
+			"data": [{
+				"id": "txn_1",
+				"object": "balance_transaction",
+				"amount": 10000,
+				"fee": 110,
+				"type": "charge",
+				"source": {
+					"id": "ch_1",
+					"object": "charge",
+					"payment_intent": "pi_test_456"
+				}
+			}]
+		}`)
+	}))
+	defer srv.Close()
+
+	backends := stripego.NewBackendsWithConfig(&stripego.BackendConfig{
+		URL:               stripego.String(srv.URL),
+		MaxNetworkRetries: stripego.Int64(0),
+		HTTPClient:        srv.Client(),
+	})
+	s := &Stripe{client: stripego.NewClient("sk_test_dummy", stripego.WithBackends(backends))}
+
+	txns, err := s.PayoutTransactions(context.Background(), "po_test_1")
+	if err != nil {
+		t.Fatalf("PayoutTransactions: %v", err)
+	}
+	if len(txns) != 1 {
+		t.Fatalf("len(txns) = %d, want 1", len(txns))
+	}
+	txn := txns[0]
+	if txn.Ref != "txn_1" {
+		t.Errorf("Ref = %q, want txn_1", txn.Ref)
+	}
+	if txn.Type != "charge" {
+		t.Errorf("Type = %q, want charge", txn.Type)
+	}
+	if txn.PaymentRef != "pi_test_456" {
+		t.Errorf("PaymentRef = %q, want pi_test_456", txn.PaymentRef)
+	}
+	if txn.Amount != 10000 {
+		t.Errorf("Amount = %d, want 10000", txn.Amount)
+	}
+	if txn.Fee != 110 {
+		t.Errorf("Fee = %d, want 110", txn.Fee)
+	}
+}
+
 // TestParseWebhookPaidOnUsesLocation checks Event.PaidOn is reported in the
 // provider's configured loc, not a hardcoded timezone.
 func TestParseWebhookPaidOnUsesLocation(t *testing.T) {

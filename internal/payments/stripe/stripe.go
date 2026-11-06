@@ -165,6 +165,86 @@ func (s *Stripe) SendInvoice(ctx context.Context, inv core.Invoice, lines []core
 	return sent.ID, sent.HostedInvoiceURL, nil
 }
 
+// toPayout converts a Stripe payout to payments.Payout, reporting
+// ArrivalOn as a calendar date in s.loc.
+func (s *Stripe) toPayout(p *stripego.Payout) payments.Payout {
+	return payments.Payout{
+		Ref:       p.ID,
+		Amount:    core.Cents(p.Amount),
+		ArrivalOn: time.Unix(p.ArrivalDate, 0).In(s.locOrUTC()),
+		Status:    string(p.Status),
+	}
+}
+
+// GetPayout fetches one payout by its Stripe id.
+func (s *Stripe) GetPayout(ctx context.Context, payoutRef string) (payments.Payout, error) {
+	p, err := s.client.V1Payouts.Retrieve(ctx, payoutRef, nil)
+	if err != nil {
+		return payments.Payout{}, fmt.Errorf("stripe: retrieving payout %s: %w", payoutRef, err)
+	}
+	return s.toPayout(p), nil
+}
+
+// ListPayouts lists payouts expected to arrive within [arrivalFrom,
+// arrivalTo], inclusive, in s.loc.
+func (s *Stripe) ListPayouts(ctx context.Context, arrivalFrom, arrivalTo time.Time) ([]payments.Payout, error) {
+	loc := s.locOrUTC()
+	y1, m1, d1 := arrivalFrom.Date()
+	from := time.Date(y1, m1, d1, 0, 0, 0, 0, loc).Unix()
+	y2, m2, d2 := arrivalTo.Date()
+	to := time.Date(y2, m2, d2, 23, 59, 59, 0, loc).Unix()
+
+	params := &stripego.PayoutListParams{
+		ArrivalDateRange: &stripego.RangeQueryParams{GreaterThanOrEqual: from, LesserThanOrEqual: to},
+	}
+	var out []payments.Payout
+	for p, err := range s.client.V1Payouts.List(ctx, params).All(ctx) {
+		if err != nil {
+			return nil, fmt.Errorf("stripe: listing payouts: %w", err)
+		}
+		out = append(out, s.toPayout(p))
+	}
+	return out, nil
+}
+
+// balanceTxnType maps a Stripe balance transaction type to the type
+// payments.BalanceTxn reports: "charge" and "payment" pass through
+// unchanged (recon.MatchPayout treats both as a payment to match), and
+// "stripe_fee" also passes through; every other Stripe type is reported
+// as-is, left for the caller to reject as unexpected.
+func balanceTxnPaymentRef(txn *stripego.BalanceTransaction) string {
+	if txn.Source == nil || txn.Source.Charge == nil || txn.Source.Charge.PaymentIntent == nil {
+		return ""
+	}
+	return txn.Source.Charge.PaymentIntent.ID
+}
+
+// PayoutTransactions lists the balance transactions that make up payoutRef,
+// expanding each one's source so a charge's payment intent id is reachable
+// without a second round trip.
+func (s *Stripe) PayoutTransactions(ctx context.Context, payoutRef string) ([]payments.BalanceTxn, error) {
+	params := &stripego.BalanceTransactionListParams{Payout: stripego.String(payoutRef)}
+	params.AddExpand("data.source")
+	var out []payments.BalanceTxn
+	for txn, err := range s.client.V1BalanceTransactions.List(ctx, params).All(ctx) {
+		if err != nil {
+			return nil, fmt.Errorf("stripe: listing balance transactions for payout %s: %w", payoutRef, err)
+		}
+		fee := core.Cents(txn.Fee)
+		if fee < 0 {
+			fee = -fee
+		}
+		out = append(out, payments.BalanceTxn{
+			Ref:        txn.ID,
+			Type:       string(txn.Type),
+			PaymentRef: balanceTxnPaymentRef(txn),
+			Amount:     core.Cents(txn.Amount),
+			Fee:        fee,
+		})
+	}
+	return out, nil
+}
+
 // invoiceNumber renders inv's shigoto number for the "Invoice No." custom
 // field. IssueInvoice always assigns a number before SendInvoice is called,
 // so a nil Number here would be a caller bug, not a normal case.
