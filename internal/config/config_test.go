@@ -65,6 +65,29 @@ func TestLoadRequiresBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidBaseURL(t *testing.T) {
+	cases := []string{
+		"not-a-url",
+		"ftp://example.com",
+		"http://",
+		"https:// has a space",
+	}
+	for _, baseURL := range cases {
+		t.Run(baseURL, func(t *testing.T) {
+			_, err := Load(env(map[string]string{
+				"SHIGOTO_DATABASE_URL": "postgres://x",
+				"SHIGOTO_BASE_URL":     baseURL,
+			}))
+			if err == nil {
+				t.Fatalf("expected error for invalid SHIGOTO_BASE_URL %q, got nil", baseURL)
+			}
+			if got := err.Error(); !strings.Contains(got, "SHIGOTO_BASE_URL") {
+				t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_BASE_URL")
+			}
+		})
+	}
+}
+
 func TestModulesSubset(t *testing.T) {
 	c, err := Load(env(map[string]string{
 		"SHIGOTO_DATABASE_URL": "postgres://x",

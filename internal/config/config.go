@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -55,6 +56,14 @@ func Load(getenv func(string) string) (Config, error) {
 	c.BaseURL = getenv("SHIGOTO_BASE_URL")
 	if c.BaseURL == "" {
 		return Config{}, fmt.Errorf("SHIGOTO_BASE_URL is required")
+	}
+	// The CSRF middleware (internal/httpapi/csrf.go) compares each request's
+	// Origin against this origin, so it must parse as an absolute http(s)
+	// URL with a host: a malformed value would otherwise only surface as a
+	// nil-pointer panic or a silent 403 on every browser write, at request
+	// time instead of at startup.
+	if u, err := url.Parse(c.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return Config{}, fmt.Errorf("SHIGOTO_BASE_URL must be an absolute http:// or https:// URL, got %q", c.BaseURL)
 	}
 
 	tz := getenv("SHIGOTO_TIMEZONE")

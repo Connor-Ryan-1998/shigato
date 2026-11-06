@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 
 	"shigoto/internal/auth"
@@ -34,6 +35,7 @@ func registerMeRoutes(mux *http.ServeMux, d Deps) {
 			"SELECT id, email, name FROM users WHERE id = $1", userID,
 		).Scan(&user.ID, &user.Email, &user.Name)
 		if err != nil {
+			slog.Error("resolving current user failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
@@ -47,6 +49,7 @@ func registerMeRoutes(mux *http.ServeMux, d Deps) {
 			userID,
 		)
 		if err != nil {
+			slog.Error("listing current user's orgs failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
@@ -56,6 +59,7 @@ func registerMeRoutes(mux *http.ServeMux, d Deps) {
 		for rows.Next() {
 			var slug, name, role string
 			if err := rows.Scan(&slug, &name, &role); err != nil {
+				slog.Error("scanning current user's org row failed", "error", err)
 				writeError(w, http.StatusInternalServerError, "internal error")
 				return
 			}
@@ -67,6 +71,7 @@ func registerMeRoutes(mux *http.ServeMux, d Deps) {
 			orgs = append(orgs, meOrg{Slug: slug, Name: name, Role: role, Perms: permStrs})
 		}
 		if err := rows.Err(); err != nil {
+			slog.Error("iterating current user's orgs failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
