@@ -112,8 +112,8 @@ func adminCreateOwner(args []string) error {
 	return nil
 }
 
-// readPassword reads the first line from r, trims it, and rejects an empty
-// password.
+// readPassword reads the first line from r, strips only the line ending (spaces
+// are part of the password), and rejects an empty password.
 func readPassword(r io.Reader) (string, error) {
 	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
@@ -122,7 +122,7 @@ func readPassword(r io.Reader) (string, error) {
 		}
 		return "", fmt.Errorf("password must not be empty")
 	}
-	password := strings.TrimSpace(scanner.Text())
+	password := strings.TrimRight(scanner.Text(), "\r")
 	if password == "" {
 		return "", fmt.Errorf("password must not be empty")
 	}
@@ -134,22 +134,28 @@ func readPassword(r io.Reader) (string, error) {
 // idempotent on email plus slug: rerunning it does not error, does not
 // duplicate rows, and does not change an existing user's password.
 func createOwner(ctx context.Context, pool *pgxpool.Pool, slug, name, email, password string) error {
-	org, err := core.OrgBySlug(ctx, pool, slug)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	org, err := core.OrgBySlug(ctx, tx, slug)
 	if errors.Is(err, core.ErrNotFound) {
-		org, err = core.CreateOrg(ctx, pool, slug, name)
+		org, err = core.CreateOrg(ctx, tx, slug, name)
 	}
 	if err != nil {
 		return fmt.Errorf("resolving org %q: %w", slug, err)
 	}
 
 	var userID int64
-	err = pool.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", email).Scan(&userID)
+	err = tx.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", email).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		hash, hashErr := auth.HashPassword(password)
 		if hashErr != nil {
 			return fmt.Errorf("hashing password: %w", hashErr)
 		}
-		err = pool.QueryRow(ctx,
+		err = tx.QueryRow(ctx,
 			"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
 			email, email, hash,
 		).Scan(&userID)
@@ -158,14 +164,23 @@ func createOwner(ctx context.Context, pool *pgxpool.Pool, slug, name, email, pas
 		return fmt.Errorf("resolving user %q: %w", email, err)
 	}
 
-	if _, err := pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'owner') ON CONFLICT (user_id, org_id) DO NOTHING",
 		userID, org.ID,
 	); err != nil {
 		return fmt.Errorf("creating owner membership: %w", err)
 	}
+	var role string
+	if err := tx.QueryRow(ctx,
+		"SELECT role FROM memberships WHERE user_id = $1 AND org_id = $2", userID, org.ID,
+	).Scan(&role); err != nil {
+		return fmt.Errorf("reading membership: %w", err)
+	}
+	if role != "owner" {
+		return fmt.Errorf("%s already has role %q in org %s, not owner", email, role, slug)
+	}
 
-	return nil
+	return tx.Commit(ctx)
 }
 
 func serve() error {

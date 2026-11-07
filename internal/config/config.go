@@ -49,7 +49,6 @@ type Config struct {
 	Modules     map[string]bool
 	FilesDir    string
 	BaseURL     string
-	Stripe      map[string]StripeOrg
 	// Location is the timezone invoice dates (issue_date, due_date) are
 	// calculated in, so "today" means the operator's calendar day, not
 	// UTC's. Defaults to Australia/Brisbane.
@@ -126,6 +125,9 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Modules = make(map[string]bool, len(Known))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
 		if !isKnownModule(name) {
 			return Config{}, fmt.Errorf("unknown module %q (known: %s)", name, strings.Join(Known, ", "))
 		}

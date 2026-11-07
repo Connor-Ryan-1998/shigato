@@ -1,0 +1,264 @@
+<script lang="ts">
+	import { page } from '$app/state';
+	import { api, ApiError } from '../../../../lib/api';
+	import { money, todayLocal } from '../../../../lib/format';
+	import { session } from '../../../../lib/session.svelte';
+	import PageHeader from '../../../../lib/components/PageHeader.svelte';
+	import Field from '../../../../lib/components/Field.svelte';
+	import Button from '../../../../lib/components/Button.svelte';
+	import Toast from '../../../../lib/components/Toast.svelte';
+
+	type Lease = {
+		id: number;
+		start_date: string;
+		end_date?: string;
+		termination_date?: string;
+		frequency: string;
+		bond_amount: number;
+		bond_status: string;
+		rta_lodgement_ref?: string;
+		warnings?: string[];
+		rent_changes: { id: number; effective_date: string; amount: number }[];
+		charges: { id: number; description: string; amount: number; start_date: string; end_date?: string }[];
+	};
+	type Ledger = {
+		periods: {
+			start: string;
+			end: string;
+			amount_due: number;
+			invoice_id?: number;
+			invoice_status?: string;
+			paid: number;
+		}[];
+		opening_arrears: number;
+		arrears: number;
+		invoiced_not_due: number;
+		unissued: number;
+	};
+
+	const org = $derived(page.params.org);
+	const url = $derived(`/api/v1/orgs/${page.params.org}/leases/${page.params.id}`);
+	const canWrite = $derived(session.currentOrg?.perms.includes('property_write') ?? false);
+
+	let lease = $state<Lease | null>(null);
+	let ledger = $state<Ledger | null>(null);
+	let error = $state('');
+	let notice = $state('');
+
+	const today = todayLocal();
+	let rcDate = $state(today);
+	let rcAmount = $state('');
+	let chDesc = $state('');
+	let chAmount = $state('');
+	let chStart = $state(today);
+	let chEnd = $state('');
+	let termDate = $state(today);
+	let bondRef = $state('');
+	let bondDate = $state(today);
+
+	const cents = (d: string) => Math.round(Number(d || 0) * 100);
+
+	function fail(e: unknown) {
+		error = e instanceof ApiError ? e.message : 'Something went wrong.';
+	}
+
+	async function load() {
+		[lease, ledger] = await Promise.all([
+			api<Lease>('GET', url),
+			api<Ledger>('GET', `${url}/ledger`)
+		]);
+	}
+
+	$effect(() => {
+		url;
+		load().catch(fail);
+	});
+
+	async function act(e: SubmitEvent | null, path: string, body: unknown, done = '') {
+		e?.preventDefault();
+		error = '';
+		notice = '';
+		try {
+			const res = await api<{ warnings?: string[] }>('POST', `${url}/${path}`, body);
+			notice = [done, ...(res?.warnings ?? [])].filter(Boolean).join(' ');
+			await load();
+		} catch (err) {
+			fail(err);
+		}
+	}
+</script>
+
+<PageHeader title={`Lease ${page.params.id}`} />
+<p><a href={`/${org}/properties`}>Back to properties</a></p>
+
+{#if lease}
+	<dl>
+		<dt>Term</dt>
+		<dd>
+			{lease.start_date} to {lease.termination_date ?? lease.end_date ?? 'ongoing'}{lease.termination_date
+				? ' (terminated)'
+				: ''}
+		</dd>
+		<dt>Frequency</dt>
+		<dd>{lease.frequency}</dd>
+		<dt>Bond</dt>
+		<dd>
+			{money(lease.bond_amount)} · {lease.bond_status}{lease.rta_lodgement_ref
+				? ` (RTA ${lease.rta_lodgement_ref})`
+				: ''}
+		</dd>
+	</dl>
+	{#each lease.warnings ?? [] as w (w)}
+		<p class="warn" role="status">{w}</p>
+	{/each}
+
+	<h2>Rent</h2>
+	<ul>
+		{#each lease.rent_changes as rc (rc.id)}
+			<li>{money(rc.amount)} from {rc.effective_date}</li>
+		{/each}
+	</ul>
+	{#if lease.charges.length > 0}
+		<h2>Charges</h2>
+		<ul>
+			{#each lease.charges as c (c.id)}
+				<li>{c.description}: {money(c.amount)} from {c.start_date}{c.end_date ? ` to ${c.end_date}` : ''}</li>
+			{/each}
+		</ul>
+	{/if}
+{/if}
+
+{#if ledger}
+	<h2>Ledger</h2>
+	<p>
+		Arrears {money(ledger.arrears)} · Invoiced, not due {money(ledger.invoiced_not_due)} · Unissued {money(
+			ledger.unissued
+		)}{ledger.opening_arrears ? ` · Opening arrears ${money(ledger.opening_arrears)}` : ''}
+	</p>
+	<table>
+		<thead>
+			<tr><th>Period</th><th>Due</th><th>Paid</th><th>Invoice</th></tr>
+		</thead>
+		<tbody>
+			{#each ledger.periods as p (p.start)}
+				<tr>
+					<td>{p.start} to {p.end}</td>
+					<td>{money(p.amount_due)}</td>
+					<td>{money(p.paid)}</td>
+					<td>
+						{#if p.invoice_id}
+							<a href={`/${org}/invoices/${p.invoice_id}`}>{p.invoice_status}</a>
+						{:else}
+							Not invoiced
+						{/if}
+					</td>
+				</tr>
+			{:else}
+				<tr><td colspan="4">No periods yet.</td></tr>
+			{/each}
+		</tbody>
+	</table>
+{/if}
+
+{#if lease && canWrite && !lease.termination_date}
+	<h2>Actions</h2>
+	<form
+		class="row"
+		onsubmit={(e) =>
+			act(e, 'rent-changes', { effective_date: rcDate, amount: cents(rcAmount) }, 'Rent change saved.')}
+	>
+		<Field label="New rent from" id="rc-date"><input id="rc-date" type="date" bind:value={rcDate} required /></Field>
+		<Field label="Rent ($)" id="rc-amount">
+			<input id="rc-amount" type="number" min="0" step="0.01" bind:value={rcAmount} required />
+		</Field>
+		<Button type="submit">Change rent</Button>
+	</form>
+	<form
+		class="row"
+		onsubmit={(e) =>
+			act(
+				e,
+				'charges',
+				{ description: chDesc, amount: cents(chAmount), start_date: chStart, end_date: chEnd || undefined },
+				'Charge added.'
+			)}
+	>
+		<Field label="Charge" id="ch-desc"><input id="ch-desc" bind:value={chDesc} required /></Field>
+		<Field label="Amount per period ($)" id="ch-amount">
+			<input id="ch-amount" type="number" min="0" step="0.01" bind:value={chAmount} required />
+		</Field>
+		<Field label="From" id="ch-start"><input id="ch-start" type="date" bind:value={chStart} required /></Field>
+		<Field label="To (optional)" id="ch-end"><input id="ch-end" type="date" bind:value={chEnd} /></Field>
+		<Button type="submit">Add charge</Button>
+	</form>
+	{#if lease.bond_amount > 0}
+		<div class="row">
+			<Button variant="secondary" onclick={() => act(null, 'bond-invoice', {}, 'Bond invoice created.')}>
+				Create bond invoice
+			</Button>
+		</div>
+		<form
+			class="row"
+			onsubmit={(e) => act(e, 'bond-lodgement', { rta_ref: bondRef, lodged_on: bondDate }, 'Bond lodged.')}
+		>
+			<Field label="RTA reference" id="bond-ref"><input id="bond-ref" bind:value={bondRef} required /></Field>
+			<Field label="Lodged on" id="bond-date">
+				<input id="bond-date" type="date" bind:value={bondDate} required />
+			</Field>
+			<Button type="submit">Record lodgement</Button>
+		</form>
+	{/if}
+	<form
+		class="row"
+		onsubmit={(e) => {
+			if (!confirm(`Terminate this lease on ${termDate}?`)) {
+				e.preventDefault();
+				return;
+			}
+			act(e, 'terminate', { termination_date: termDate }, 'Lease terminated.');
+		}}
+	>
+		<Field label="Terminate on" id="term-date">
+			<input id="term-date" type="date" bind:value={termDate} required />
+		</Field>
+		<Button type="submit" variant="danger">Terminate lease</Button>
+	</form>
+{/if}
+
+{#if notice}
+	<Toast message={notice} onDismiss={() => (notice = '')} />
+{/if}
+{#if error}
+	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
+{/if}
+
+<style>
+	dl {
+		display: grid;
+		grid-template-columns: max-content 1fr;
+		gap: var(--space-2, 0.5rem) var(--space-4, 1rem);
+	}
+	dd {
+		margin: 0;
+	}
+	.warn {
+		color: var(--warning, #8a5a00);
+	}
+	.row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-4, 1rem);
+		align-items: flex-end;
+		margin-bottom: var(--space-4, 1rem);
+	}
+	table {
+		width: 100%;
+		border-collapse: collapse;
+	}
+	th,
+	td {
+		text-align: left;
+		padding: var(--space-2, 0.5rem);
+		border-bottom: 1px solid var(--border, #ddd);
+	}
+</style>

@@ -376,3 +376,17 @@ func TestLoadSMTPMissingFromIsError(t *testing.T) {
 		t.Errorf("error = %q, want it to mention %q", got, "SHIGOTO_SMTP_FROM")
 	}
 }
+
+func TestLoadIgnoresEmptyModuleEntries(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "http://localhost:8080",
+		"SHIGOTO_MODULES":      "property,",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.Modules["property"] || len(c.Modules) != 1 {
+		t.Errorf("Modules = %+v, want only property", c.Modules)
+	}
+}

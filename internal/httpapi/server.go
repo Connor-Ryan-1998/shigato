@@ -283,6 +283,11 @@ func requestMagicLink(w http.ResponseWriter, r *http.Request, d Deps) {
 		// bounded instead by its own timeout; a send failure is logged,
 		// never surfaced (the response is already written).
 		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					slog.Error("magic-link mail panicked", "panic", p)
+				}
+			}()
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), magicMailTimeout)
 			defer cancel()
 			sendMagicLinkEmail(ctx, d, email, link)
