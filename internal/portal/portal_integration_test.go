@@ -530,6 +530,19 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	}
 }
 
+// TestMagicRequestEmailNotConfigured covers Ruling 58: with no mailer
+// configured, POST /api/v1/auth/magic always 422s before even looking at
+// the email - a config-level failure, not an account-enumeration signal.
+func TestMagicRequestEmailNotConfigured(t *testing.T) {
+	pool := db.TestPool(t)
+	h := newTestHandler(pool, nil)
+
+	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": "anyone@example.com"})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestMagicRateLimit(t *testing.T) {
 	pool := db.TestPool(t)
 	h := newTestHandler(pool, (&mailSink{}).mailer())
