@@ -316,6 +316,75 @@ func insertExpiredMagicLink(t *testing.T, pool *pgxpool.Pool, userID int64, toke
 
 // --- tests ---
 
+func TestPortalMembershipContactScopesAcrossOrgs(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	h := newTestHandler(pool, nil)
+	var token string
+	var userID, firstOrgID int64
+	for _, slug := range []string{"alpha", "beta"} {
+		org := createOrg(t, pool, slug)
+		own := createContact(t, pool, org.ID, "tenant", "Shared tenant", "shared@example.com")
+		neighbor := createContact(t, pool, org.ID, "tenant", "Private neighbor", "neighbor@example.com")
+		ownInvoice := createIssuedInvoice(t, pool, org.ID, own.ID, 10000)
+		otherInvoice := createIssuedInvoice(t, pool, org.ID, neighbor.ID, 20000)
+		prop := createProperty(t, pool, org.ID)
+		ownLease := createLease(t, pool, org.ID, prop, own.ID)
+		createLease(t, pool, org.ID, prop, neighbor.ID)
+		if token == "" {
+			firstOrgID = org.ID
+			token = signInPortalUser(t, pool, h, org.ID, "tenant", "shared@example.com", own.ID)
+			if err := pool.QueryRow(ctx, "SELECT id FROM users WHERE email='shared@example.com'").Scan(&userID); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if _, err := pool.Exec(ctx, "INSERT INTO memberships (user_id,org_id,role,contact_id) VALUES ($1,$2,'tenant',$3)", userID, org.ID, own.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		base := "/api/v1/portal/" + slug
+		for path, wantID := range map[string]int64{"/invoices": ownInvoice, "/leases": ownLease.ID} {
+			rr := doJSON(t, h, "GET", base+path, token, nil)
+			var rows []struct {
+				ID int64 `json:"id"`
+			}
+			if rr.Code != 200 {
+				t.Fatalf("%s: %d %s", base+path, rr.Code, rr.Body.String())
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].ID != wantID {
+				t.Fatalf("%s exposed wrong contact: %+v", base+path, rows)
+			}
+		}
+		for id, want := range map[int64]int{ownInvoice: 200, otherInvoice: 404} {
+			rr := doJSON(t, h, "GET", base+"/invoices/"+itoa(id), token, nil)
+			if rr.Code != want {
+				t.Fatalf("invoice %d: %d want %d", id, rr.Code, want)
+			}
+			if want == 404 && strings.TrimSpace(rr.Body.String()) != `{"error":"not found"}` {
+				t.Fatal("foreign contact detail leaked")
+			}
+		}
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM memberships WHERE user_id=$1 AND org_id=$2", userID, firstOrgID); err != nil {
+		t.Fatal(err)
+	}
+	for slug, want := range map[string]int{"alpha": 404, "beta": 200} {
+		if rr := doJSON(t, h, "GET", "/api/v1/portal/"+slug+"/invoices", token, nil); rr.Code != want {
+			t.Fatalf("after revoke %s: %d want %d", slug, rr.Code, want)
+		}
+	}
+	sum := sha256.Sum256([]byte(token))
+	if _, err := pool.Exec(ctx, "UPDATE sessions SET expires_at=now()-interval '1 minute' WHERE token_hash=$1", sum[:]); err != nil {
+		t.Fatal(err)
+	}
+	if rr := doJSON(t, h, "GET", "/api/v1/portal/beta/invoices", token, nil); rr.Code != 401 {
+		t.Fatalf("expired session: %d want 401", rr.Code)
+	}
+}
+
 func TestPortalInvoiceScoping(t *testing.T) {
 	pool := db.TestPool(t)
 	org := createOrg(t, pool, "acme")
