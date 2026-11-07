@@ -27,6 +27,11 @@
 	let submitting = $state(false);
 	let sso = $state(false);
 
+	let magicEmail = $state('');
+	let magicSubmitting = $state(false);
+	let magicError = $state('');
+	let magicSent = $state(false);
+
 	function oidcStartUrl(): string {
 		const next = safeNext(page.url.searchParams.get('next')) ?? '/';
 		return '/api/v1/auth/oidc/start?next=' + encodeURIComponent(next);
@@ -91,9 +96,29 @@
 			submitting = false;
 		}
 	}
+
+	// Ruling: /auth/magic always returns 202 whether or not the email is
+	// known (global-constraints.md "no account enumeration"), so magicSent
+	// shows the same confirmation either way. A 422 ("email is not
+	// configured") or 429 (rate limited) is a real, visible failure - not
+	// an enumeration risk - so those show the server's own message.
+	async function submitMagic(e: SubmitEvent) {
+		e.preventDefault();
+		magicError = '';
+		magicSubmitting = true;
+		try {
+			await api('POST', '/api/v1/auth/magic', { email: magicEmail });
+			magicSent = true;
+		} catch (err) {
+			magicError = err instanceof ApiError ? err.message : 'Something went wrong.';
+		} finally {
+			magicSubmitting = false;
+		}
+	}
 </script>
 
 <div class="login-page">
+	<div class="forms">
 	<form onsubmit={submit}>
 		<h1>Sign in</h1>
 		<Field label="Email" id="email">
@@ -116,6 +141,30 @@
 			<p class="sso"><a href={oidcStartUrl()}>Sign in with SSO</a></p>
 		{/if}
 	</form>
+
+	<form class="magic-form" onsubmit={submitMagic}>
+		<h2>Tenant or client?</h2>
+		{#if magicSent}
+			<p role="status">If that's a shigoto account, check your inbox for a sign-in link.</p>
+		{:else}
+			<Field label="Your email" id="magic-email">
+				<input
+					id="magic-email"
+					type="email"
+					bind:value={magicEmail}
+					required
+					autocomplete="username"
+				/>
+			</Field>
+			{#if magicError}
+				<p class="error" role="alert">{magicError}</p>
+			{/if}
+			<Button type="submit" variant="secondary" disabled={magicSubmitting}>
+				Email me a sign-in link
+			</Button>
+		{/if}
+	</form>
+	</div>
 </div>
 
 <style>
@@ -125,6 +174,13 @@
 		align-items: center;
 		min-height: 100vh;
 		padding: var(--space-4);
+	}
+	.forms {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4);
+		width: 100%;
+		max-width: 24rem;
 	}
 	form {
 		display: flex;
@@ -145,5 +201,9 @@
 	.sso {
 		margin: 0;
 		text-align: center;
+	}
+	.magic-form h2 {
+		margin: 0;
+		font-size: var(--text-lg);
 	}
 </style>

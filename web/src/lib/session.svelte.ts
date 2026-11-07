@@ -9,6 +9,10 @@ export type MeOrg = {
 	name: string;
 	role: string;
 	perms: string[];
+	// True for a tenant/client membership (omitted by the API for a staff
+	// membership) - tells the SPA this org belongs in the portal nav rather
+	// than looking like a staff org with no permissions.
+	portal?: boolean;
 };
 
 export type MeResponse = {

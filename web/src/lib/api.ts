@@ -54,6 +54,14 @@ async function defaultOnUnauthorized(): Promise<boolean> {
 	// rejection.
 	if (window.location.pathname === '/login') return false;
 
+	// Ruling 50: a portal (tenant/client) session never gets ReloginDialog -
+	// that dialog is staff-only (password/SSO), not magic-link - so a 401
+	// anywhere under /portal goes straight to /login instead.
+	if (window.location.pathname.startsWith('/portal')) {
+		redirectToLogin();
+		return false;
+	}
+
 	if (!reloginPrompt) {
 		redirectToLogin();
 		return false;

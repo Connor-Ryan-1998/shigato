@@ -112,6 +112,9 @@
 			</button>
 			<div class="user-menu">
 				<span>{session.me?.user.name}</span>
+				{#if session.me?.orgs.some((o) => o.portal)}
+					<a href="/portal">Portal</a>
+				{/if}
 				<button type="button" onclick={logout}>Logout</button>
 			</div>
 		</div>
@@ -206,6 +209,10 @@
 		display: flex;
 		align-items: center;
 		gap: var(--space-2);
+	}
+
+	.user-menu a {
+		color: var(--text);
 	}
 
 	.user-menu span {

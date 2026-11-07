@@ -153,6 +153,19 @@ describe('api', () => {
 			expect(assign).not.toHaveBeenCalled();
 		});
 
+		it('redirects to /login under /portal even with a relogin prompt registered (Ruling 50)', async () => {
+			resetOnUnauthorized();
+			const assign = stubLocation('/portal/acme/invoices');
+			vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
+			const prompt = vi.fn(async () => true);
+			registerReloginPrompt(prompt);
+
+			await expect(api('GET', '/api/v1/portal/acme/invoices')).rejects.toThrow(ApiError);
+
+			expect(prompt).not.toHaveBeenCalled();
+			expect(assign).toHaveBeenCalledWith('/login?next=%2Fportal%2Facme%2Finvoices');
+		});
+
 		it('falls back to the redirect when the relogin prompt is cancelled', async () => {
 			resetOnUnauthorized();
 			const assign = stubLocation('/acme/invoices');

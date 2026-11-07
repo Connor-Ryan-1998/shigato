@@ -134,7 +134,9 @@ test.afterAll(() => {
 
 test('login, dashboard tiles, and org switching', async ({ page }) => {
 	await page.goto(`${base}/login`);
-	await page.getByLabel('Email').fill(email);
+	// Exact: /login now also has the magic-link panel's own "Your email"
+	// field, which a plain substring match for "Email" would also hit.
+	await page.getByLabel('Email', { exact: true }).fill(email);
 	await page.getByLabel('Password').fill(password);
 	await page.getByRole('button', { name: 'Sign in' }).click();
 

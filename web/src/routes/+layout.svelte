@@ -78,9 +78,11 @@
 		// harmless no-op.
 		const cleanup = () => registerReloginPrompt(null);
 
-		// /login has no session to fetch yet; fetching /me there would just
-		// 401 and bounce back to the very page we're already on.
-		if (page.url.pathname === '/login') {
+		// /login and /auth/magic have no session to fetch yet; fetching /me
+		// there would 401 before the page's own logic runs (the magic page
+		// hasn't even posted its token yet) and bounce the browser straight
+		// to /login via a hard navigation, never rendering either page.
+		if (page.url.pathname === '/login' || page.url.pathname === '/auth/magic') {
 			loading = false;
 			return cleanup;
 		}

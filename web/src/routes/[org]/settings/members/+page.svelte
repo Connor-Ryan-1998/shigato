@@ -10,9 +10,14 @@
 	import InviteDialog, {
 		type NewInvite
 	} from '../../../../lib/modules/core/members/InviteDialog.svelte';
+	import PortalInviteDialog, {
+		type PortalContact,
+		type PortalInviteResult
+	} from '../../../../lib/modules/core/members/PortalInviteDialog.svelte';
 
 	type Invite = { id: number; email: string; role: string; expires_at: string };
 	type CreateInviteResponse = { invite_id: number; link: string; emailed: boolean };
+	type Contact = { id: number; name: string; kind: string };
 
 	let loadStatus = $state<'loading' | 'error' | 'ready'>('loading');
 	let errorMessage = $state('');
@@ -42,6 +47,12 @@
 	let inviteLink = $state('');
 	let inviteEmailed = $state(false);
 	let invitedEmail = $state('');
+
+	let portalInviteOpen = $state(false);
+	let portalInviteBusy = $state(false);
+	let portalInviteError = $state('');
+	let portalInviteResult = $state<PortalInviteResult | null>(null);
+	let portalContacts = $state<PortalContact[]>([]);
 
 	async function load() {
 		const seq = ++requestSeq;
@@ -155,10 +166,40 @@
 		invitedEmail = '';
 		inviteOpen = true;
 	}
+
+	async function openPortalInviteDialog() {
+		portalInviteError = '';
+		portalInviteResult = null;
+		portalInviteOpen = true;
+		try {
+			const org = page.params.org;
+			const all = await api<Contact[]>('GET', `/api/v1/orgs/${org}/contacts`);
+			portalContacts = all.filter((c) => c.kind === 'tenant' || c.kind === 'client');
+		} catch (e) {
+			portalInviteError = e instanceof ApiError ? e.message : 'Something went wrong.';
+		}
+	}
+
+	async function createPortalInvite(contactId: number) {
+		const org = page.params.org;
+		portalInviteError = '';
+		portalInviteBusy = true;
+		try {
+			portalInviteResult = await api<PortalInviteResult>(
+				'POST',
+				`/api/v1/orgs/${org}/contacts/${contactId}/portal-invite`
+			);
+		} catch (e) {
+			portalInviteError = e instanceof ApiError ? e.message : 'Something went wrong.';
+		} finally {
+			portalInviteBusy = false;
+		}
+	}
 </script>
 
 <PageHeader title="Members">
 	{#snippet actions()}
+		<Button variant="secondary" onclick={openPortalInviteDialog}>Invite to portal</Button>
 		<Button onclick={openInviteDialog}>Invite staff member</Button>
 	{/snippet}
 </PageHeader>
@@ -209,6 +250,15 @@
 	emailed={inviteEmailed}
 	{invitedEmail}
 	onSubmit={createInvite}
+/>
+
+<PortalInviteDialog
+	bind:open={portalInviteOpen}
+	contacts={portalContacts}
+	error={portalInviteError}
+	busy={portalInviteBusy}
+	result={portalInviteResult}
+	onSubmit={createPortalInvite}
 />
 
 <style>
