@@ -27,16 +27,20 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: go-task/setup-task@v1
-      - run: task web:install web:test
-      # Build the SPA before the Go tests, so internal/webui's tests (e.g.
-      # TestWebUIEveryInlineScriptHasMatchingHash) run against the real
-      # index.html rather than the "not built" placeholder.
-      - run: task web:build
-      - run: task lint
-      - run: task test
-      - run: task test SUITE=integration
+      - run: task web:install
       - run: npx playwright install --with-deps chromium
         working-directory: web
-      - run: task web:e2e
+      - run: task verify 2>&1 | tee verify.log
+        shell: bash
       - name: Build container image
         run: docker build -t shigoto:ci .
+      - run: task audit 2>&1 | tee audit.log
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: validation-failure
+          path: |
+            verify.log
+            audit.log
+            web/test-results/

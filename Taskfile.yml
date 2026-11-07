@@ -4,6 +4,22 @@ vars:
   SUITE: '{{.SUITE | default "unit"}}'
 
 tasks:
+  verify:
+    desc: Build and run all application checks sequentially (requires Docker and Chromium).
+    cmds:
+      - task: build
+      - task: lint
+      - task: test-unit
+      - task: test-integration
+      - task: web:test
+      - task: web:e2e-run
+
+  audit:
+    desc: Check Go and all npm dependencies for published vulnerabilities (requires network).
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - npm --prefix web audit
+
   test:
     desc: Run tests. SUITE=unit (default) or SUITE=integration.
     cmds:
@@ -18,7 +34,7 @@ tasks:
     internal: true
     cmds:
       - docker compose up -d --wait db mailpit
-      - SHIGOTO_TEST_DATABASE_URL=postgres://shigoto:shigoto@localhost:5432/shigoto_test?sslmode=disable go test -race -tags integration -count=1 ./...
+      - SHIGOTO_TEST_DATABASE_URL=postgres://shigoto:shigoto@localhost:5432/shigoto_test?sslmode=disable go test -race -tags integration -count=1 -timeout=10m ./...
 
   build:
     desc: Build the shigoto binary.
@@ -59,10 +75,15 @@ tasks:
       - npm test -- --run
 
   web:e2e:
-    desc: Run the Playwright smoke test against a freshly built binary and compose Postgres.
-    dir: web
+    desc: Run Playwright workflows against a freshly built binary and compose Postgres.
     cmds:
       - task: build
+      - task: web:e2e-run
+
+  web:e2e-run:
+    internal: true
+    dir: web
+    cmds:
       - npx playwright test
 
   web:check:
