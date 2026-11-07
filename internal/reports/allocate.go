@@ -6,7 +6,27 @@
 // of going through those packages' exported funcs.
 package reports
 
-import "shigoto/internal/core"
+import (
+	"math/big"
+
+	"shigoto/internal/core"
+)
+
+// mulDivRound keeps intermediate products and rounding exact for valid int64 totals.
+func mulDivRound(a, b, d int64) int64 {
+	var n, denominator big.Int
+	n.Mul(big.NewInt(a), big.NewInt(b))
+	sign := n.Sign()
+	n.Abs(&n)
+	n.Lsh(&n, 1)
+	n.Add(&n, big.NewInt(d))
+	denominator.Lsh(big.NewInt(d), 1)
+	n.Quo(&n, &denominator)
+	if sign < 0 {
+		n.Neg(&n)
+	}
+	return n.Int64()
+}
 
 // AllocLine is one invoice line being allocated a share of a payment.
 // Amount is ex-GST; GST is that line's own GST amount.
@@ -49,13 +69,13 @@ func Allocate(payment core.Cents, lines []AllocLine) []Share {
 		case i == len(lines)-1:
 			incl = payment - allocated
 		case invoiceTotal != 0:
-			incl = core.Cents(core.DivRound(int64(payment)*int64(lineTotals[i]), int64(invoiceTotal)))
+			incl = core.Cents(mulDivRound(int64(payment), int64(lineTotals[i]), int64(invoiceTotal)))
 		}
 		allocated += incl
 
 		var gst core.Cents
 		if lineTotals[i] != 0 {
-			gst = core.Cents(core.DivRound(int64(incl)*int64(l.GST), int64(lineTotals[i])))
+			gst = core.Cents(mulDivRound(int64(incl), int64(l.GST), int64(lineTotals[i])))
 		}
 
 		shares[i] = Share{Line: l, Incl: incl, GST: gst, Ex: incl - gst}

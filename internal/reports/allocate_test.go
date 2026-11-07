@@ -6,6 +6,37 @@ import (
 	"shigoto/internal/core"
 )
 
+func TestAllocateLargePayment(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		payment       core.Cents
+		lines         []AllocLine
+		incl, gst, ex core.Cents
+	}{
+		{"product overflow", 6_600_000_000, []AllocLine{{Amount: 3_000_000_000, GST: 300_000_000}, {Amount: 3_000_000_000, GST: 300_000_000}}, 3_300_000_000, 300_000_000, 3_000_000_000},
+		{"GST product overflow", 110_000_000_000, []AllocLine{{Amount: 100_000_000_000, GST: 10_000_000_000}}, 110_000_000_000, 10_000_000_000, 100_000_000_000},
+		{"rounding overflow", 3_000_000_000, []AllocLine{{Amount: 2_000_000_000}, {Amount: 2_000_000_000}}, 1_500_000_000, 0, 1_500_000_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i, share := range Allocate(tc.payment, tc.lines) {
+				if share.Incl != tc.incl || share.GST != tc.gst || share.Ex != tc.ex {
+					t.Errorf("line %d: got incl=%d gst=%d ex=%d; want %d, %d, %d", i, share.Incl, share.GST, share.Ex, tc.incl, tc.gst, tc.ex)
+				}
+			}
+		})
+	}
+}
+
+func TestAllocateSignedHalfCent(t *testing.T) {
+	lines := []AllocLine{{Amount: 1, GST: 1}, {Amount: 1, GST: 1}}
+	for _, payment := range []core.Cents{-1, 0, 1} {
+		shares := Allocate(payment, lines)
+		if shares[0].Incl != payment || shares[0].GST != payment || shares[0].Ex != 0 || shares[1].Incl != 0 {
+			t.Errorf("payment %d: shares=%+v", payment, shares)
+		}
+	}
+}
+
 // TestAllocateSplitsRemainderToLastLine checks the exact worked example from
 // the task brief: a $50 payment against an invoice with two lines, one GST
 // one FRE.
