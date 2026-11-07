@@ -99,7 +99,7 @@ The server is configured by environment variables, all prefixed `SHIGOTO_`:
 | `SHIGOTO_SCHEDULER` | no | `on` | `on` or `off`. Enables the in-process hourly scheduler (rent runs and session pruning). |
 | `SHIGOTO_STRIPE_<ORGSLUG>_SECRET_KEY` | no | | Stripe secret key for the org identified by slug. |
 | `SHIGOTO_STRIPE_<ORGSLUG>_WEBHOOK_SECRET` | no | | Stripe webhook signing secret for the org. |
-| `SHIGOTO_SMTP_HOST` | no | | SMTP server host. Unset disables email: `POST /api/v1/orgs/{org}/invites` still returns `201 {invite_id, link, emailed:false}` and `.../portal-invite` still returns `200 {emailed:false, link?}` (the invite link is always handed back for manual sharing either way); only `POST /api/v1/auth/magic` returns `422 "email is not configured"`, since that flow has no other way to hand back a usable link. |
+| `SHIGOTO_SMTP_HOST` | no | | SMTP server host. Unset disables email: `POST /api/v1/orgs/{org}/invites` still returns `201 {invite_id, link, emailed:false}` and `.../portal-invite` still returns `200 {emailed:false, link?}` (the staff invite link is always handed back for manual sharing; the portal-invite link only when the person belongs to no other org); only `POST /api/v1/auth/magic` returns `422 "email is not configured"`, since that flow has no other way to hand back a usable link. |
 | `SHIGOTO_SMTP_PORT` | no | `587`/`465`/`1025` by `SHIGOTO_SMTP_TLS` | SMTP server port. |
 | `SHIGOTO_SMTP_USERNAME` | no | | SMTP auth username. |
 | `SHIGOTO_SMTP_PASSWORD` | no | | SMTP auth password. |
