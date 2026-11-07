@@ -135,3 +135,47 @@ func TestSettingsPutNeedsOrgAdmin(t *testing.T) {
 		t.Fatalf("status = %d, want 403, body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestSettingsAuditRedactsPaymentDetails(t *testing.T) {
+	pool := db.TestPool(t)
+	org := webhookTestOrg(t, pool, "acme")
+	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
+	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
+	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
+	handler := newSettingsTestHandler(pool)
+	for _, body := range []settingsRequest{
+		{Name: "Acme Org", BankBSB: "062-000", BankAccount: "12345678", PayID: "audit@example.com", InvoiceLeadDays: 7},
+		{Name: "Acme Org", InvoiceLeadDays: 7},
+	} {
+		rr := doSettingsRequest(handler, settingsRequestJSON(t, http.MethodPut, "/api/v1/orgs/acme/settings", token, body))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+		}
+		var diff settingsRequest
+		var raw []byte
+		if err := pool.QueryRow(context.Background(),
+			"SELECT diff FROM audit_log WHERE org_id=$1 AND entity='org_settings' ORDER BY id DESC LIMIT 1", org.ID).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &diff); err != nil {
+			t.Fatal(err)
+		}
+		if diff.BankBSB != "[REDACTED]" || diff.BankAccount != "[REDACTED]" || diff.PayID != "[REDACTED]" {
+			t.Errorf("audit payment fields not redacted: %s", raw)
+		}
+		if diff.Name != body.Name || diff.InvoiceLeadDays != body.InvoiceLeadDays {
+			t.Errorf("non-sensitive audit fields lost: %s", raw)
+		}
+		rr = doSettingsRequest(handler, settingsRequestJSON(t, http.MethodGet, "/api/v1/orgs/acme/settings", token, nil))
+		var got settingsRequest
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET: %d %s", rr.Code, rr.Body.String())
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.BankBSB != body.BankBSB || got.BankAccount != body.BankAccount || got.PayID != body.PayID {
+			t.Errorf("stored payment instructions changed: %+v", got)
+		}
+	}
+}
