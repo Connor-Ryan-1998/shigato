@@ -10,6 +10,31 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-07-predeploy-hardening-design.md` (approved scope captured from conversation; builder decisions called out separately).
 
+## Execution result (2026-11-07)
+
+Tasks 1–6 implemented. Independent whole-change review found two Important gaps:
+partial payments still allowed a full-amount provider send, and the access matrix
+lacked real foreign resource IDs under an authorized org. Both were addressed:
+the partial-payment regression failed before its fix and passed afterwards;
+foreign-contact/invoice write tests pass against the existing scoping safeguards.
+The final `COMPOSE_PROJECT_NAME=shigoto go-task verify` passed after that fix,
+including build/lint, Go race/integration suites, 124 frontend tests and 7 Chromium
+workflows. Review fixes were verified by tests, not a second review pass.
+
+`go-task audit` remains intentionally failing on GHSA-gcqx-w48m-w2h4; Go reports
+no reachable advisory. No dependency downgrade, vulnerability exception, merge,
+push or deployment was performed. This is a completed hardening pass, **not** a
+release-readiness/security certification. Current risks and remaining acceptance
+work are recorded in README and the follow-up ledger.
+
+Decisions retained: reuse the local Compose test stack to avoid port conflict
+(containers can be recreated); leave the advisory gate blocking without approval;
+keep aggregate/extreme-input validation separate (bad extreme totals may remain);
+preserve rounding/remainder policy (cent distribution unchanged); defer provider
+idempotency/commit recovery (external/local balances may disagree); leave historical
+audit records untouched (old bank details can remain); and do not infer live
+OIDC/Stripe, abuse/load, fault-injection or image-scan acceptance from isolated tests.
+
 ## Global Constraints
 
 - Deployment is explicitly excluded.

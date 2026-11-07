@@ -81,7 +81,9 @@ artifacts. When sharing a local test Compose stack between worktrees, set
 
 The hardening pass adds regressions for settings audit redaction, login limiter
 accounting, report allocation overflow and sending an invoice after a concurrent
-void/payment. Real-browser checks also cover financial forms, expiry/re-login,
+void, full or partial payment. Provider sends now refuse invoices with any
+recorded payment rather than sending their original full balance. Real-browser
+checks also cover financial forms, expiry/re-login,
 time billing, lease/rent-run idempotency, reconciliation and CSV reporting.
 
 **A green `verify` is not a clean vulnerability audit.** As of 2026-11-07,
@@ -96,8 +98,11 @@ upstream fix is verified or an operator explicitly approves a scoped exception.
 Historical settings audit records have **not** been rewritten and may still
 contain bank details. Existing limitations also remain: credit notes/refunds and
 overpayments, billed-period lease edits/gaps, receipt rollback cleanup, bounded
-memory/concurrency under abuse, and complete review of all property/reconciliation
-paths. Live OIDC/Stripe acceptance, failure-injection/load testing and container
+memory/concurrency under abuse, aggregate/extreme-input arithmetic, and complete
+review of all property/reconciliation paths. Payment reconciliation after an
+invoice was already sent, provider idempotency expiry and provider/DB commit
+recovery also still need acceptance/review. Live OIDC/Stripe acceptance,
+failure-injection/load testing and container
 image vulnerability scanning are still required as applicable. See
 `docs/superpowers/plans/2026-11-05-01-followups.md` for the remaining ledger.
 

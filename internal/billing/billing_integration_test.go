@@ -66,6 +66,10 @@ func TestServiceSendRejectsPaidAfterInitialRead(t *testing.T) {
 	testSendRejectsChangedState(t, "paid")
 }
 
+func TestServiceSendRejectsPartiallyPaidAfterInitialRead(t *testing.T) {
+	testSendRejectsChangedState(t, "open")
+}
+
 func testSendRejectsChangedState(t *testing.T, status string) {
 	t.Helper()
 	pool := db.TestPool(t)
@@ -91,8 +95,12 @@ func testSendRejectsChangedState(t *testing.T, status string) {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(ctx)
+			amount := core.Cents(1000)
+			if status == "open" {
+				amount = 400
+			}
 			if _, _, err := core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
-				InvoiceID: id, Amount: 1000, PaidOn: time.Now(), Method: "bank_transfer",
+				InvoiceID: id, Amount: amount, PaidOn: time.Now(), Method: "bank_transfer",
 			}); err != nil {
 				t.Fatal(err)
 			}
