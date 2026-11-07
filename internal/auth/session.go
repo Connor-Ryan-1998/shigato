@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -126,6 +127,21 @@ func newToken() (token string, hash []byte, err error) {
 		return "", nil, err
 	}
 	token = hex.EncodeToString(buf)
+	return token, hashToken(token), nil
+}
+
+// newRandomToken generates a 32-random-byte token, base64url encoded (per
+// global-constraints.md "Tokens": every invite, magic-link and OIDC-state
+// token), and returns it along with the SHA-256 hash that's actually stored.
+// Shared by newInviteToken, newMagicToken and newOIDCStateToken - the three
+// are kept as distinct names at their call sites for readability, but their
+// bodies were identical.
+func newRandomToken() (token string, hash []byte, err error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", nil, err
+	}
+	token = base64.RawURLEncoding.EncodeToString(buf)
 	return token, hashToken(token), nil
 }
 

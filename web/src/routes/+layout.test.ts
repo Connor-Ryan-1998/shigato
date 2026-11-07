@@ -66,6 +66,36 @@ describe('root layout', () => {
 		expect(showModal).not.toHaveBeenCalled();
 	});
 
+	// Item 1 (critical): /invite/<token> must stay reachable by a brand-new,
+	// anonymous visitor. The layout's own /me probe 401s for them (no
+	// session cookie at all); that must render the invite page's anonymous
+	// accept form rather than bouncing to /login - otherwise the accept flow
+	// is unreachable for exactly the people it exists for.
+	it('renders the page anonymously under /invite/ instead of redirecting on a 401', async () => {
+		const assign = vi.fn();
+		Object.defineProperty(window, 'location', {
+			value: { pathname: '/invite/some-token', search: '', assign },
+			writable: true
+		});
+		page.url = new URL('http://localhost/invite/some-token');
+		vi.stubGlobal(
+			'fetch',
+			vi.fn((path: RequestInfo | URL) => {
+				const url = typeof path === 'string' ? path : path.toString();
+				if (url.includes('/meta')) {
+					return Promise.resolve(jsonResponse(200, { modules: [], sso: false }));
+				}
+				return Promise.resolve(jsonResponse(401, { error: 'unauthorized' }));
+			})
+		);
+
+		render(Layout, { children: childSnippet() });
+
+		await waitFor(() => expect(screen.getByTestId('child')).toBeTruthy());
+		expect(assign).not.toHaveBeenCalled();
+		expect(session.me).toBeNull();
+	});
+
 	it('registers the relogin prompt once the session loads, so a later 401 can open the dialog', async () => {
 		HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
 			this.setAttribute('open', '');

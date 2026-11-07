@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -70,16 +68,28 @@ type InviteDetails struct {
 	Expired bool
 }
 
+// NeedsPasswordForInvite reports whether the currently signed-in userID must
+// supply a password to accept a staff invite (Ruling 63): true only when the
+// account has no password set (password_hash IS NULL - e.g. a portal-only
+// user created via magic link) and OIDC is disabled, so there's no other way
+// for them to ever sign back in as staff. When OIDC is enabled, they sign in
+// via SSO instead and no password is required.
+func (a *Auth) NeedsPasswordForInvite(ctx context.Context, userID int64) (bool, error) {
+	if a.OIDCEnabled() {
+		return false, nil
+	}
+	var hash *string
+	if err := a.pool.QueryRow(ctx, "SELECT password_hash FROM users WHERE id = $1", userID).Scan(&hash); err != nil {
+		return false, err
+	}
+	return hash == nil, nil
+}
+
 // newInviteToken generates a 32-random-byte token, base64url encoded (per
 // global-constraints.md), and returns it along with the SHA-256 hash that's
 // actually stored.
 func newInviteToken() (token string, hash []byte, err error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", nil, err
-	}
-	token = base64.RawURLEncoding.EncodeToString(buf)
-	return token, hashToken(token), nil
+	return newRandomToken()
 }
 
 // CreateInvite creates an invite for email to join orgID with role,
@@ -218,15 +228,25 @@ func InviteByToken(ctx context.Context, q core.Querier, token string) (InviteDet
 //
 // When loggedInUserID is non-nil, the invite's email must match that
 // user's own (ErrEmailMismatch otherwise) and only a membership is added.
+// Ruling 63: if that account has no password (password_hash IS NULL - a
+// portal-only account from a magic link) and OIDC is disabled, password must
+// also be supplied (ErrPasswordTooShort if under minInvitePasswordLength)
+// and is set on the account in this same tx; with OIDC enabled no password
+// is required, since the user signs in via SSO afterwards.
 // When nil, name and password must be supplied: name must be non-blank
 // (ErrNameRequired otherwise) and password must be at least
 // minInvitePasswordLength characters (ErrPasswordTooShort otherwise), and
 // an existing account for the invite's email - including one created by a
 // concurrent accept racing this one - is rejected with ErrAccountExists
 // ("sign in first, then open the link again") rather than silently added
-// to - this flow is for people who don't have an account yet. On success
-// for this path, a new session is started and its cookie set on w, exactly
-// as LoginHandler would.
+// to - this flow is for people who don't have an account yet.
+//
+// Ruling 64 (security): whenever this call actually grants a new
+// membership (not a no-op re-accept of one the user already held), every
+// session the user held before this call is deleted in the same tx, and a
+// fresh session is started and its cookie set on w, exactly as LoginHandler
+// would - a staff role must never be reachable through a session that
+// predates the grant.
 func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token string, loggedInUserID *int64, name, password string) (orgSlug string, err error) {
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
@@ -253,13 +273,32 @@ func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token st
 	var newAccount bool
 	if loggedInUserID != nil {
 		var loggedInEmail string
-		if err := tx.QueryRow(ctx, "SELECT email FROM users WHERE id = $1", *loggedInUserID).Scan(&loggedInEmail); err != nil {
+		var passwordHash *string
+		if err := tx.QueryRow(ctx, "SELECT email, password_hash FROM users WHERE id = $1", *loggedInUserID).
+			Scan(&loggedInEmail, &passwordHash); err != nil {
 			return "", err
 		}
 		if !strings.EqualFold(loggedInEmail, email) {
 			return "", ErrEmailMismatch
 		}
 		userID = *loggedInUserID
+
+		// Ruling 63: a signed-in user with no password (e.g. a portal-only
+		// account created via magic link) must set one to accept a staff
+		// invite, unless OIDC is enabled and they'll sign in via SSO
+		// instead.
+		if passwordHash == nil && !a.OIDCEnabled() {
+			if len(password) < minInvitePasswordLength {
+				return "", ErrPasswordTooShort
+			}
+			hash, err := HashPassword(password)
+			if err != nil {
+				return "", err
+			}
+			if _, err := tx.Exec(ctx, "UPDATE users SET password_hash = $1 WHERE id = $2", hash, userID); err != nil {
+				return "", err
+			}
+		}
 	} else {
 		if strings.TrimSpace(name) == "" {
 			return "", ErrNameRequired
@@ -300,13 +339,16 @@ func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token st
 
 	// ON CONFLICT DO NOTHING: a user who somehow already holds a
 	// membership in this org keeps their existing role rather than having
-	// an invite silently change it.
-	if _, err := tx.Exec(ctx,
+	// an invite silently change it. RowsAffected tells gainedMembership
+	// apart from that no-op case.
+	tag, err := tx.Exec(ctx,
 		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3) ON CONFLICT (user_id, org_id) DO NOTHING",
 		userID, orgID, role,
-	); err != nil {
+	)
+	if err != nil {
 		return "", err
 	}
+	gainedMembership := tag.RowsAffected() == 1
 
 	if newAccount {
 		if err := core.Audit(ctx, tx, orgID, &userID, "user", userID, "create", map[string]string{"email": email}); err != nil {
@@ -317,7 +359,17 @@ func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token st
 		return "", err
 	}
 
-	if loggedInUserID == nil {
+	// Ruling 64 (security): gaining a staff membership here invalidates
+	// every session the user already held (e.g. one obtained earlier via a
+	// portal magic link, on this device or another) before starting the
+	// fresh one this request gets - a staff role must never be reachable
+	// through a session that predates the grant.
+	if gainedMembership {
+		if _, err := tx.Exec(ctx, "DELETE FROM sessions WHERE user_id = $1", userID); err != nil {
+			return "", err
+		}
+	}
+	if loggedInUserID == nil || gainedMembership {
 		if err := a.StartSession(ctx, tx, w, userID); err != nil {
 			return "", err
 		}
@@ -333,11 +385,21 @@ func (a *Auth) AcceptInvite(ctx context.Context, w http.ResponseWriter, token st
 	return orgSlug, nil
 }
 
-// PruneInvites deletes every invite that's already used or has expired
-// (Ruling 49: Task 3 prunes its own table). It's called by the hourly
-// scheduler alongside PruneSessions.
+// inviteRetention is how long a used or expired invite row is kept after it
+// stopped being acceptable, before PruneInvites deletes it. An invitee who
+// waits past expiry to open their link still sees "this invite has expired"
+// (InviteByToken finds the row and reports Expired) rather than "not found",
+// which reads as if the link were simply wrong, for this long.
+const inviteRetention = 30 * 24 * time.Hour
+
+// PruneInvites deletes every invite that's been used or expired for more
+// than inviteRetention (Ruling 49: Task 3 prunes its own table). It's called
+// by the hourly scheduler alongside PruneSessions. Keeping used/expired rows
+// around briefly (rather than deleting them the moment they stop being
+// acceptable) is so InviteByToken can still tell an invitee their invite
+// expired instead of just 404ing.
 func PruneInvites(ctx context.Context, q core.Querier, now time.Time) error {
-	_, err := q.Exec(ctx, "DELETE FROM invites WHERE used_at IS NOT NULL OR expires_at < $1", now)
+	_, err := q.Exec(ctx, "DELETE FROM invites WHERE expires_at < $1", now.Add(-inviteRetention))
 	return err
 }
 

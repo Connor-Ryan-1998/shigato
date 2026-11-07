@@ -184,6 +184,47 @@ func TestOIDCHappyPathLinksAndSignsIn(t *testing.T) {
 	}
 }
 
+// TestOIDCLinkRevokesExistingSessions covers Ruling 64 (security): linking
+// an existing account to an OIDC subject must kill every session that
+// account already held (e.g. one from a password login before the user ever
+// went through SSO), not just clear the password.
+func TestOIDCLinkRevokesExistingSessions(t *testing.T) {
+	pool := db.TestPool(t)
+	idp := oidctest.New(t)
+	ctx := context.Background()
+
+	org := createTestOrg(t, pool, "acme")
+	userID := createTestUser(t, pool, "staffer@example.com", "whatever-password")
+	addMembership(t, pool, userID, org.ID, Staff)
+
+	oldToken, err := createSession(ctx, pool, userID)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	if _, err := userIDForToken(ctx, pool, oldToken); err != nil {
+		t.Fatalf("pre-link session should be valid before the link: %v", err)
+	}
+
+	_, mux := newOIDCTestAuth(pool, idp)
+	loc, stateCookie := startOIDC(t, mux, "/acme")
+	idp.SetClaims(oidctest.Claims{
+		Sub: "idp-subject-revoke", Email: "staffer@example.com", EmailVerified: true,
+		Nonce: loc.Query().Get("nonce"),
+	})
+
+	_, sessionCookie, _, err := callbackOIDC(mux, loc.Query().Get("state"), stateCookie)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	if _, err := userIDForToken(ctx, pool, oldToken); err == nil {
+		t.Fatalf("expected the pre-link session to be revoked by the OIDC link")
+	}
+	if _, err := userIDForToken(ctx, pool, sessionCookie); err != nil {
+		t.Fatalf("the session minted by the callback itself should be valid: %v", err)
+	}
+}
+
 func TestOIDCAlreadyLinkedUserUntouched(t *testing.T) {
 	pool := db.TestPool(t)
 	idp := oidctest.New(t)

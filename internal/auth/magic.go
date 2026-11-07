@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -38,12 +36,7 @@ var ErrMagicLinkInvalid = errors.New("This link has expired — request a new on
 // global-constraints.md), and returns it along with the SHA-256 hash that's
 // actually stored.
 func newMagicToken() (token string, hash []byte, err error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", nil, err
-	}
-	token = base64.RawURLEncoding.EncodeToString(buf)
-	return token, hashToken(token), nil
+	return newRandomToken()
 }
 
 // userEligibleForPortal reports whether userID holds at least one tenant or

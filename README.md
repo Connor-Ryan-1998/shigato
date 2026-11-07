@@ -99,17 +99,52 @@ The server is configured by environment variables, all prefixed `SHIGOTO_`:
 | `SHIGOTO_SCHEDULER` | no | `on` | `on` or `off`. Enables the in-process hourly scheduler (rent runs and session pruning). |
 | `SHIGOTO_STRIPE_<ORGSLUG>_SECRET_KEY` | no | | Stripe secret key for the org identified by slug. |
 | `SHIGOTO_STRIPE_<ORGSLUG>_WEBHOOK_SECRET` | no | | Stripe webhook signing secret for the org. |
-| `SHIGOTO_SMTP_HOST` | no | | SMTP server host. Unset disables email: invite/magic-link endpoints return 422 and hand the link back for manual sharing. |
+| `SHIGOTO_SMTP_HOST` | no | | SMTP server host. Unset disables email: `POST /api/v1/orgs/{org}/invites` still returns `201 {invite_id, link, emailed:false}` and `.../portal-invite` still returns `200 {emailed:false, link?}` (the invite link is always handed back for manual sharing either way); only `POST /api/v1/auth/magic` returns `422 "email is not configured"`, since that flow has no other way to hand back a usable link. |
 | `SHIGOTO_SMTP_PORT` | no | `587`/`465`/`1025` by `SHIGOTO_SMTP_TLS` | SMTP server port. |
 | `SHIGOTO_SMTP_USERNAME` | no | | SMTP auth username. |
 | `SHIGOTO_SMTP_PASSWORD` | no | | SMTP auth password. |
 | `SHIGOTO_SMTP_FROM` | yes, if `SHIGOTO_SMTP_HOST` is set | | `From` address for outgoing mail. |
 | `SHIGOTO_SMTP_TLS` | no | `starttls` | `starttls`, `tls` (implicit TLS, e.g. port 465) or `none`. `none` is only accepted for host `localhost`, `127.0.0.1`, `::1` or `mailpit`. |
 | `SHIGOTO_TRUSTED_PROXY` | no | | CIDR of a reverse proxy to trust. When set and a request's `RemoteAddr` is inside it, the right-most `X-Forwarded-For` entry that isn't itself inside the CIDR is used as the client IP for login rate limiting. |
+| `SHIGOTO_OIDC_ISSUER` | no | | OIDC issuer URL for staff SSO (e.g. an Authentik application's issuer). Setting this, `SHIGOTO_OIDC_CLIENT_ID` or `SHIGOTO_OIDC_CLIENT_SECRET` requires all three together - there's no partially-configured OIDC. |
+| `SHIGOTO_OIDC_CLIENT_ID` | no | | OIDC client ID. |
+| `SHIGOTO_OIDC_CLIENT_SECRET` | no | | OIDC client secret. |
+| `SHIGOTO_OIDC_SCOPES` | no | `openid email profile` | Space-separated OIDC scopes to request. |
 
 `<ORGSLUG>` is the org slug upper-cased with `-` replaced by `_`. Point each
 org's Stripe webhook at `https://<SHIGOTO_BASE_URL>/webhooks/stripe/<org-slug>`
 (the plain, lower-cased slug, not the env var form).
+
+### OIDC staff sign-in
+
+Setting `SHIGOTO_OIDC_ISSUER`, `SHIGOTO_OIDC_CLIENT_ID` and
+`SHIGOTO_OIDC_CLIENT_SECRET` (plus, optionally, `SHIGOTO_OIDC_SCOPES`)
+enables "Sign in with SSO" on the
+login page, for staff (owner/staff/bookkeeper) accounts only - portal
+(tenant/client) users always sign in via magic link, never SSO. The redirect
+URI to register with the identity provider is always
+`<SHIGOTO_BASE_URL>/api/v1/auth/oidc/callback`.
+
+OIDC never auto-provisions an account. Signing in links an existing shigoto
+user by email: a user must already exist (created by accepting a staff
+invite) for OIDC sign-in to work, and the ID token's `email_verified` claim
+must be `true`. An unrecognised email is rejected with "No shigoto account
+for this email — ask an owner to invite you." Linking clears the account's
+local password, if it had one: SSO has just proven ownership of that email
+from the IdP's side, so the account should only be reachable through SSO
+from then on.
+
+Any one of `SHIGOTO_OIDC_ISSUER`, `SHIGOTO_OIDC_CLIENT_ID` or
+`SHIGOTO_OIDC_CLIENT_SECRET` set without all three (`SHIGOTO_OIDC_SCOPES` is
+optional, defaulting as above) fails config loading at startup rather than
+starting with SSO half-configured.
+
+With [Authentik](https://goauthentik.io/), create an OAuth2/OpenID Provider
+with client type "Confidential" and the redirect URI above, an Application
+pointing at it, and use the provider's issuer URL, client ID and client
+secret for the three required variables. No secret belongs in this
+repository or its docs - keep it in the same vault-backed secret store as
+every other credential (see `AGENTS.md`'s Secrets section).
 
 ### Email in development
 

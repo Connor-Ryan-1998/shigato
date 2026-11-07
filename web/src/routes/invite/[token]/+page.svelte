@@ -6,7 +6,16 @@
 	import Field from '../../../lib/components/Field.svelte';
 	import Button from '../../../lib/components/Button.svelte';
 
-	type InviteDetails = { org_name: string; email: string; role: string; expired: boolean };
+	type InviteDetails = {
+		org_name: string;
+		email: string;
+		role: string;
+		expired: boolean;
+		// Ruling 63: true only for a signed-in request from a user with no
+		// password (a portal-only account from a magic link) when OIDC is
+		// disabled - they must set one to be able to sign back in as staff.
+		needs_password: boolean;
+	};
 
 	let loadStatus = $state<'loading' | 'error' | 'notfound' | 'ready'>('loading');
 	let details = $state<InviteDetails | null>(null);
@@ -44,7 +53,11 @@
 		error = '';
 		submitting = true;
 		try {
-			const body = alreadyLoggedIn ? undefined : { name, password };
+			const body = alreadyLoggedIn
+				? details?.needs_password
+					? { password }
+					: undefined
+				: { name, password };
 			const res = await api<{ org_slug: string }>('POST', `/api/v1/invites/${token}/accept`, body);
 			accepted = true;
 			// Always refetch /me: accepting while already logged in adds a new
@@ -87,6 +100,18 @@
 			<p>You've been invited as <strong>{details.role}</strong> ({details.email}).</p>
 			{#if alreadyLoggedIn}
 				<form onsubmit={accept}>
+					{#if details.needs_password}
+						<Field label="Set a password" id="invite-password" hint="At least 12 characters.">
+							<input
+								id="invite-password"
+								type="password"
+								bind:value={password}
+								required
+								minlength="12"
+								autocomplete="new-password"
+							/>
+						</Field>
+					{/if}
 					{#if error}
 						<p class="error" role="alert">{error}</p>
 					{/if}

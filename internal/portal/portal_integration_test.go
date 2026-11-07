@@ -674,6 +674,132 @@ func TestPortalInviteCreatesMembership(t *testing.T) {
 	}
 }
 
+// TestStaffInviteAcceptByPasswordlessUserRequiresPassword covers Ruling 63:
+// a portal-only user (created via magic link, so password_hash is NULL)
+// accepting a staff invite with OIDC disabled must supply a password, and
+// can log in with it afterwards.
+func TestStaffInviteAcceptByPasswordlessUserRequiresPassword(t *testing.T) {
+	pool := db.TestPool(t)
+	org := createOrg(t, pool, "acme")
+	// A second org: CreateInvite rejects inviting an email already a member
+	// of the target org (any role), so the staff invite below targets an
+	// org the portal user doesn't already belong to.
+	staffOrg := createOrg(t, pool, "beta")
+	ownerID := createStaffUser(t, pool, "owner@example.com", "correct-password", staffOrg.ID, "owner")
+
+	h := newTestHandler(pool, nil)
+
+	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
+	portalToken := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
+
+	_, inviteToken, err := auth.CreateInvite(context.Background(), pool, staffOrg.ID, "tenant@example.com", "staff", ownerID)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	// GET invite details while signed in as the passwordless user: OIDC is
+	// disabled on this handler, so needs_password must be true.
+	rr := doJSON(t, h, http.MethodGet, "/api/v1/invites/"+inviteToken, portalToken, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET invite details status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var details map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &details); err != nil {
+		t.Fatalf("decoding invite details: %v", err)
+	}
+	if details["needs_password"] != true {
+		t.Errorf("needs_password = %v, want true for a passwordless user with OIDC disabled", details["needs_password"])
+	}
+
+	// Accepting without a password fails.
+	rr = doJSON(t, h, http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", portalToken, nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("accept without password status = %d, want 422, body %s", rr.Code, rr.Body.String())
+	}
+
+	// Accepting with a valid password succeeds, in the same transaction
+	// (the earlier failed attempt rolled back the token consumption).
+	rr = doJSON(t, h, http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", portalToken,
+		map[string]string{"password": "a-very-long-password"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("accept with password status = %d, body %s", rr.Code, rr.Body.String())
+	}
+
+	// The password now works for ordinary password login.
+	if _, err := auth.Login(context.Background(), pool, "tenant@example.com", "a-very-long-password"); err != nil {
+		t.Fatalf("Login after accepting with a password: %v", err)
+	}
+}
+
+// TestAcceptInviteRevokesOtherSessions covers Ruling 64 (security): session
+// S1 (a portal magic-link session) and S2 (another magic-link session, for
+// the same passwordless user) both exist; accepting a staff invite as S2
+// must kill S1 and start a fresh replacement session for S2's request.
+func TestAcceptInviteRevokesOtherSessions(t *testing.T) {
+	pool := db.TestPool(t)
+	org := createOrg(t, pool, "acme")
+	// A second org: CreateInvite rejects inviting an email already a member
+	// of the target org (any role), so the staff invite below targets an
+	// org the portal user doesn't already belong to.
+	staffOrg := createOrg(t, pool, "beta")
+	ownerID := createStaffUser(t, pool, "owner@example.com", "correct-password", staffOrg.ID, "owner")
+
+	h := newTestHandler(pool, nil)
+
+	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
+	s1 := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
+
+	magicToken2, err := auth.RequestMagicLink(context.Background(), pool, "tenant@example.com")
+	if err != nil || magicToken2 == "" {
+		t.Fatalf("RequestMagicLink for second session: token=%q err=%v", magicToken2, err)
+	}
+	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": magicToken2})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("verify second magic link status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var s2 string
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			s2 = c.Value
+		}
+	}
+	if s2 == "" {
+		t.Fatalf("second magic link verify set no session cookie")
+	}
+
+	// Sanity: both sessions work before the invite is accepted.
+	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s1, nil); rr.Code != http.StatusOK {
+		t.Fatalf("s1 GET /me before accept status = %d, body %s", rr.Code, rr.Body.String())
+	}
+
+	_, inviteToken, err := auth.CreateInvite(context.Background(), pool, staffOrg.ID, "tenant@example.com", "staff", ownerID)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	rr = doJSON(t, h, http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", s2,
+		map[string]string{"password": "a-very-long-password"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("accept via s2 status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var s2New string
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			s2New = c.Value
+		}
+	}
+	if s2New == "" {
+		t.Fatalf("accept response set no replacement session cookie")
+	}
+
+	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s1, nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("s1 GET /me after accept status = %d, want 401 (revoked)", rr.Code)
+	}
+	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s2New, nil); rr.Code != http.StatusOK {
+		t.Fatalf("s2's replacement session GET /me status = %d, want 200, body %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPortalInviteValidation(t *testing.T) {
 	pool := db.TestPool(t)
 	org := createOrg(t, pool, "acme")

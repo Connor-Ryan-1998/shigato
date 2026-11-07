@@ -100,6 +100,11 @@ func Load(getenv func(string) string) (Config, error) {
 	if u, err := url.Parse(c.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return Config{}, fmt.Errorf("SHIGOTO_BASE_URL must be an absolute http:// or https:// URL, got %q", c.BaseURL)
 	}
+	// Normalised once here (no trailing slash) so every consumer that builds
+	// a path onto it (OIDC's RedirectURL, invite/magic-link email links) can
+	// just concatenate "/..." without each repeating its own
+	// strings.TrimRight(c.BaseURL, "/").
+	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
 
 	tz := getenv("SHIGOTO_TIMEZONE")
 	if tz == "" {

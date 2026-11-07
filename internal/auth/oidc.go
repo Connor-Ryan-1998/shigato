@@ -148,12 +148,7 @@ func safeOIDCNext(raw string) string {
 // newOIDCStateToken generates a 32-random-byte token, base64url encoded
 // (global-constraints.md "Tokens"), and its SHA-256 hash for storage.
 func newOIDCStateToken() (token string, hash []byte, err error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", nil, err
-	}
-	token = base64.RawURLEncoding.EncodeToString(buf)
-	return token, hashToken(token), nil
+	return newRandomToken()
 }
 
 // newOIDCNonce generates a random nonce to bind the ID token back to this
@@ -520,6 +515,17 @@ func (a *Auth) resolveOIDCUser(ctx context.Context, sub, email string) (int64, e
 		if err := core.Audit(ctx, tx, staffOrgID, &userID, "user", userID, "oidc_link",
 			map[string]any{"email": email, "password_cleared": true},
 		); err != nil {
+			return 0, err
+		}
+
+		// Ruling 64 (security): linking an existing account to an OIDC
+		// subject deletes every session that account already held, in this
+		// same tx - the caller starts a fresh one for this callback right
+		// after. Without this, a session obtained before the link (e.g. a
+		// portal magic link, or a password session later invalidated by the
+		// password_hash clear above) would keep working as a now-privileged
+		// staff session.
+		if _, err := tx.Exec(ctx, "DELETE FROM sessions WHERE user_id = $1", userID); err != nil {
 			return 0, err
 		}
 	}

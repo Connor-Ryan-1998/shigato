@@ -62,6 +62,16 @@ async function defaultOnUnauthorized(): Promise<boolean> {
 		return false;
 	}
 
+	// /invite/<token> must stay reachable by a brand-new, anonymous visitor:
+	// the layout's own GET /me probe 401s for them, and that must be treated
+	// as "no session" rather than bounced to /login - the whole point of the
+	// page is letting someone with no account yet create one. A signed-in
+	// user accepting the same invite already has a session, so /me never
+	// 401s for them and this branch never fires.
+	if (window.location.pathname.startsWith('/invite/')) {
+		return false;
+	}
+
 	if (!reloginPrompt) {
 		redirectToLogin();
 		return false;

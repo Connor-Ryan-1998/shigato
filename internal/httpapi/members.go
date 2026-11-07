@@ -417,11 +417,27 @@ func getInviteDetails(w http.ResponseWriter, r *http.Request, d Deps) {
 		return
 	}
 
+	// Ruling 63: a signed-in user with no password (a portal-only account)
+	// needs the invite page to show a password field when OIDC is disabled.
+	// Computed only for a session, not the invite itself - an anonymous
+	// visitor always sees the anonymous form's password field regardless.
+	needsPassword := false
+	if userID, ok := d.Auth.UserFromRequest(r); ok {
+		np, err := d.Auth.NeedsPasswordForInvite(r.Context(), userID)
+		if err != nil {
+			slog.Error("checking invite password requirement failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		needsPassword = np
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"org_name": details.OrgName,
-		"email":    details.Email,
-		"role":     details.Role,
-		"expired":  details.Expired,
+		"org_name":       details.OrgName,
+		"email":          details.Email,
+		"role":           details.Role,
+		"expired":        details.Expired,
+		"needs_password": needsPassword,
 	})
 }
 

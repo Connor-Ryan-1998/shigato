@@ -65,6 +65,19 @@ func TestLoadRequiresBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesTrailingSlashFromBaseURL(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"SHIGOTO_DATABASE_URL": "postgres://x",
+		"SHIGOTO_BASE_URL":     "https://shigoto.example/",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.BaseURL != "https://shigoto.example" {
+		t.Errorf("BaseURL = %q, want trailing slash trimmed", c.BaseURL)
+	}
+}
+
 func TestLoadRejectsInvalidBaseURL(t *testing.T) {
 	cases := []string{
 		"not-a-url",

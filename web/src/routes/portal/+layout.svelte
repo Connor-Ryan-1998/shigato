@@ -15,6 +15,13 @@
 	const org = $derived(page.params.org ?? '');
 	const currentOrg = $derived(session.me?.orgs.find((o) => o.slug === org) ?? null);
 
+	// A user can hold both a portal membership and a staff membership (e.g.
+	// an owner who's also a tenant of their own property) - give them a way
+	// back to their staff org without having to sign out of the portal
+	// shell first. !o.portal is a staff org (the API omits `portal` for
+	// owner/staff/bookkeeper memberships).
+	const staffOrg = $derived(session.me?.orgs.find((o) => !o.portal) ?? null);
+
 	const themeLabel = $derived(
 		theme.current === 'system' ? 'Auto' : theme.current === 'light' ? 'Light' : 'Dark'
 	);
@@ -44,6 +51,9 @@
 			</nav>
 		{/if}
 		<div class="topbar-actions">
+			{#if staffOrg}
+				<a href={`/${staffOrg.slug}`}>Back to {staffOrg.name}</a>
+			{/if}
 			<button
 				type="button"
 				class="icon-button"

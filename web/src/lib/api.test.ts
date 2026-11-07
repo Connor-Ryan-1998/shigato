@@ -166,6 +166,19 @@ describe('api', () => {
 			expect(assign).toHaveBeenCalledWith('/login?next=%2Fportal%2Facme%2Finvoices');
 		});
 
+		it('does not redirect on a 401 under /invite/<token> (an anonymous visitor accepting an invite)', async () => {
+			resetOnUnauthorized();
+			const assign = stubLocation('/invite/some-token');
+			vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));
+			const prompt = vi.fn(async () => true);
+			registerReloginPrompt(prompt);
+
+			await expect(api('GET', '/api/v1/me')).rejects.toThrow(ApiError);
+
+			expect(prompt).not.toHaveBeenCalled();
+			expect(assign).not.toHaveBeenCalled();
+		});
+
 		it('falls back to the redirect when the relogin prompt is cancelled', async () => {
 			resetOnUnauthorized();
 			const assign = stubLocation('/acme/invoices');
