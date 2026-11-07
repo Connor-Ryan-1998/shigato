@@ -58,6 +58,65 @@ func noProvider(string) (payments.Provider, error) {
 	return nil, payments.ErrNoProvider
 }
 
+func TestServiceSendRejectsVoidedAfterInitialRead(t *testing.T) {
+	testSendRejectsChangedState(t, "void")
+}
+
+func TestServiceSendRejectsPaidAfterInitialRead(t *testing.T) {
+	testSendRejectsChangedState(t, "paid")
+}
+
+func testSendRejectsChangedState(t *testing.T, status string) {
+	t.Helper()
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	contactID := testContact(t, pool, org.ID)
+	id := testDraft(t, pool, org.ID, contactID, "manual", 1000)
+	svc := billing.New(pool, func(string) string { return "" }, noProvider, time.UTC)
+	if _, err := svc.Issue(ctx, org.ID, org.Slug, id); err != nil {
+		t.Fatal(err)
+	}
+	fake := &payments.Fake{}
+	// The resolver runs after Send's initial read but before its row lock.
+	svc.Payments = func(string) (payments.Provider, error) {
+		if status == "void" {
+			voider := billing.New(pool, func(string) string { return "" }, noProvider, time.UTC)
+			if _, err := voider.Void(ctx, org.ID, org.Slug, id); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, _, err := core.RecordPayment(ctx, tx, org.ID, core.NewPayment{
+				InvoiceID: id, Amount: 1000, PaidOn: time.Now(), Method: "bank_transfer",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return fake, nil
+	}
+	if _, err := svc.Send(ctx, org.ID, org.Slug, id); !errors.Is(err, core.ErrInvalidState) {
+		t.Errorf("Send error = %v, want invalid state", err)
+	}
+	inv, err := core.GetInvoice(ctx, pool, org.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.Status != status || inv.ProviderRef != "" {
+		t.Errorf("invoice unexpectedly sent: status=%s provider_ref=%q", inv.Status, inv.ProviderRef)
+	}
+	if len(fake.Calls()) != 0 || len(fake.Customers()) != 0 {
+		t.Error("provider side effects occurred after invoice stopped being payable")
+	}
+}
+
 func TestServiceIssueEnforcesPayOptions(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()

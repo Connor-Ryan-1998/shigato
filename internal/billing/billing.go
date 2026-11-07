@@ -251,15 +251,15 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 	}
 
 	return RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		var providerRef string
+		var providerRef, status string
 		var contactID int64
 		if err := tx.QueryRow(ctx,
-			`SELECT contact_id, coalesce(provider_ref,'') FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+			`SELECT contact_id, coalesce(provider_ref,''), status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
 			orgID, inv.ID,
-		).Scan(&contactID, &providerRef); err != nil {
+		).Scan(&contactID, &providerRef, &status); err != nil {
 			return err
 		}
-		if providerRef != "" {
+		if status != "open" || providerRef != "" {
 			return core.ErrInvalidState
 		}
 
