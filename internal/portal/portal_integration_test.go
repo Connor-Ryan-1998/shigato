@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,13 +213,58 @@ func staffLogin(t *testing.T, pool *pgxpool.Pool, email, password string) string
 	return token
 }
 
-// captureMailer is a *mail.Mailer that records every sent message instead
-// of talking SMTP.
-func captureMailer(sent *[]mail.Message) *mail.Mailer {
+// mailSink is a *mail.Mailer that records every sent message instead of
+// talking SMTP, safe for concurrent Send calls: requestMagicLink (Ruling 61)
+// sends from a detached goroutine, so a plain unsynchronized slice would be
+// a data race under -race the moment more than one request is in flight.
+type mailSink struct {
+	mu   sync.Mutex
+	sent []mail.Message
+}
+
+func (s *mailSink) mailer() *mail.Mailer {
 	return &mail.Mailer{From: "shigoto@example.com", Send: func(_ context.Context, m mail.Message) error {
-		*sent = append(*sent, m)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.sent = append(s.sent, m)
 		return nil
 	}}
+}
+
+func (s *mailSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sent)
+}
+
+func (s *mailSink) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = nil
+}
+
+func (s *mailSink) messages() []mail.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]mail.Message(nil), s.sent...)
+}
+
+// waitForMailCount polls sink until it holds at least want messages, failing
+// the test if timeout passes first. requestMagicLink sends its email from a
+// detached goroutine (Ruling 61), so a test expecting mail can't just check
+// immediately after the HTTP call returns.
+func waitForMailCount(t *testing.T, sink *mailSink, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if sink.count() >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d sent message(s), got %d", want, sink.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func newTestHandler(pool *pgxpool.Pool, mailer *mail.Mailer, opts ...auth.Option) http.Handler {
@@ -439,9 +485,8 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	createMembershipUser(t, pool, org.ID, "tenant", "tenant@example.com", tenant.ID)
 	createStaffUser(t, pool, "staffonly@example.com", "correct-password", org.ID, "staff")
 
-	var sent []mail.Message
-	mailer := captureMailer(&sent)
-	h := newTestHandler(pool, mailer)
+	sink := &mailSink{}
+	h := newTestHandler(pool, sink.mailer())
 
 	cases := []struct {
 		name  string
@@ -452,7 +497,7 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sent = nil
+			sink.reset()
 			rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": tc.email})
 			if rr.Code != http.StatusAccepted {
 				t.Fatalf("status = %d, want 202, body %s", rr.Code, rr.Body.String())
@@ -460,15 +505,18 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 			if strings.TrimSpace(rr.Body.String()) != "{}" {
 				t.Errorf("body = %q, want {}", rr.Body.String())
 			}
-			if len(sent) != 0 {
-				t.Errorf("mail sent for %s: %+v", tc.name, sent)
+			// Nothing eligible means requestMagicLink never spawns the
+			// send goroutine at all, so this is deterministic with no wait.
+			if n := sink.count(); n != 0 {
+				t.Errorf("mail sent for %s: %d message(s)", tc.name, n)
 			}
 		})
 	}
 
 	// The eligible portal email gets the identical response shape, but
-	// mail does go out.
-	sent = nil
+	// mail does go out - asynchronously (Ruling 61), so wait for it rather
+	// than checking immediately after the HTTP call returns.
+	sink.reset()
 	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": "tenant@example.com"})
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("eligible email status = %d, want 202, body %s", rr.Code, rr.Body.String())
@@ -476,16 +524,15 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	if strings.TrimSpace(rr.Body.String()) != "{}" {
 		t.Errorf("eligible email body = %q, want {}", rr.Body.String())
 	}
-	if len(sent) != 1 {
-		t.Fatalf("mail sent for eligible portal email = %d messages, want 1", len(sent))
+	waitForMailCount(t, sink, 1, 2*time.Second)
+	if n := sink.count(); n != 1 {
+		t.Fatalf("mail sent for eligible portal email = %d messages, want 1", n)
 	}
 }
 
 func TestMagicRateLimit(t *testing.T) {
 	pool := db.TestPool(t)
-	var sent []mail.Message
-	mailer := captureMailer(&sent)
-	h := newTestHandler(pool, mailer)
+	h := newTestHandler(pool, (&mailSink{}).mailer())
 
 	const email = "ratelimited@example.com"
 	for i := 0; i < 5; i++ {
@@ -504,11 +551,48 @@ func TestMagicRateLimit(t *testing.T) {
 	}
 }
 
+// TestMagicLinkVerifyRejectsNewlyStaffUser covers Ruling 59 at verify time,
+// not just at request time: a token issued while the user was tenant-only
+// must still be rejected if the user has since gained a staff membership
+// (any org) - a magic link must never yield a staff session.
+func TestMagicLinkVerifyRejectsNewlyStaffUser(t *testing.T) {
+	pool := db.TestPool(t)
+	org := createOrg(t, pool, "acme")
+	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
+	createMembershipUser(t, pool, org.ID, "tenant", "tenant@example.com", tenant.ID)
+
+	token, err := auth.RequestMagicLink(context.Background(), pool, "tenant@example.com")
+	if err != nil || token == "" {
+		t.Fatalf("RequestMagicLink: token=%q err=%v", token, err)
+	}
+
+	// The user gains a staff membership (in a second org) after the token
+	// was issued but before it's verified.
+	other := createOrg(t, pool, "beta")
+	var userID int64
+	if err := pool.QueryRow(context.Background(), "SELECT id FROM users WHERE email = $1", "tenant@example.com").Scan(&userID); err != nil {
+		t.Fatalf("looking up user: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'staff')", userID, other.ID,
+	); err != nil {
+		t.Fatalf("adding staff membership: %v", err)
+	}
+
+	h := newTestHandler(pool, nil)
+	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": token})
+	if rr.Code != http.StatusGone {
+		t.Fatalf("verify status = %d, want 410, body %s", rr.Code, rr.Body.String())
+	}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Errorf("verify response set a session cookie for a now-staff user: %+v", rr.Result().Cookies())
+	}
+}
+
 func TestPortalInviteCreatesMembership(t *testing.T) {
 	pool := db.TestPool(t)
 	org := createOrg(t, pool, "acme")
-	ownerID := createStaffUser(t, pool, "owner@example.com", "correct-password", org.ID, "owner")
-	_ = ownerID
+	createStaffUser(t, pool, "owner@example.com", "correct-password", org.ID, "owner")
 	ownerToken := staffLogin(t, pool, "owner@example.com", "correct-password")
 
 	tenant := createContact(t, pool, org.ID, "tenant", "New Tenant", "newtenant@example.com")
@@ -543,6 +627,17 @@ func TestPortalInviteCreatesMembership(t *testing.T) {
 		t.Errorf("new membership role/contact_id = %s/%d, want tenant/%d", role, contactID, tenant.ID)
 	}
 
+	var auditCount int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM audit_log
+		WHERE org_id = $1 AND entity = 'membership' AND action = 'portal_invite'`, org.ID,
+	).Scan(&auditCount); err != nil {
+		t.Fatalf("counting audit rows: %v", err)
+	}
+	if auditCount < 1 {
+		t.Errorf("audit rows for portal_invite = %d, want at least 1", auditCount)
+	}
+
 	// Re-inviting the same contact is idempotent.
 	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(tenant.ID)+"/portal-invite", ownerToken, nil)
 	if rr.Code != http.StatusOK {
@@ -563,6 +658,74 @@ func TestPortalInviteCreatesMembership(t *testing.T) {
 	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(staffContact.ID)+"/portal-invite", ownerToken, nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("staff-email contact invite status = %d, want 409, body %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPortalInviteValidation(t *testing.T) {
+	pool := db.TestPool(t)
+	org := createOrg(t, pool, "acme")
+	other := createOrg(t, pool, "beta")
+	createStaffUser(t, pool, "owner@example.com", "correct-password", org.ID, "owner")
+	ownerToken := staffLogin(t, pool, "owner@example.com", "correct-password")
+
+	h := newTestHandler(pool, nil)
+
+	supplier := createContact(t, pool, org.ID, "supplier", "A Supplier", "supplier@example.com")
+	rr := doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(supplier.ID)+"/portal-invite", ownerToken, nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("supplier contact invite status = %d, want 422, body %s", rr.Code, rr.Body.String())
+	}
+
+	noEmail := createContact(t, pool, org.ID, "tenant", "No Email", "")
+	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(noEmail.ID)+"/portal-invite", ownerToken, nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("no-email contact invite status = %d, want 422, body %s", rr.Code, rr.Body.String())
+	}
+
+	otherOrgContact := createContact(t, pool, other.ID, "tenant", "Other Org Tenant", "otherorgtenant@example.com")
+	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(otherOrgContact.ID)+"/portal-invite", ownerToken, nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-org contact invite status = %d, want 404, body %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPortalInviteCrossOrgDoesNotLeakLink covers Ruling 60: a staff member
+// in one org must never be handed a working magic-sign-in link for a user
+// who already belongs to a different org, just by "inviting" that user's
+// known email address as a brand-new contact here. Without the fix this
+// let staff in org A hijack org B's tenant account outright.
+func TestPortalInviteCrossOrgDoesNotLeakLink(t *testing.T) {
+	pool := db.TestPool(t)
+	orgA := createOrg(t, pool, "acme")
+	orgB := createOrg(t, pool, "beta")
+	createStaffUser(t, pool, "owner@example.com", "correct-password", orgA.ID, "owner")
+	ownerToken := staffLogin(t, pool, "owner@example.com", "correct-password")
+
+	// The victim: a genuine tenant of org B.
+	victimContactB := createContact(t, pool, orgB.ID, "tenant", "Victim Tenant", "victim@example.com")
+	createMembershipUser(t, pool, orgB.ID, "tenant", "victim@example.com", victimContactB.ID)
+
+	// Staff in org A "invites" the same email address as a brand-new
+	// contact of their own org, with no mailer configured.
+	victimContactA := createContact(t, pool, orgA.ID, "tenant", "Same Email", "victim@example.com")
+	h := newTestHandler(pool, nil)
+	rr := doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(victimContactA.ID)+"/portal-invite", ownerToken, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("portal-invite status = %d, body %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["emailed"] != false {
+		t.Errorf("emailed = %v, want false (no mailer configured)", resp["emailed"])
+	}
+	if _, leaked := resp["link"]; leaked {
+		t.Fatalf("response leaked a magic link to another org's staff: %+v", resp)
+	}
+	if resp["message"] == nil || resp["message"] == "" {
+		t.Errorf("response has no explanatory message when the link is withheld")
 	}
 }
 

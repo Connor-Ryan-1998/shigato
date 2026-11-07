@@ -117,11 +117,11 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	emailKey := "email:" + strings.ToLower(body.Email)
 	ipKey := ipRateLimitKey(ClientIP(r, a.trustedProxy))
 	if ok, retryAfter := a.limiter.Allow(emailKey, loginEmailLimit, loginWindow); !ok {
-		writeTooManyRequests(w, retryAfter)
+		WriteTooManyRequests(w, retryAfter)
 		return
 	}
 	if ok, retryAfter := a.limiter.Allow(ipKey, loginIPLimit, loginWindow); !ok {
-		writeTooManyRequests(w, retryAfter)
+		WriteTooManyRequests(w, retryAfter)
 		return
 	}
 
@@ -151,9 +151,12 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// writeTooManyRequests writes the shared 429 body and a whole-seconds,
-// rounded-up Retry-After header.
-func writeTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
+// WriteTooManyRequests writes the shared 429 body and a whole-seconds,
+// rounded-up Retry-After header. Exported so other rate-limited endpoints
+// outside package auth (e.g. httpapi's POST /api/v1/auth/magic) that call
+// (*Auth).AllowMagicRequest can render the same 429 shape without
+// duplicating it.
+func WriteTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
 	seconds := int(math.Ceil(retryAfter.Seconds()))
 	if seconds < 0 {
 		seconds = 0

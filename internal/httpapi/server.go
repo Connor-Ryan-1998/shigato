@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -209,19 +207,10 @@ func routeWebUI(mux *http.ServeMux) http.Handler {
 
 // --- magic-link sign-in ---
 
-// writeTooManyRequests writes the shared 429 body and a whole-seconds,
-// rounded-up Retry-After header - the same shape internal/auth's own
-// writeTooManyRequests uses for login rate limiting, duplicated here
-// because that one is unexported and specific to package auth's own JSON
-// error helper.
-func writeTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
-	seconds := int(math.Ceil(retryAfter.Seconds()))
-	if seconds < 0 {
-		seconds = 0
-	}
-	w.Header().Set("Retry-After", strconv.Itoa(seconds))
-	writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
-}
+// magicMailTimeout bounds the background goroutine requestMagicLink spawns
+// to actually send the email (Ruling 61): the SMTP round trip must never
+// sit on the request path.
+const magicMailTimeout = 15 * time.Second
 
 // sendMagicLinkEmail sends link to email, if d.Mailer is configured, and
 // reports whether it actually went out. requestMagicLink never surfaces
@@ -252,9 +241,11 @@ func sendMagicLinkEmail(ctx context.Context, d Deps, email, link string) bool {
 // configured") regardless of the email given - a config-level failure, not
 // something that could leak whether an account exists. Otherwise it always
 // responds 202 {}, whether or not the email is known, belongs to a staff-
-// only user, or is rate limited into silence: global-constraints.md's
-// no-enumeration rule extends to every one of those cases being
-// indistinguishable from the outside.
+// only user, or is over the rate limit (which gets 429 instead, per
+// global-constraints.md "Rate limits" - that status itself doesn't leak
+// anything, since it's keyed by email regardless of whether the email
+// exists): global-constraints.md's no-enumeration rule extends to every one
+// of the 202 cases being indistinguishable from the outside.
 func requestMagicLink(w http.ResponseWriter, r *http.Request, d Deps) {
 	if d.Mailer == nil {
 		writeError(w, http.StatusUnprocessableEntity, "email is not configured")
@@ -272,10 +263,9 @@ func requestMagicLink(w http.ResponseWriter, r *http.Request, d Deps) {
 
 	// Checked (and reserved) before the lookup: every request counts
 	// towards the limit, eligible or not (global-constraints.md "Rate
-	// limits"), and a rate-limited request still gets the same 202 {} as
-	// any other - it's simply never sent.
+	// limits") - a request over the limit gets 429, not the usual 202.
 	if ok, retryAfter := d.Auth.AllowMagicRequest(email); !ok {
-		writeTooManyRequests(w, retryAfter)
+		auth.WriteTooManyRequests(w, retryAfter)
 		return
 	}
 
@@ -287,7 +277,16 @@ func requestMagicLink(w http.ResponseWriter, r *http.Request, d Deps) {
 	}
 	if token != "" {
 		link := strings.TrimRight(d.Cfg.BaseURL, "/") + "/auth/magic?token=" + token
-		sendMagicLinkEmail(r.Context(), d, email, link)
+		// Ruling 61: the SMTP round trip must never sit on the request
+		// path. context.WithoutCancel detaches from the request's own
+		// context (which is cancelled the moment this handler returns),
+		// bounded instead by its own timeout; a send failure is logged,
+		// never surfaced (the response is already written).
+		go func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), magicMailTimeout)
+			defer cancel()
+			sendMagicLinkEmail(ctx, d, email, link)
+		}()
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{})
 }
@@ -361,43 +360,56 @@ func createPortalInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 	var userID int64
 	err = runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var newUser bool
-		err := tx.QueryRow(r.Context(), "SELECT id FROM users WHERE email = $1", contact.Email).Scan(&userID)
+		// ON CONFLICT (email) DO NOTHING + re-select: two concurrent
+		// portal-invites for the same not-yet-existing email would
+		// otherwise both race the plain SELECT-then-INSERT and one would
+		// hit the unique violation on users.email as a raw 500.
+		err := tx.QueryRow(r.Context(),
+			`INSERT INTO users (email, name, password_hash) VALUES ($1, $2, NULL)
+			 ON CONFLICT (email) DO NOTHING
+			 RETURNING id`,
+			contact.Email, contact.Name,
+		).Scan(&userID)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
-			if err := tx.QueryRow(r.Context(),
-				"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, NULL) RETURNING id",
-				contact.Email, contact.Name,
-			).Scan(&userID); err != nil {
+			if err := tx.QueryRow(r.Context(), "SELECT id FROM users WHERE email = $1", contact.Email).Scan(&userID); err != nil {
 				return err
 			}
-			newUser = true
 		case err != nil:
+			return err
+		default:
+			newUser = true
+		}
+
+		// Same idea for the membership row: ON CONFLICT DO NOTHING (its
+		// primary key is (user_id, org_id)) rather than SELECT-then-INSERT,
+		// so a race with another concurrent invite - or simply re-inviting
+		// an existing member - never 500s. The re-select below is what
+		// actually decides idempotent-resend vs. conflict, regardless of
+		// whether this INSERT did anything.
+		if _, err := tx.Exec(r.Context(),
+			`INSERT INTO memberships (user_id, org_id, role, contact_id) VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (user_id, org_id) DO NOTHING`,
+			userID, p.OrgID, contact.Kind, contact.ID,
+		); err != nil {
 			return err
 		}
 
-		var existingRole string
 		var existingContactID *int64
-		err = tx.QueryRow(r.Context(),
-			"SELECT role, contact_id FROM memberships WHERE org_id = $1 AND user_id = $2",
+		if err := tx.QueryRow(r.Context(),
+			"SELECT contact_id FROM memberships WHERE org_id = $1 AND user_id = $2",
 			p.OrgID, userID,
-		).Scan(&existingRole, &existingContactID)
-		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			if _, err := tx.Exec(r.Context(),
-				"INSERT INTO memberships (user_id, org_id, role, contact_id) VALUES ($1, $2, $3, $4)",
-				userID, p.OrgID, contact.Kind, contact.ID,
-			); err != nil {
-				return err
-			}
-		case err != nil:
+		).Scan(&existingContactID); err != nil {
 			return err
-		case existingContactID == nil || *existingContactID != contact.ID:
+		}
+		if existingContactID == nil || *existingContactID != contact.ID {
 			// A different contact, or a staff role (always nil
 			// contact_id): never silently relinked to this contact.
 			return errPortalContactConflict
 		}
-		// Else: same contact already a member - idempotent, fall through
-		// to resend the link.
+		// Else: same contact already a member (whether the INSERT above
+		// just created that row or it already existed) - idempotent, fall
+		// through to resend the link.
 
 		if newUser {
 			if err := core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "user", userID, "create", map[string]string{"email": contact.Email}); err != nil {
@@ -408,6 +420,25 @@ func createPortalInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 	})
 	if err != nil {
 		writeCoreError(w, err)
+		return
+	}
+
+	// Ruling 60: a user who already belongs to some other org must never
+	// have their magic link handed straight back to this org's caller -
+	// that would let a staff member in org A read off a working sign-in
+	// link for org B's tenant just by "inviting" their known email address
+	// here. The email itself is still fine to send (it goes to the
+	// contact's real inbox, not to this response), but the link is never
+	// included in the JSON when that's the only way it could be read off,
+	// and when nothing was actually sent, there's nothing else to tell the
+	// caller except to fix email delivery or point the person at /login.
+	var otherOrgMember bool
+	if err := d.Pool.QueryRow(r.Context(),
+		"SELECT EXISTS(SELECT 1 FROM memberships WHERE user_id = $1 AND org_id != $2)",
+		userID, p.OrgID,
+	).Scan(&otherOrgMember); err != nil {
+		slog.Error("checking portal invite cross-org membership failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -422,7 +453,11 @@ func createPortalInvite(w http.ResponseWriter, r *http.Request, d Deps) {
 
 	resp := map[string]any{"emailed": emailed}
 	if !emailed {
-		resp["link"] = link
+		if otherOrgMember {
+			resp["message"] = "This person already has an account in another organisation. Configure email to send them a link, or have them request one at /login."
+		} else {
+			resp["link"] = link
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
