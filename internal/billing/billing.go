@@ -199,7 +199,7 @@ func (s *Service) Issue(ctx context.Context, orgID int64, orgSlug string, invoic
 }
 
 // Send retries sending an issued invoice to the org's payment provider
-// after a previous attempt failed. Only an 'open' invoice with no
+// after a previous attempt failed. Only an 'open' invoice with no payments or
 // provider_ref yet can be sent; a previously-sent invoice (provider_ref
 // already set) returns core.ErrInvalidState rather than sending a second
 // time.
@@ -251,15 +251,23 @@ func (s *Service) sendToProvider(ctx context.Context, orgID int64, orgSlug strin
 	}
 
 	return RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		var providerRef string
+		var providerRef, status string
 		var contactID int64
 		if err := tx.QueryRow(ctx,
-			`SELECT contact_id, coalesce(provider_ref,'') FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+			`SELECT contact_id, coalesce(provider_ref,''), status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`,
 			orgID, inv.ID,
-		).Scan(&contactID, &providerRef); err != nil {
+		).Scan(&contactID, &providerRef, &status); err != nil {
 			return err
 		}
-		if providerRef != "" {
+		if status != "open" || providerRef != "" {
+			return core.ErrInvalidState
+		}
+		// A new statement sees payments committed while the invoice lock was awaited.
+		var hasPayments bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payments WHERE org_id = $1 AND invoice_id = $2)`, orgID, inv.ID).Scan(&hasPayments); err != nil {
+			return err
+		}
+		if hasPayments {
 			return core.ErrInvalidState
 		}
 

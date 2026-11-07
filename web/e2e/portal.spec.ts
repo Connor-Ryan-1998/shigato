@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 // The portal end-to-end: an owner invites a tenant contact to the portal,
 // the tenant signs in via a magic link fetched from the compose mailpit
@@ -58,10 +58,10 @@ function env(): NodeJS.ProcessEnv {
 	};
 }
 
-function psql(sql: string) {
+function psql(sql: string, database = 'shigoto') {
 	execFileSync(
 		'docker',
-		['compose', 'exec', '-T', 'db', 'psql', '-q', '-U', 'shigoto', '-d', 'shigoto', '-c', sql],
+		['compose', 'exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'shigoto', '-d', database, '-c', sql],
 		{ cwd: root, stdio: 'pipe' }
 	);
 }
@@ -228,4 +228,12 @@ test('tenant signs in by magic link and sees only their own invoice', async ({ p
 	// message (single-use tokens, global-constraints.md "Tokens").
 	await page.goto(magicLink);
 	await expect(page.getByText('This link has expired — request a new one')).toBeVisible();
+
+	const session = (await page.context().cookies()).find((c) => c.name === 'shigoto_session');
+	expect(session).toBeDefined();
+	const hash = createHash('sha256').update(session!.value).digest('hex');
+	psql(`UPDATE sessions SET expires_at=now()-interval '1 minute' WHERE token_hash=decode('${hash}','hex')`, dbName);
+	await page.goto(`${base}/portal/org-a/invoices`);
+	await expect(page).toHaveURL(new RegExp(`${base}/login(?:\\?|$)`));
+	await expect(page.getByRole('dialog', { name: 'Session expired' })).not.toBeVisible();
 });

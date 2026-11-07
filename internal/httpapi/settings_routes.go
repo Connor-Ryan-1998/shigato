@@ -83,7 +83,9 @@ func putSettings(w http.ResponseWriter, r *http.Request, d Deps) {
 		if err != nil {
 			return err
 		}
-		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "org_settings", p.OrgID, "update", body)
+		audit := body
+		audit.BankBSB, audit.BankAccount, audit.PayID = "[REDACTED]", "[REDACTED]", "[REDACTED]"
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "org_settings", p.OrgID, "update", audit)
 	})
 	if err != nil {
 		writeCoreError(w, err)

@@ -116,12 +116,10 @@ func (a *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// attempts can't all slip through before any of them is recorded.
 	emailKey := "email:" + strings.ToLower(body.Email)
 	ipKey := ipRateLimitKey(ClientIP(r, a.trustedProxy))
-	if ok, retryAfter := a.limiter.Allow(emailKey, loginEmailLimit, loginWindow); !ok {
-		WriteTooManyRequests(w, retryAfter)
-		return
-	}
-	if ok, retryAfter := a.limiter.Allow(ipKey, loginIPLimit, loginWindow); !ok {
-		WriteTooManyRequests(w, retryAfter)
+	emailOK, emailRetry := a.limiter.Allow(emailKey, loginEmailLimit, loginWindow)
+	ipOK, ipRetry := a.limiter.Allow(ipKey, loginIPLimit, loginWindow)
+	if !emailOK || !ipOK {
+		WriteTooManyRequests(w, max(emailRetry, ipRetry))
 		return
 	}
 

@@ -41,6 +41,47 @@ import (
 // it from here.
 const sessionCookieName = "shigoto_session"
 
+func TestLargePaymentReports(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "large")
+	setGSTRegistered(t, pool, org.ID, true)
+	contactID := testContact(t, pool, org.ID, "client", "Large client")
+	inv, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
+		ContactID: contactID, Source: "manual", DueInDays: 7,
+		Lines: []core.NewLine{
+			{Description: "Taxable", QuantityMilli: 1000, UnitAmount: 3_000_000_000, GSTCode: "GST"},
+			{Description: "GST free", QuantityMilli: 1000, UnitAmount: 3_300_000_000, GSTCode: "FRE"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	date := mustDate(t, "2026-07-01")
+	if _, err := core.IssueInvoice(ctx, pool, org.ID, inv.ID, date); err != nil {
+		t.Fatal(err)
+	}
+	testPayment(t, pool, org.ID, inv.ID, 6_600_000_000, date)
+	rows, err := reports.IncomeRows(ctx, pool, org.ID, date, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("income rows = %d, want 2", len(rows))
+	}
+	if rows[0].Incl != 3_300_000_000 || rows[0].GST != 300_000_000 || rows[1].Incl != 3_300_000_000 || rows[1].GST != 0 {
+		t.Errorf("income allocation = %+v", rows)
+	}
+	bas := reports.BAS(rows, nil)
+	if bas.G1 != 6_600_000_000 || bas.G3 != 3_300_000_000 || bas.A1 != 300_000_000 {
+		t.Errorf("BAS = %+v", bas)
+	}
+	pnl := reports.PnL(rows, nil, "org")
+	if len(pnl) != 1 || pnl[0].Net != 6_300_000_000 {
+		t.Errorf("P&L = %+v", pnl)
+	}
+}
+
 func mustDate(t *testing.T, s string) time.Time {
 	t.Helper()
 	d, err := time.ParseInLocation("2006-01-02", s, time.UTC)

@@ -458,6 +458,54 @@ func TestLoginRateLimitEmailIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestLoginEmailBlockedAttemptsCountAgainstIP(t *testing.T) {
+	pool := db.TestPool(t)
+	now := time.Now()
+	a := New(pool, false, WithClock(func() time.Time { return now }))
+	for i := 0; i < loginEmailLimit; i++ {
+		rr := httptest.NewRecorder()
+		a.LoginHandler(rr, loginRequest("blocked@example.com", "wrong-password"))
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("prime email attempt %d: %d", i, rr.Code)
+		}
+	}
+	for i := 0; i < loginIPLimit; i++ {
+		req := loginRequest("blocked@example.com", "wrong-password")
+		req.RemoteAddr = "192.0.2.5:12345"
+		rr := httptest.NewRecorder()
+		a.LoginHandler(rr, req)
+		if rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("blocked attempt %d: %d", i, rr.Code)
+		}
+	}
+	req := loginRequest("fresh@example.com", "wrong-password")
+	req.RemoteAddr = "192.0.2.5:12345"
+	rr := httptest.NewRecorder()
+	a.LoginHandler(rr, req)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("fresh email from blocked IP: %d, want 429", rr.Code)
+	}
+}
+
+func TestLoginRateLimitRetryAfterCoversBothKeys(t *testing.T) {
+	now := time.Now()
+	a := New(nil, false, WithClock(func() time.Time { return now }))
+	for i := 0; i < loginEmailLimit; i++ {
+		a.limiter.Allow("email:blocked@example.com", loginEmailLimit, loginWindow)
+	}
+	now = now.Add(time.Minute)
+	for i := 0; i < loginIPLimit; i++ {
+		a.limiter.Allow("ip:192.0.2.5", loginIPLimit, loginWindow)
+	}
+	rr := httptest.NewRecorder()
+	req := loginRequest("blocked@example.com", "wrong-password")
+	req.RemoteAddr = "192.0.2.5:12345"
+	a.LoginHandler(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "900" {
+		t.Fatalf("status=%d Retry-After=%q, want 429 and 900", rr.Code, rr.Header().Get("Retry-After"))
+	}
+}
+
 func TestLogoutHandlerRevokesSession(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()

@@ -59,7 +59,52 @@ task web:build                # builds the SPA into internal/webui/dist
 task web:test                 # svelte-check plus vitest (--run)
 task web:dev                  # vite dev server, proxying /api and /webhooks to task dev's backend
 task web:e2e                  # Playwright smoke test against a real binary + Postgres
+task verify                   # sequential build, lint, race/integration, frontend and browser checks
+task audit                    # networked Go + full npm vulnerability checks; findings fail the task
 ```
+
+Before the first browser run, install its browser with
+`task web:install` then `(cd web && npx playwright install chromium)`.
+Linux CI may also need Playwright's `--with-deps` system packages. On hosts where
+the binary is named `go-task`, use that instead of `task`.
+
+`task verify` uses local Compose Postgres/Mailpit, fresh integration-test schemas,
+and dedicated `shigoto_e2e*` databases which browser tests recreate. Never point
+this harness at an operator/production database. Do not run verification tasks
+concurrently: `npm ci` replaces dependencies, builds share output, and browser
+fixtures recreate their databases. Integration tests have a 10-minute per-package
+timeout, with Go stack traces on timeout; CI preserves failure logs and browser
+artifacts. When sharing a local test Compose stack between worktrees, set
+`COMPOSE_PROJECT_NAME` to that stack's project name to avoid host-port conflicts.
+
+### Pre-deployment risks
+
+The hardening pass adds regressions for settings audit redaction, login limiter
+accounting, report allocation overflow and sending an invoice after a concurrent
+void, full or partial payment. Provider sends now refuse invoices with any
+recorded payment rather than sending their original full balance. Real-browser
+checks also cover financial forms, expiry/re-login,
+time billing, lease/rent-run idempotency, reconciliation and CSV reporting.
+
+**A green `verify` is not a clean vulnerability audit.** As of 2026-11-07,
+`task audit` reports GHSA-gcqx-w48m-w2h4 in `deepmerge@4.3.1` through the Svelte
+build plugin (four low-severity npm package entries for one advisory). The
+registry's latest deepmerge version is still 4.3.1. The reviewed plugin usage
+merges repository-controlled build configuration, not runtime request input;
+this is not proof that every build-tool input is safe. No exception or forced
+downgrade was accepted: the audit gate intentionally remains red until a safe
+upstream fix is verified or an operator explicitly approves a scoped exception.
+
+Historical settings audit records have **not** been rewritten and may still
+contain bank details. Existing limitations also remain: credit notes/refunds and
+overpayments, billed-period lease edits/gaps, receipt rollback cleanup, bounded
+memory/concurrency under abuse, aggregate/extreme-input arithmetic, and complete
+review of all property/reconciliation paths. Payment reconciliation after an
+invoice was already sent, provider idempotency expiry and provider/DB commit
+recovery also still need acceptance/review. Live OIDC/Stripe acceptance,
+failure-injection/load testing and container
+image vulnerability scanning are still required as applicable. See
+`docs/superpowers/plans/2026-11-05-01-followups.md` for the remaining ledger.
 
 ### Web UI dev workflow
 
