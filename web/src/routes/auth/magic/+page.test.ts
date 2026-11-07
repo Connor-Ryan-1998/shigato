@@ -7,8 +7,8 @@ vi.mock('$app/state', () => ({
 		return page;
 	}
 }));
-const { goto } = vi.hoisted(() => ({ goto: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto }));
+const { goto, replaceState } = vi.hoisted(() => ({ goto: vi.fn(), replaceState: vi.fn() }));
+vi.mock('$app/navigation', () => ({ goto, replaceState }));
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
 vi.mock('../../../lib/api', () => ({
@@ -30,10 +30,11 @@ describe('magic sign-in page', () => {
 	beforeEach(() => {
 		apiMock.mockReset();
 		goto.mockClear();
+		replaceState.mockClear();
 		page.url = new URL('http://localhost/auth/magic?token=abc123');
 	});
 
-	it('shows the fixed expired message on a 410', async () => {
+	it('shows the fixed expired message on a 410, and scrubs the token from the URL', async () => {
 		apiMock.mockImplementation((method: string, path: string) => {
 			if (method === 'POST' && path === '/api/v1/auth/magic/verify') {
 				return Promise.reject(new ApiError(410, 'This link has expired — request a new one'));
@@ -45,9 +46,13 @@ describe('magic sign-in page', () => {
 
 		expect(await screen.findByText('This link has expired — request a new one')).toBeTruthy();
 		expect(goto).not.toHaveBeenCalled();
+		// Scrubbed immediately on mount, before the verify call even
+		// resolves - a used-up, now-useless token still shouldn't linger in
+		// history/the referrer.
+		expect(replaceState).toHaveBeenCalledWith('/auth/magic', {});
 	});
 
-	it('loads the session and redirects on success', async () => {
+	it('loads the session, scrubs the token from the URL, and redirects on success', async () => {
 		apiMock.mockImplementation((method: string, path: string) => {
 			if (method === 'POST' && path === '/api/v1/auth/magic/verify') {
 				return Promise.resolve({ redirect: '/portal' });
@@ -66,6 +71,12 @@ describe('magic sign-in page', () => {
 
 		render(Page);
 
-		await vi.waitFor(() => expect(goto).toHaveBeenCalledWith('/portal'));
+		// Scrubbed on mount, independent of the verify call's own outcome -
+		// asserted before the redirect lands, not just after.
+		expect(replaceState).toHaveBeenCalledWith('/auth/magic', {});
+
+		await vi.waitFor(() =>
+			expect(goto).toHaveBeenCalledWith('/portal', { replaceState: true })
+		);
 	});
 });

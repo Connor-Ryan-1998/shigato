@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
+	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, ApiError } from '../../../lib/api';
 	import { session, type MeResponse } from '../../../lib/session.svelte';
@@ -14,6 +14,12 @@
 
 	onMount(async () => {
 		const token = page.url.searchParams.get('token');
+		// Scrubbed from the URL immediately - before the verify call even
+		// starts, and regardless of its outcome - so the single-use token
+		// never lingers in browser history, a referrer header, or a
+		// screenshot/share of this tab. replaceState (not goto) keeps this
+		// as a no-navigation history edit.
+		replaceState('/auth/magic', {});
 		if (!token) {
 			status = 'error';
 			errorMessage = 'This link has expired — request a new one';
@@ -30,7 +36,7 @@
 			session.setMe(me);
 			session.setModules(meta.modules);
 			session.setSso(meta.sso);
-			goto(result.redirect || '/portal');
+			goto(result.redirect || '/portal', { replaceState: true });
 		} catch (err) {
 			status = 'error';
 			errorMessage = err instanceof ApiError ? err.message : 'Something went wrong.';

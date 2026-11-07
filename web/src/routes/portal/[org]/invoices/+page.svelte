@@ -32,14 +32,24 @@
 	let errorMessage = $state('');
 	let invoices = $state<InvoiceListItem[]>([]);
 
+	// Bumped on every load() call; a response is only applied if it's still
+	// the most recent request by the time it resolves - same pattern as
+	// [org]/settings/members/+page.svelte. Guards against an org switch
+	// whose earlier (slower) request resolves after a later one.
+	let requestSeq = 0;
+
 	async function load() {
+		const seq = ++requestSeq;
 		loadStatus = 'loading';
 		errorMessage = '';
 		try {
 			const org = page.params.org;
-			invoices = await api<InvoiceListItem[]>('GET', `/api/v1/portal/${org}/invoices`);
+			const result = await api<InvoiceListItem[]>('GET', `/api/v1/portal/${org}/invoices`);
+			if (seq !== requestSeq) return;
+			invoices = result;
 			loadStatus = 'ready';
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
 			loadStatus = 'error';
 		}

@@ -1,8 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { flushSync } from 'svelte';
 import { render, screen } from '@testing-library/svelte';
 
+// A reactive stand-in for $app/state's page (runes work here because this
+// is a .svelte.test.ts file), so the stale-response test can switch id the
+// way an id-to-id hop does: same page instance, new page.params.id.
+const page = $state({
+	params: { org: 'acme', id: '7' },
+	url: new URL('http://localhost/portal/acme/invoices/7')
+});
 vi.mock('$app/state', () => ({
-	page: { params: { org: 'acme', id: '7' }, url: new URL('http://localhost/portal/acme/invoices/7') }
+	get page() {
+		return page;
+	}
 }));
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
@@ -22,6 +32,7 @@ import Page from './+page.svelte';
 
 beforeEach(() => {
 	apiMock.mockReset();
+	page.params = { org: 'acme', id: '7' };
 });
 
 const baseInvoice = {
@@ -64,5 +75,37 @@ describe('portal invoice detail page', () => {
 		render(Page);
 
 		expect(await screen.findByText('REF-ABC123')).toBeTruthy();
+	});
+
+	it('discards an older response that resolves after a newer one (id-to-id hop)', async () => {
+		let resolveFirst: (v: unknown) => void = () => {};
+		const firstPending = new Promise((resolve) => {
+			resolveFirst = resolve;
+		});
+
+		apiMock.mockImplementation((_method: string, path: string) => {
+			if (path.endsWith('/invoices/7')) return firstPending;
+			if (path.endsWith('/invoices/8')) {
+				return Promise.resolve({ ...baseInvoice, id: 8, payment_reference: 'REF-NEWER' });
+			}
+			return Promise.reject(new Error(`unexpected call ${path}`));
+		});
+
+		render(Page);
+
+		// Hop to invoice 8 before invoice 7's (slower) request resolves.
+		page.params = { org: 'acme', id: '8' };
+		flushSync();
+
+		await screen.findByText('REF-NEWER');
+
+		// The stale invoice-7 response lands after invoice 8's has already
+		// rendered - it must never overwrite it.
+		resolveFirst(baseInvoice);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(screen.getByText('REF-NEWER')).toBeTruthy();
+		expect(screen.queryByText('REF-ABC123')).toBeNull();
 	});
 });

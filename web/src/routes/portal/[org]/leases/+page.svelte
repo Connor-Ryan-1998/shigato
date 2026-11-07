@@ -23,7 +23,13 @@
 	let errorMessage = $state('');
 	let leases = $state<Lease[]>([]);
 
+	// Bumped on every load() call; a response is only applied if it's still
+	// the most recent request by the time it resolves - same pattern as
+	// [org]/settings/members/+page.svelte.
+	let requestSeq = 0;
+
 	async function load() {
+		const seq = ++requestSeq;
 		loadStatus = 'loading';
 		errorMessage = '';
 		try {
@@ -31,9 +37,12 @@
 			// A client gets a 404 here (leases are tenant-only); routing to
 			// this page is itself staff-nav-free, so a client never has a
 			// link to it, but a typed URL still has to fail cleanly.
-			leases = await api<Lease[]>('GET', `/api/v1/portal/${org}/leases`);
+			const result = await api<Lease[]>('GET', `/api/v1/portal/${org}/leases`);
+			if (seq !== requestSeq) return;
+			leases = result;
 			loadStatus = 'ready';
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
 			loadStatus = 'error';
 		}
@@ -71,7 +80,7 @@
 					</p>
 				{/if}
 				{#if lease.arrears > 0}
-					<p class="arrears" role="alert">You're <Money cents={lease.arrears} /> behind</p>
+					<p class="arrears">You're <Money cents={lease.arrears} /> behind</p>
 				{/if}
 			</li>
 		{/each}

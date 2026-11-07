@@ -48,17 +48,27 @@
 	// something else is copied.
 	let copiedField = $state('');
 
+	// Bumped on every load() call; a response is only applied if it's still
+	// the most recent request by the time it resolves - same pattern as
+	// [org]/settings/members/+page.svelte. Without this, a fast id-to-id hop
+	// (this invoice -> that invoice) could have the first (slower) request's
+	// response land after the second's and clobber it with the wrong
+	// invoice.
+	let requestSeq = 0;
+
 	async function load() {
+		const seq = ++requestSeq;
 		loadStatus = 'loading';
 		errorMessage = '';
 		try {
 			const org = page.params.org;
-			invoice = await api<InvoiceDetail>(
-				'GET',
-				`/api/v1/portal/${org}/invoices/${page.params.id}`
-			);
+			const id = page.params.id;
+			const result = await api<InvoiceDetail>('GET', `/api/v1/portal/${org}/invoices/${id}`);
+			if (seq !== requestSeq) return;
+			invoice = result;
 			loadStatus = 'ready';
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			errorMessage = e instanceof ApiError ? e.message : 'Something went wrong.';
 			loadStatus = 'error';
 		}
@@ -129,8 +139,8 @@
 	{/if}
 
 	{#if inv.bank_bsb || inv.bank_account}
-		<section aria-label="Bank transfer details">
-			<h2>Bank transfer</h2>
+		<section aria-labelledby="bank-transfer-heading">
+			<h2 id="bank-transfer-heading">Bank transfer</h2>
 			{#if inv.bank_bsb}
 				<div class="copy-row">
 					<span>BSB {inv.bank_bsb}</span>
@@ -151,8 +161,8 @@
 	{/if}
 
 	{#if inv.payid}
-		<section aria-label="PayID details">
-			<h2>PayID</h2>
+		<section aria-labelledby="payid-heading">
+			<h2 id="payid-heading">PayID</h2>
 			<div class="copy-row">
 				<span>{inv.payid}</span>
 				<Button variant="secondary" onclick={() => copy(inv.payid ?? '', 'payid')}>
