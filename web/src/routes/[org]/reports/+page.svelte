@@ -15,6 +15,20 @@
 		net: number;
 	};
 	type BAS = { period?: string; figures_cents: Record<string, number> };
+	type DetailRow = {
+		payment_id?: number;
+		invoice_number?: number;
+		paid_on?: string;
+		expense_id?: number;
+		line_id?: number;
+		spent_on?: string;
+		category: string;
+		gst_code: string;
+		incl_gst: number;
+		gst: number;
+		ex_gst: number;
+	};
+	type BASDetail = { field: string; income?: DetailRow[]; expenses?: DetailRow[] };
 
 	// Australian FY (1 July start). ponytail: assumes fy_start_month 7; read
 	// the org setting if a non-AU org ever appears.
@@ -46,6 +60,9 @@
 	let basError = $state('');
 	let pnlSeq = 0;
 	let basSeq = 0;
+	let detail = $state<BASDetail | null>(null);
+	let detailError = $state('');
+	let detailSeq = 0;
 
 	const base = $derived(`/api/v1/orgs/${page.params.org}/reports`);
 	const pnlParams = $derived(new URLSearchParams({ from, to, group_by: groupBy }).toString());
@@ -79,12 +96,28 @@
 		}
 	}
 
+	async function loadDetail(field: string) {
+		const seq = ++detailSeq;
+		detailError = '';
+		detail = null;
+		try {
+			const q = new URLSearchParams({ period, field }).toString();
+			const res = await api<BASDetail>('GET', `${base}/bas/detail?${q}`);
+			if (seq === detailSeq) detail = res;
+		} catch (e) {
+			if (seq === detailSeq) detailError = message(e);
+		}
+	}
+
 	$effect(() => {
 		pnlParams;
 		loadPnl();
 	});
 	$effect(() => {
 		basParams;
+		detailSeq++;
+		detail = null;
+		detailError = '';
 		loadBas();
 	});
 </script>
@@ -157,10 +190,51 @@
 			<caption>{period}</caption>
 			<tbody>
 				{#each BAS_ROWS as [k, label] (k)}
-					<tr><th scope="row">{label}</th><td>{money(bas.figures_cents[k] ?? 0)}</td></tr>
+					<tr>
+						<th scope="row">
+							{#if k === 'g2'}
+								{label}
+							{:else}
+								<button type="button" class="link" onclick={() => loadDetail(k.toUpperCase())}>{label}</button>
+							{/if}
+						</th>
+						<td>{money(bas.figures_cents[k] ?? 0)}</td>
+					</tr>
 				{/each}
 			</tbody>
 		</table>
+		{#if detailError}
+			<p class="error" role="alert">{detailError}</p>
+		{:else if detail}
+			{@const rows = [...(detail.income ?? []), ...(detail.expenses ?? [])]}
+			<table class="detail">
+				<caption>{detail.field} detail</caption>
+				<thead>
+					<tr><th>Date</th><th>Source</th><th>Category</th><th>GST code</th><th>Ex GST</th><th>GST</th><th>Incl GST</th></tr>
+				</thead>
+				<tbody>
+					{#each rows as row, i (i)}
+						<tr>
+							<td>{row.paid_on ?? row.spent_on}</td>
+							<td>
+								{#if row.payment_id !== undefined}
+									Invoice {row.invoice_number ?? '(draft)'}
+								{:else}
+									Expense {row.expense_id}
+								{/if}
+							</td>
+							<td>{row.category}</td>
+							<td>{row.gst_code}</td>
+							<td>{money(row.ex_gst)}</td>
+							<td>{money(row.gst)}</td>
+							<td>{money(row.incl_gst)}</td>
+						</tr>
+					{:else}
+						<tr><td colspan="7">No rows.</td></tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
 	{:else}
 		<p>Loading…</p>
 	{/if}
@@ -204,6 +278,22 @@
 	.total th,
 	.total td {
 		font-weight: 600;
+	}
+	.detail {
+		max-width: none;
+	}
+	.detail td,
+	.detail th {
+		padding-right: var(--space-2, 0.5rem);
+	}
+	.link {
+		background: none;
+		border: 0;
+		padding: 0;
+		color: var(--accent, inherit);
+		text-decoration: underline;
+		cursor: pointer;
+		font: inherit;
 	}
 	.error {
 		color: var(--danger, #b00020);
