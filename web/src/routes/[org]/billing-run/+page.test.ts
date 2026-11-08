@@ -12,6 +12,7 @@ const { apiMock, gotoMock } = vi.hoisted(() => ({
   gotoMock: vi.fn(),
 }));
 vi.mock("$app/navigation", () => ({ goto: gotoMock }));
+vi.mock("../../../lib/session.svelte", () => ({ session: { currentOrg: { slug: "acme", perms: ["invoices_write"] } } }));
 vi.mock("../../../lib/api", () => ({
   api: apiMock,
   ApiError: class ApiError extends Error {

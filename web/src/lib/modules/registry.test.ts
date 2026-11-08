@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ModuleManifest } from './registry';
 import { visibleNav } from './registry';
+import { core } from './core/manifest';
+import { reconciliation } from './reconciliation/manifest';
+import { timesheets } from './timesheets/manifest';
 
 const manifests: ModuleManifest[] = [
 	{
@@ -29,6 +32,35 @@ const manifests: ModuleManifest[] = [
 ];
 
 describe('visibleNav', () => {
+	it.each([
+		{ perms: ['timesheets_read'], hrefs: ['time'] },
+		{ perms: ['invoices_write'], hrefs: ['billing-run'] },
+		{ perms: ['timesheets_read', 'invoices_write'], hrefs: ['time', 'billing-run'] },
+		{ perms: [], hrefs: [] }
+	])('exposes timesheet screens according to permissions: $perms', ({ perms, hrefs }) => {
+		const items = visibleNav([timesheets], ['timesheets'], perms)[0].items;
+		expect(items.map((item) => item.href)).toEqual(hrefs);
+	});
+	it('hides time and project navigation when timesheets is disabled', () => {
+		expect(visibleNav([timesheets], [], ['timesheets_read', 'invoices_write'])).toHaveLength(0);
+	});
+	it('shows Expenses only with enabled reconciliation and reports permission', () => {
+		expect(visibleNav([reconciliation], ['reconciliation'], ['reports_read'])[0].items.map((i) => i.href)).toContain('expenses');
+		expect(visibleNav([reconciliation], [], ['reports_read'])).toHaveLength(0);
+		expect(visibleNav([reconciliation], ['reconciliation'], [])[0].items).toHaveLength(0);
+	});
+	it('shows actual Contacts link to readers but not portal users', () => {
+		expect(visibleNav([core], [], ['invoices_read'])[0].items.map((i) => i.href)).toContain('contacts');
+		expect(visibleNav([core], [], [])[0].items.map((i) => i.href)).not.toContain('contacts');
+	});
+	it('shows actual Settings and Members links only for org admins', () => {
+		const owner = visibleNav([core], [], ['org_admin'])[0].items.map((i) => i.href);
+		expect(owner).toContain('settings');
+		expect(owner).toContain('settings/members');
+		const staff = visibleNav([core], [], ['invoices_read'])[0].items.map((i) => i.href);
+		expect(staff).not.toContain('settings');
+		expect(staff).not.toContain('settings/members');
+	});
 	it('hides a disabled module', () => {
 		const groups = visibleNav(manifests, [], ['property_read']);
 		expect(groups.some((g) => g.module.name === 'property')).toBe(false);

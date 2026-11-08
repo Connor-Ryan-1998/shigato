@@ -10,7 +10,7 @@ vi.mock("../../../lib/api", () => ({
   ApiError: class ApiError extends Error {},
 }));
 vi.mock("../../../lib/session.svelte", () => ({
-  session: { currentOrg: { perms: ["timesheets_read", "timesheets_write"] } },
+  session: { currentOrg: { slug: "acme", perms: ["timesheets_read", "timesheets_write"] }, me: { user: { id: 1 } } },
 }));
 
 import Page from "./+page.svelte";
@@ -20,6 +20,7 @@ const ENTRIES = {
     {
       id: 5,
       task_id: 11,
+      user_id: 1,
       work_date: "2026-11-06",
       minutes: 90,
       note: "design",
@@ -27,6 +28,7 @@ const ENTRIES = {
     {
       id: 6,
       task_id: 11,
+      user_id: 1,
       work_date: "2026-11-05",
       minutes: 30,
       note: "",
@@ -39,7 +41,7 @@ const ENTRIES = {
 function route(method: string, path: string) {
   if (method === "GET" && path.endsWith("/projects?active=true"))
     return Promise.resolve([
-      { id: 3, name: "Website", client_contact_id: 2, hourly_rate: 15000 },
+      { id: 3, name: "Website", client_contact_id: 2, hourly_rate: 15000, gst_code: "GST", active: true },
     ]);
   if (method === "GET" && path.endsWith("/projects/3/tasks"))
     return Promise.resolve([{ id: 11, name: "Build", active: true }]);

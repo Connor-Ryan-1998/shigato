@@ -5,11 +5,13 @@
 
 export class ApiError extends Error {
 	status: number;
+	invoiceID?: number;
 
-	constructor(status: number, message: string) {
+	constructor(status: number, message: string, invoiceID?: number) {
 		super(message);
 		this.name = 'ApiError';
 		this.status = status;
+		this.invoiceID = invoiceID;
 	}
 }
 
@@ -139,10 +141,14 @@ export async function api<T>(
 
 	if (!res.ok) {
 		let message = res.statusText;
+		let invoiceID: number | undefined;
 		try {
 			const data = await res.clone().json();
 			if (data && typeof data.error === 'string') {
 				message = data.error;
+			}
+			if (Number.isSafeInteger(data?.invoice_id) && data.invoice_id > 0) {
+				invoiceID = data.invoice_id;
 			}
 		} catch {
 			// Body wasn't JSON (or was empty): fall back to statusText.
@@ -162,7 +168,7 @@ export async function api<T>(
 				redirectToLogin();
 			}
 		}
-		throw new ApiError(res.status, message);
+		throw new ApiError(res.status, message, invoiceID);
 	}
 
 	// An empty body (204, or a 2xx with no content) is never valid JSON, so

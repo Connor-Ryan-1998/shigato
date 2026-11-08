@@ -46,6 +46,16 @@ describe('api', () => {
 			new ApiError(422, 'bad')
 		);
 	});
+	it('preserves retained invoice ID on billing-run error', async () => {
+		vi.mocked(fetch).mockResolvedValue(jsonResponse(422, { error: 'issue failed', invoice_id: 77 }));
+		await expect(api('POST', '/api/v1/orgs/acme/billing-runs', {})).rejects.toMatchObject({
+			status: 422, message: 'issue failed', invoiceID: 77
+		});
+	});
+	it.each([undefined, null, '77', -1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1])('does not expose invalid invoice ID %s', async (invoice_id) => {
+		vi.mocked(fetch).mockResolvedValue(jsonResponse(422, { error: 'bad', invoice_id }));
+		await expect(api('POST', '/api/v1/orgs/acme/billing-runs', {})).rejects.toMatchObject({ status: 422, message: 'bad', invoiceID: undefined });
+	});
 
 	it('calls onUnauthorized on a 401 response and throws when it resolves false', async () => {
 		vi.mocked(fetch).mockResolvedValue(jsonResponse(401, { error: 'unauthorized' }));

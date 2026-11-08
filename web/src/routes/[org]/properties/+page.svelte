@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { api, ApiError } from '../../../lib/api';
 	import { money, todayLocal } from '../../../lib/format';
@@ -28,13 +28,20 @@
 		{ value: 'monthly', label: 'Monthly' }
 	];
 
-	const base = $derived(`/api/v1/orgs/${page.params.org}`);
-	const canWrite = $derived(session.currentOrg?.perms.includes('property_write') ?? false);
+	const org = $derived(page.params.org);
+	const base = $derived(`/api/v1/orgs/${org}`);
+	const membership = $derived(session.currentOrg?.slug === org ? session.currentOrg : null);
+	const canRead = $derived(membership?.perms.includes('property_read') ?? false);
+	const canWrite = $derived(membership?.perms.includes('property_write') ?? false);
 
 	let properties = $state<Property[]>([]);
 	let leases = $state<Lease[]>([]);
 	let contacts = $state<Contact[]>([]);
 	let error = $state('');
+	let loadedOrg = $state('');
+	let busy = $state(false);
+	let loadSeq = 0;
+	let actionSeq = 0;
 
 	let propName = $state('');
 	let propAddress = $state('');
@@ -46,6 +53,9 @@
 	let leaseFrequency = $state('weekly');
 	let leaseRent = $state('');
 	let leaseBond = $state('');
+	let coTenants = $state<string[]>([]);
+	let paidTo = $state('');
+	let openingArrears = $state('');
 
 	const contactName = $derived(new Map(contacts.map((c) => [c.id, c.name])));
 	const propertyOptions = $derived(properties.map((p) => ({ value: String(p.id), label: p.name })));
@@ -61,41 +71,81 @@
 	const currentRent = (l: Lease) => l.rent_changes.at(-1)?.amount ?? 0;
 
 	async function load() {
-		[properties, contacts] = await Promise.all([
-			api<Property[]>('GET', `${base}/properties`),
-			api<Contact[]>('GET', `${base}/contacts`)
+		const seq = ++loadSeq;
+		const slug = org;
+		const url = base;
+		const [p, c] = await Promise.all([
+			api<Property[]>('GET', `${url}/properties`),
+			api<Contact[]>('GET', `${url}/contacts`)
 		]);
-		// ponytail: one request per property; add an org-wide lease list if
-		// property counts grow past a handful.
-		leases = (
+		if (seq !== loadSeq || slug !== org) return;
+		// shortcut: one request per property; batch when counts exceed a handful.
+		const allLeases = (
 			await Promise.all(
-				properties.map((p) => api<Lease[]>('GET', `${base}/leases?property_id=${p.id}`))
+				p.map((property) => api<Lease[]>('GET', `${url}/leases?property_id=${property.id}`))
 			)
 		).flat();
+		if (seq !== loadSeq || slug !== org) return;
+		properties = p;
+		contacts = c;
+		leases = allLeases;
+		loadedOrg = slug ?? '';
 		if (leaseProperty === '' && properties[0]) leaseProperty = String(properties[0].id);
 		if (leaseTenant === '' && tenantOptions[0]) leaseTenant = tenantOptions[0].value;
 	}
 
-	onMount(() => load().catch(fail));
+	$effect(() => {
+		const slug = org;
+		const allowed = canRead;
+		untrack(() => {
+			loadedOrg = '';
+			properties = [];
+			contacts = [];
+			leases = [];
+			propName = '';
+			propAddress = '';
+			propResidential = true;
+			leaseProperty = '';
+			leaseTenant = '';
+			leaseStart = todayLocal();
+			leaseFrequency = 'weekly';
+			leaseRent = '';
+			leaseBond = '';
+			coTenants = [];
+			paidTo = '';
+			openingArrears = '';
+			busy = false;
+			error = '';
+			if (allowed && slug) load().catch((e) => { if (slug === org) fail(e); });
+		});
+		return () => { loadSeq++; actionSeq++; };
+	});
 
-	async function act(fn: () => Promise<unknown>) {
+	async function act(path: string, body: unknown, after: () => void) {
+		if (!canWrite || loadedOrg !== org || busy) return;
+		const slug = org;
+		const token = ++actionSeq;
+		busy = true;
 		error = '';
 		try {
-			await fn();
+			await api('POST', `${base}/${path}`, body);
+			if (token !== actionSeq || slug !== org) return;
+			after();
 			await load();
 		} catch (e) {
-			fail(e);
+			if (token === actionSeq && slug === org) fail(e);
+		} finally {
+			if (token === actionSeq) busy = false;
 		}
 	}
 
 	function createProperty(e: SubmitEvent) {
 		e.preventDefault();
-		act(async () => {
-			await api('POST', `${base}/properties`, {
+		act('properties', {
 				name: propName,
 				address: propAddress || undefined,
 				residential: propResidential
-			});
+			}, () => {
 			propName = '';
 			propAddress = '';
 		});
@@ -103,22 +153,35 @@
 
 	function createLease(e: SubmitEvent) {
 		e.preventDefault();
-		act(async () => {
-			await api('POST', `${base}/leases`, {
+		act('leases', {
 				property_id: Number(leaseProperty),
-				tenants: [{ contact_id: Number(leaseTenant), primary: true }],
+				tenants: [
+					{ contact_id: Number(leaseTenant), primary: true },
+					...coTenants.filter((id) => id !== leaseTenant).map((id) => ({ contact_id: Number(id), primary: false }))
+				],
 				start_date: leaseStart,
 				frequency: leaseFrequency,
 				rent_amount: cents(leaseRent),
-				bond_amount: cents(leaseBond) || undefined
-			});
+				bond_amount: cents(leaseBond) || undefined,
+				paid_to_date: paidTo || undefined,
+				opening_arrears: openingArrears === '' ? undefined : cents(openingArrears)
+			}, () => {
 			leaseRent = '';
 			leaseBond = '';
+			coTenants = [];
+			paidTo = '';
+			openingArrears = '';
 		});
 	}
 </script>
 
 <PageHeader title="Properties" />
+
+{#if !canRead}
+	<p role="alert">You do not have permission to view properties.</p>
+{:else if loadedOrg !== org}
+	{#if !error}<p role="status">Loading properties…</p>{/if}
+{:else}
 
 {#if properties.length === 0}
 	<p>No properties yet.</p>
@@ -144,11 +207,14 @@
 {#if canWrite}
 	<section>
 		<h2>New property</h2>
-		<form class="row" onsubmit={createProperty}>
+		<form onsubmit={createProperty}>
+			<fieldset class="row" disabled={busy}>
+			<legend>Property details</legend>
 			<Field label="Name" id="prop-name"><input id="prop-name" bind:value={propName} required /></Field>
 			<Field label="Address" id="prop-address"><input id="prop-address" bind:value={propAddress} /></Field>
 			<label class="check"><input type="checkbox" bind:checked={propResidential} /> Residential</label>
-			<Button type="submit">Create property</Button>
+			<Button type="submit" disabled={busy}>Create property</Button>
+			</fieldset>
 		</form>
 	</section>
 
@@ -158,13 +224,22 @@
 			{#if tenantOptions.length === 0}
 				<p>Add a contact of kind "tenant" first.</p>
 			{:else}
-				<form class="row" onsubmit={createLease}>
+				<form onsubmit={createLease}>
+					<fieldset class="row" disabled={busy}>
+					<legend>Lease details</legend>
 					<Field label="Property" id="lease-property">
 						<Select id="lease-property" bind:value={leaseProperty} options={propertyOptions} />
 					</Field>
 					<Field label="Tenant" id="lease-tenant">
-						<Select id="lease-tenant" bind:value={leaseTenant} options={tenantOptions} />
+						<Select id="lease-tenant" bind:value={leaseTenant} options={tenantOptions} onchange={(value) => { coTenants = coTenants.filter((id) => id !== value); }} disabled={busy} />
 					</Field>
+					<fieldset disabled={busy}>
+						<legend>Co-tenants (optional)</legend>
+						<p>The selected Tenant is primary and receives invoices.</p>
+						{#each tenantOptions.filter((tenant) => tenant.value !== leaseTenant) as tenant (tenant.value)}
+							<label><input type="checkbox" value={tenant.value} bind:group={coTenants} /> Co-tenant: {tenant.label}</label>
+						{/each}
+					</fieldset>
 					<Field label="Start" id="lease-start">
 						<input id="lease-start" type="date" bind:value={leaseStart} required />
 					</Field>
@@ -177,11 +252,19 @@
 					<Field label="Bond ($)" id="lease-bond">
 						<input id="lease-bond" type="number" min="0" step="0.01" bind:value={leaseBond} />
 					</Field>
-					<Button type="submit">Create lease</Button>
+					<Field label="Paid-to date" id="lease-paid-to" hint="Must be the last day of a rent period; leave blank for a new lease.">
+						<input id="lease-paid-to" type="date" bind:value={paidTo} disabled={busy} />
+					</Field>
+					<Field label="Opening arrears ($)" id="lease-arrears" hint="Positive arrears create a separate draft invoice; it is not sent automatically by this form.">
+						<input id="lease-arrears" type="number" min="0" step="0.01" bind:value={openingArrears} disabled={busy} />
+					</Field>
+					<Button type="submit" disabled={busy}>Create lease</Button>
+					</fieldset>
 				</form>
 			{/if}
 		</section>
 	{/if}
+{/if}
 {/if}
 
 {#if error}
@@ -189,6 +272,7 @@
 {/if}
 
 <style>
+	fieldset { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
 	section {
 		margin-bottom: var(--space-8, 2rem);
 	}

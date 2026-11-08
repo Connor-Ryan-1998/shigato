@@ -207,23 +207,24 @@ func chargeToResponse(c LeaseCharge) chargeResponse {
 }
 
 type leaseResponse struct {
-	ID                      int64                 `json:"id"`
-	PropertyID              int64                 `json:"property_id"`
-	StartDate               string                `json:"start_date"`
-	EndDate                 *string               `json:"end_date,omitempty"`
-	TerminationDate         *string               `json:"termination_date,omitempty"`
-	Frequency               string                `json:"frequency"`
-	PaidToDate              *string               `json:"paid_to_date,omitempty"`
-	OpeningArrears          int64                 `json:"opening_arrears"`
-	OpeningArrearsInvoiceID *int64                `json:"opening_arrears_invoice_id,omitempty"`
-	BondAmount              int64                 `json:"bond_amount"`
-	RTALodgementRef         string                `json:"rta_lodgement_ref,omitempty"`
-	BondLodgedOn            *string               `json:"bond_lodged_on,omitempty"`
-	BondStatus              string                `json:"bond_status"`
-	Warnings                []string              `json:"warnings,omitempty"`
-	Tenants                 []leaseTenantResponse `json:"tenants"`
-	RentChanges             []rentChangeResponse  `json:"rent_changes"`
-	Charges                 []chargeResponse      `json:"charges"`
+	ID                      int64                   `json:"id"`
+	PropertyID              int64                   `json:"property_id"`
+	StartDate               string                  `json:"start_date"`
+	EndDate                 *string                 `json:"end_date,omitempty"`
+	TerminationDate         *string                 `json:"termination_date,omitempty"`
+	Frequency               string                  `json:"frequency"`
+	PaidToDate              *string                 `json:"paid_to_date,omitempty"`
+	OpeningArrears          int64                   `json:"opening_arrears"`
+	OpeningArrearsInvoiceID *int64                  `json:"opening_arrears_invoice_id,omitempty"`
+	BondAmount              int64                   `json:"bond_amount"`
+	RTALodgementRef         string                  `json:"rta_lodgement_ref,omitempty"`
+	BondLodgedOn            *string                 `json:"bond_lodged_on,omitempty"`
+	BondStatus              string                  `json:"bond_status"`
+	Warnings                []string                `json:"warnings,omitempty"`
+	AffectedInvoices        []affectedInvoicePeriod `json:"affected_invoices,omitempty"`
+	Tenants                 []leaseTenantResponse   `json:"tenants"`
+	RentChanges             []rentChangeResponse    `json:"rent_changes"`
+	Charges                 []chargeResponse        `json:"charges"`
 }
 
 // leaseToResponse builds l's JSON response. bondStatus and warnings come
@@ -483,7 +484,8 @@ type rentChangeRequest struct {
 
 type rentChangeWithWarningsResponse struct {
 	rentChangeResponse
-	Warnings []string `json:"warnings,omitempty"`
+	Warnings         []string                `json:"warnings,omitempty"`
+	AffectedInvoices []affectedInvoicePeriod `json:"affected_invoices,omitempty"`
 }
 
 func createRentChange(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -506,11 +508,19 @@ func createRentChange(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	p := auth.From(r.Context())
 	var created LeaseRentChange
 	var warnings []string
+	var affected []affectedInvoicePeriod
 	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		created, warnings, err = CreateRentChange(r.Context(), tx, p.OrgID, leaseID, effective, core.Cents(body.Amount))
 		if err != nil {
 			return err
+		}
+		affected, err = rentChangeAffectedInvoicePeriods(r.Context(), tx, p.OrgID, leaseID, effective)
+		if err != nil {
+			return err
+		}
+		if len(affected) > 0 {
+			warnings = append(warnings, warnBilledPeriods)
 		}
 		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "lease_rent_change", created.ID, "create", body)
 	})
@@ -521,6 +531,7 @@ func createRentChange(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	module.WriteJSON(w, http.StatusCreated, rentChangeWithWarningsResponse{
 		rentChangeResponse: rentChangeToResponse(created),
 		Warnings:           warnings,
+		AffectedInvoices:   affected,
 	})
 }
 
@@ -529,6 +540,12 @@ type chargeRequest struct {
 	Amount      int64  `json:"amount"`
 	StartDate   string `json:"start_date"`
 	EndDate     string `json:"end_date,omitempty"`
+}
+
+type chargeWithWarningsResponse struct {
+	chargeResponse
+	Warnings         []string                `json:"warnings,omitempty"`
+	AffectedInvoices []affectedInvoicePeriod `json:"affected_invoices,omitempty"`
 }
 
 func createCharge(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -559,11 +576,16 @@ func createCharge(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 	p := auth.From(r.Context())
 	var created LeaseCharge
+	var affected []affectedInvoicePeriod
 	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		created, err = CreateCharge(r.Context(), tx, p.OrgID, leaseID, NewCharge{
 			Description: body.Description, Amount: core.Cents(body.Amount), StartDate: startDate, EndDate: endDate,
 		})
+		if err != nil {
+			return err
+		}
+		affected, err = affectedInvoicePeriods(r.Context(), tx, p.OrgID, leaseID, startDate, endDate)
 		if err != nil {
 			return err
 		}
@@ -573,7 +595,11 @@ func createCharge(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusCreated, chargeToResponse(created))
+	var warnings []string
+	if len(affected) > 0 {
+		warnings = []string{warnBilledPeriods}
+	}
+	module.WriteJSON(w, http.StatusCreated, chargeWithWarningsResponse{chargeResponse: chargeToResponse(created), Warnings: warnings, AffectedInvoices: affected})
 }
 
 type terminateRequest struct {
@@ -599,9 +625,14 @@ func terminateLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 	p := auth.From(r.Context())
 	var updated Lease
+	var affected []affectedInvoicePeriod
 	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		updated, err = TerminateLease(r.Context(), tx, p.OrgID, leaseID, terminationDate)
+		if err != nil {
+			return err
+		}
+		affected, err = affectedInvoicePeriods(r.Context(), tx, p.OrgID, leaseID, terminationDate.AddDate(0, 0, 1), nil)
 		if err != nil {
 			return err
 		}
@@ -616,7 +647,12 @@ func terminateLease(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, leaseToResponse(updated, status, warnings, today(d)))
+	if len(affected) > 0 {
+		warnings = append(warnings, warnBilledPeriods)
+	}
+	response := leaseToResponse(updated, status, warnings, today(d))
+	response.AffectedInvoices = affected
+	module.WriteJSON(w, http.StatusOK, response)
 }
 
 // --- ledger handler ---

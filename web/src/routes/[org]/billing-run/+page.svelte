@@ -1,14 +1,13 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { api, ApiError } from '../../../lib/api';
+	import { session } from '../../../lib/session.svelte';
 	import { todayLocal } from '../../../lib/format';
 	import PageHeader from '../../../lib/components/PageHeader.svelte';
 	import Field from '../../../lib/components/Field.svelte';
 	import Select from '../../../lib/components/Select.svelte';
 	import Button from '../../../lib/components/Button.svelte';
-	import Toast from '../../../lib/components/Toast.svelte';
 
 	type Contact = { id: number; name: string; kind: string };
 	type RunResult = { invoice: { id: number }; entry_count: number; total_minutes: number };
@@ -22,67 +21,113 @@
 	let issue = $state(false);
 	let error = $state('');
 	let running = $state(false);
+	let loadedOrg = $state('');
+	let invoiceID = $state<number | undefined>();
+	let requestSeq = 0;
 
 	const org = $derived(page.params.org);
+	const canRun = $derived(session.currentOrg?.slug === org && (session.currentOrg?.perms.includes('invoices_write') ?? false));
 	const options = $derived(contacts.map((c) => ({ value: String(c.id), label: c.name })));
 
 	function message(e: unknown): string {
 		return e instanceof ApiError ? e.message : 'Something went wrong.';
 	}
 
-	onMount(async () => {
+	async function load(slug: string) {
+		const seq = ++requestSeq;
+		loadedOrg = '';
+		contacts = [];
+		contactId = '';
+		invoiceID = undefined;
+		error = '';
+		running = false;
+		from = `${todayLocal().slice(0, 7)}-01`;
+		to = todayLocal();
+		dueInDays = '14';
+		issue = false;
 		try {
-			contacts = (await api<Contact[]>('GET', `/api/v1/orgs/${org}/contacts`)).filter(
+			const result = await api<Contact[]>('GET', `/api/v1/orgs/${slug}/contacts`);
+			if (seq !== requestSeq || slug !== org || !canRun) return;
+			contacts = result.filter(
 				(c) => c.kind === 'client'
 			);
 			if (contacts[0]) contactId = String(contacts[0].id);
+			loadedOrg = slug;
 		} catch (e) {
-			error = message(e);
+			if (seq === requestSeq && slug === org && canRun) error = message(e);
 		}
+	}
+	$effect(() => {
+		if (canRun && org) load(org);
+		return () => { requestSeq++; };
 	});
 
 	async function run(e: SubmitEvent) {
 		e.preventDefault();
+		if (!canRun || loadedOrg !== org || running || !contactId) return;
+		if (!from || !to || from > to) { error = 'From must not be after To.'; return; }
+		const days = Number(dueInDays);
+		if (!Number.isInteger(days) || days < 0 || days > 90) { error = 'Due in days must be between 0 and 90.'; return; }
+		const slug = org;
+		const seq = requestSeq;
 		running = true;
 		error = '';
+		invoiceID = undefined;
 		try {
-			const res = await api<RunResult>('POST', `/api/v1/orgs/${org}/billing-runs`, {
+			const res = await api<RunResult>('POST', `/api/v1/orgs/${slug}/billing-runs`, {
 				client_contact_id: Number(contactId),
 				from,
 				to,
-				due_in_days: Number(dueInDays),
+				due_in_days: days,
 				issue
 			});
-			await goto(`/${org}/invoices/${res.invoice.id}`);
+			if (seq !== requestSeq || slug !== org || !canRun) return;
+			await goto(`/${slug}/invoices/${res.invoice.id}`);
 		} catch (err) {
+			if (seq !== requestSeq || slug !== org || !canRun) return;
 			error = message(err);
+			if (err instanceof ApiError) invoiceID = err.invoiceID;
 		} finally {
-			running = false;
+			if (seq === requestSeq) running = false;
 		}
 	}
 </script>
 
 <PageHeader title="Billing run" />
 
+{#if !canRun}
+	<p role="alert">You do not have permission to create invoices.</p>
+{:else if loadedOrg !== org}
+	{#if !error}<p role="status">Loading clients…</p>{/if}
+	{#if error}<Button onclick={() => org && load(org)}>Retry</Button>{/if}
+{:else}
 <p>Bill a client's unbilled time entries in a date range as one invoice.</p>
 
 <form onsubmit={run}>
+	<fieldset disabled={running}>
+	<legend>Billing period</legend>
 	<Field label="Client" id="run-client">
 		<Select id="run-client" bind:value={contactId} {options} />
 	</Field>
 	<Field label="From" id="run-from"><input id="run-from" type="date" bind:value={from} required /></Field>
 	<Field label="To" id="run-to"><input id="run-to" type="date" bind:value={to} required /></Field>
 	<Field label="Due in days" id="run-due">
-		<input id="run-due" type="number" min="0" bind:value={dueInDays} required />
+		<input id="run-due" type="number" min="0" max="90" step="1" bind:value={dueInDays} required />
 	</Field>
 	<label class="check"><input type="checkbox" bind:checked={issue} /> Issue immediately</label>
+	</fieldset>
 	<Button type="submit" disabled={running || contactId === ''}>
 		{running ? 'Running…' : 'Create invoice'}
 	</Button>
 </form>
+{#if invoiceID}
+	<p role="status">Time entries are already billed to an existing invoice. Open it to review or retry issuing; do not create another billing run for these entries.</p>
+	<a href={`/${org}/invoices/${invoiceID}`}>Open existing invoice</a>
+{/if}
+{/if}
 
 {#if error}
-	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
+	<p role="alert">{error}</p>
 {/if}
 
 <style>
@@ -91,6 +136,7 @@
 		gap: var(--space-4, 1rem);
 		max-width: 24rem;
 	}
+	fieldset { display: grid; gap: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
 	.check {
 		display: flex;
 		gap: var(--space-2, 0.5rem);

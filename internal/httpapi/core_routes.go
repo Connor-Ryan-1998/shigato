@@ -5,7 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,6 +31,10 @@ func registerCoreRoutes(mux *http.ServeMux, d Deps) {
 	mux.Handle("GET /api/v1/orgs/{org}/contacts",
 		d.Auth.RequireOrg(auth.PermInvoicesRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			listContacts(w, r, d)
+		})))
+	mux.Handle("PUT /api/v1/orgs/{org}/contacts/{id}",
+		d.Auth.RequireOrg(auth.PermContactsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			updateContact(w, r, d)
 		})))
 
 	mux.Handle("POST /api/v1/orgs/{org}/invoices",
@@ -82,6 +88,14 @@ type contactResponse struct {
 	CompanyName         string `json:"company_name,omitempty"`
 	ABN                 string `json:"abn,omitempty"`
 	ProviderCustomerRef string `json:"provider_customer_ref,omitempty"`
+}
+
+type contactUpdateRequest struct {
+	Name        string `json:"name"`
+	Email       string `json:"email"`
+	Phone       string `json:"phone"`
+	CompanyName string `json:"company_name"`
+	ABN         string `json:"abn"`
 }
 
 func contactToResponse(c core.Contact) contactResponse {
@@ -209,6 +223,49 @@ func createContact(w http.ResponseWriter, r *http.Request, d Deps) {
 	}
 
 	writeJSON(w, http.StatusCreated, contactToResponse(created))
+}
+
+func updateContact(w http.ResponseWriter, r *http.Request, d Deps) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body contactUpdateRequest
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	body.Email = strings.TrimSpace(body.Email)
+	if body.Name == "" {
+		writeError(w, http.StatusUnprocessableEntity, "name is required")
+		return
+	}
+	if body.Email != "" {
+		addr, err := mail.ParseAddress(body.Email)
+		if err != nil || addr.Address != body.Email {
+			writeError(w, http.StatusUnprocessableEntity, "email must be a valid address without a display name")
+			return
+		}
+	}
+	p := auth.From(r.Context())
+	var updated core.Contact
+	err := runInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		updated, err = core.UpdateContact(r.Context(), tx, p.OrgID, id, core.Contact{
+			Name: body.Name, Email: body.Email, Phone: body.Phone, CompanyName: body.CompanyName, ABN: body.ABN,
+		})
+		if err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "contact", id, "update", body)
+	})
+	if err != nil {
+		writeCoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contactToResponse(updated))
 }
 
 func listContacts(w http.ResponseWriter, r *http.Request, d Deps) {

@@ -9,7 +9,7 @@ vi.mock("$app/state", () => ({
   },
 }));
 vi.mock("../../../lib/session.svelte", () => ({
-  session: { currentOrg: { perms: ["property_read", "property_write"] } },
+  session: { currentOrg: { slug: "acme", perms: ["property_read", "property_write"] } },
 }));
 vi.mock("../../../lib/api", () => ({
   api: apiMock,

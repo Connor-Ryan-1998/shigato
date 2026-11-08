@@ -97,7 +97,7 @@ upstream fix is verified or an operator explicitly approves a scoped exception.
 
 Historical settings audit records have **not** been rewritten and may still
 contain bank details. Existing limitations also remain: credit notes/refunds and
-overpayments, billed-period lease edits/gaps, receipt rollback cleanup, bounded
+overpayments, billed-period financial adjustments/lease gaps, receipt rollback cleanup, bounded
 memory/concurrency under abuse, aggregate/extreme-input arithmetic, and complete
 review of all property/reconciliation paths. Payment reconciliation after an
 invoice was already sent, provider idempotency expiry and provider/DB commit
@@ -105,6 +105,14 @@ recovery also still need acceptance/review. Live OIDC/Stripe acceptance,
 failure-injection/load testing and container
 image vulnerability scanning are still required as applicable. See
 `docs/superpowers/plans/2026-11-05-01-followups.md` for the remaining ledger.
+
+Rent changes, charges and terminations now save with advisory warnings and invoice
+links when their dates overlap existing non-void rent invoice periods (including
+drafts). Existing invoices are never recalculated by these lease actions. Charge
+warnings use conservative date overlap, not a calculation of the exact adjustment.
+The panel reflects invoices visible during the save and is not retained across a
+full page reload; it does not provide concurrent scheduler/provider reconciliation,
+automatic credit notes or refunds.
 
 ### Web UI dev workflow
 

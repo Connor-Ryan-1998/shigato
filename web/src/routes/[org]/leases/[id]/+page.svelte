@@ -35,15 +35,29 @@
 		invoiced_not_due: number;
 		unissued: number;
 	};
+	type AffectedInvoice = {
+		invoice_id: number;
+		invoice_number?: number;
+		status: string;
+		start: string;
+		end: string;
+	};
 
 	const org = $derived(page.params.org);
 	const url = $derived(`/api/v1/orgs/${page.params.org}/leases/${page.params.id}`);
-	const canWrite = $derived(session.currentOrg?.perms.includes('property_write') ?? false);
+	const membership = $derived(session.currentOrg?.slug === org ? session.currentOrg : null);
+	const canRead = $derived(membership?.perms.includes('property_read') ?? false);
+	const canWrite = $derived(membership?.perms.includes('property_write') ?? false);
 
 	let lease = $state<Lease | null>(null);
 	let ledger = $state<Ledger | null>(null);
 	let error = $state('');
 	let notice = $state('');
+	let affectedInvoices = $state<AffectedInvoice[]>([]);
+	let loadedURL = $state('');
+	let busy = $state(false);
+	let loadSeq = 0;
+	let actionSeq = 0;
 
 	const today = todayLocal();
 	let rcDate = $state(today);
@@ -62,28 +76,64 @@
 		error = e instanceof ApiError ? e.message : 'Something went wrong.';
 	}
 
-	async function load() {
-		[lease, ledger] = await Promise.all([
-			api<Lease>('GET', url),
-			api<Ledger>('GET', `${url}/ledger`)
-		]);
+	async function load(target: string) {
+		const seq = ++loadSeq;
+		try {
+			const [nextLease, nextLedger] = await Promise.all([
+				api<Lease>('GET', target),
+				api<Ledger>('GET', `${target}/ledger`)
+			]);
+			if (seq !== loadSeq || target !== url || !canRead) return;
+			lease = nextLease;
+			ledger = nextLedger;
+			loadedURL = target;
+		} catch (e) {
+			if (seq === loadSeq && target === url && canRead) fail(e);
+		}
 	}
 
 	$effect(() => {
-		url;
-		load().catch(fail);
+		const target = url;
+		const allowed = canRead;
+		lease = null;
+		ledger = null;
+		loadedURL = '';
+		affectedInvoices = [];
+		notice = '';
+		error = '';
+		busy = false;
+		rcDate = today;
+		rcAmount = '';
+		chDesc = '';
+		chAmount = '';
+		chStart = today;
+		chEnd = '';
+		termDate = today;
+		bondRef = '';
+		bondDate = today;
+		if (allowed) load(target);
+		return () => { loadSeq++; actionSeq++; };
 	});
 
 	async function act(e: SubmitEvent | null, path: string, body: unknown, done = '') {
 		e?.preventDefault();
+		if (!canWrite || loadedURL !== url || busy) return;
+		const target = url;
+		const seq = ++actionSeq;
+		busy = true;
 		error = '';
 		notice = '';
+		affectedInvoices = [];
 		try {
-			const res = await api<{ warnings?: string[] }>('POST', `${url}/${path}`, body);
+			const res = await api<{ warnings?: string[]; affected_invoices?: AffectedInvoice[] }>('POST', `${target}/${path}`, body);
+			if (seq !== actionSeq || target !== url || !canWrite) return;
 			notice = [done, ...(res?.warnings ?? [])].filter(Boolean).join(' ');
-			await load();
+			affectedInvoices = res?.affected_invoices ?? [];
+			await load(target);
 		} catch (err) {
-			fail(err);
+			if (seq === actionSeq && target === url && canWrite) fail(err);
+		} finally {
+			if (seq === actionSeq) busy = false;
 		}
 	}
 </script>
@@ -91,7 +141,30 @@
 <PageHeader title={`Lease ${page.params.id}`} />
 <p><a href={`/${org}/properties`}>Back to properties</a></p>
 
-{#if lease}
+{#if !canRead}
+	<p role="alert">You do not have permission to view this lease.</p>
+{:else if loadedURL !== url && !error}
+	<p role="status">Loading lease…</p>
+{/if}
+
+{#if canRead && loadedURL === url && affectedInvoices.length > 0}
+	<section role="status" aria-labelledby="invoice-warning-title" class="invoice-warning">
+		<h2 id="invoice-warning-title">Invoice review required</h2>
+		<p>Saved change overlaps existing invoice periods. Existing invoices were not recalculated; review them before making any manual correction.</p>
+		<ul>
+			{#each affectedInvoices as invoice (`${invoice.invoice_id}:${invoice.start}`)}
+				<li>
+					<a href={`/${org}/invoices/${invoice.invoice_id}`}>
+						{invoice.status === 'draft' ? `Draft invoice ${invoice.invoice_id}` : invoice.invoice_number != null ? `Invoice #${invoice.invoice_number}` : `Invoice ${invoice.invoice_id}`}
+					</a>
+					· {invoice.status} · <span>{invoice.start} to {invoice.end}</span>
+				</li>
+			{/each}
+		</ul>
+	</section>
+{/if}
+
+{#if canRead && loadedURL === url && lease}
 	<dl>
 		<dt>Term</dt>
 		<dd>
@@ -128,7 +201,7 @@
 	{/if}
 {/if}
 
-{#if ledger}
+{#if canRead && loadedURL === url && ledger}
 	<h2>Ledger</h2>
 	<p>
 		Arrears {money(ledger.arrears)} · Invoiced, not due {money(ledger.invoiced_not_due)} · Unissued {money(
@@ -160,21 +233,22 @@
 	</table>
 {/if}
 
-{#if lease && canWrite && !lease.termination_date}
+{#if lease && loadedURL === url && canWrite && !lease.termination_date}
 	<h2>Actions</h2>
 	<form
-		class="row"
 		onsubmit={(e) =>
 			act(e, 'rent-changes', { effective_date: rcDate, amount: cents(rcAmount) }, 'Rent change saved.')}
 	>
+		<fieldset class="row" disabled={busy}>
+		<legend>Rent change</legend>
 		<Field label="New rent from" id="rc-date"><input id="rc-date" type="date" bind:value={rcDate} required /></Field>
 		<Field label="Rent ($)" id="rc-amount">
 			<input id="rc-amount" type="number" min="0" step="0.01" bind:value={rcAmount} required />
 		</Field>
 		<Button type="submit">Change rent</Button>
+		</fieldset>
 	</form>
 	<form
-		class="row"
 		onsubmit={(e) =>
 			act(
 				e,
@@ -183,6 +257,8 @@
 				'Charge added.'
 			)}
 	>
+		<fieldset class="row" disabled={busy}>
+		<legend>Lease charge</legend>
 		<Field label="Charge" id="ch-desc"><input id="ch-desc" bind:value={chDesc} required /></Field>
 		<Field label="Amount per period ($)" id="ch-amount">
 			<input id="ch-amount" type="number" min="0" step="0.01" bind:value={chAmount} required />
@@ -190,26 +266,28 @@
 		<Field label="From" id="ch-start"><input id="ch-start" type="date" bind:value={chStart} required /></Field>
 		<Field label="To (optional)" id="ch-end"><input id="ch-end" type="date" bind:value={chEnd} /></Field>
 		<Button type="submit">Add charge</Button>
+		</fieldset>
 	</form>
 	{#if lease.bond_amount > 0}
 		<div class="row">
-			<Button variant="secondary" onclick={() => act(null, 'bond-invoice', {}, 'Bond invoice created.')}>
+			<Button disabled={busy} variant="secondary" onclick={() => act(null, 'bond-invoice', {}, 'Bond invoice created.')}>
 				Create bond invoice
 			</Button>
 		</div>
 		<form
-			class="row"
 			onsubmit={(e) => act(e, 'bond-lodgement', { rta_ref: bondRef, lodged_on: bondDate }, 'Bond lodged.')}
 		>
+			<fieldset class="row" disabled={busy}>
+			<legend>Bond lodgement</legend>
 			<Field label="RTA reference" id="bond-ref"><input id="bond-ref" bind:value={bondRef} required /></Field>
 			<Field label="Lodged on" id="bond-date">
 				<input id="bond-date" type="date" bind:value={bondDate} required />
 			</Field>
 			<Button type="submit">Record lodgement</Button>
+			</fieldset>
 		</form>
 	{/if}
 	<form
-		class="row"
 		onsubmit={(e) => {
 			if (!confirm(`Terminate this lease on ${termDate}?`)) {
 				e.preventDefault();
@@ -218,10 +296,13 @@
 			act(e, 'terminate', { termination_date: termDate }, 'Lease terminated.');
 		}}
 	>
+		<fieldset class="row" disabled={busy}>
+		<legend>Lease termination</legend>
 		<Field label="Terminate on" id="term-date">
 			<input id="term-date" type="date" bind:value={termDate} required />
 		</Field>
 		<Button type="submit" variant="danger">Terminate lease</Button>
+		</fieldset>
 	</form>
 {/if}
 
@@ -233,6 +314,8 @@
 {/if}
 
 <style>
+	fieldset, .invoice-warning { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
+	.invoice-warning { border-color: var(--warning, #8a5a00); }
 	dl {
 		display: grid;
 		grid-template-columns: max-content 1fr;

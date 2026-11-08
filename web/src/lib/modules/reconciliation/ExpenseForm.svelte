@@ -66,10 +66,8 @@
 		onReceiptUpload,
 		onSubmit
 	}: {
-		// The bank line's own signed amount in cents (negative for a debit,
-		// the only kind ExpenseForm is ever opened for) - split lines must
-		// sum to exactly its magnitude.
-		lineAmountCents: number;
+		// When supplied, split lines must sum to the bank debit's magnitude.
+		lineAmountCents?: number;
 		lineDate: string;
 		categories: Category[];
 		suppliers?: SimpleOption[];
@@ -152,10 +150,7 @@
 		...(projects ?? []).map((p) => ({ value: String(p.id), label: p.name }))
 	]);
 
-	// targetCents is the magnitude of the bank line's amount: split lines
-	// must sum to this (a debit's lineAmountCents is negative; a split
-	// line's own amount is always entered - and sent - as a positive cost).
-	const targetCents = $derived(Math.abs(lineAmountCents));
+	const targetCents = $derived(lineAmountCents === undefined ? undefined : Math.abs(lineAmountCents));
 
 	// Integer-cents sum of the parsed split lines - the only client-side
 	// money arithmetic in this form, done solely to validate against the
@@ -167,7 +162,7 @@
 	);
 	const allAmountsValid = $derived(parsedAmounts.every((c) => c !== null && c > 0));
 	const totalMismatch = $derived(
-		allAmountsValid && rows.length > 0 && linesTotalCents !== targetCents
+		targetCents !== undefined && allAmountsValid && rows.length > 0 && linesTotalCents !== targetCents
 	);
 
 	function rowValid(row: Row): boolean {
@@ -180,8 +175,8 @@
 			spentOn !== '' &&
 			rows.length > 0 &&
 			rows.every(rowValid) &&
-			linesTotalCents === targetCents &&
-			!busy
+			(targetCents === undefined || linesTotalCents === targetCents) &&
+			!busy && !uploadingReceipt
 	);
 
 	function addRow() {
@@ -215,7 +210,8 @@
 	}
 </script>
 
-<div class="expense-form">
+<fieldset class="expense-form" disabled={busy || uploadingReceipt}>
+	<legend>Expense details</legend>
 	<div class="fields">
 		<Field label="Spent on" id={`expense-${uid}-spent-on`}>
 			<input id={`expense-${uid}-spent-on`} type="date" bind:value={spentOn} />
@@ -283,7 +279,7 @@
 	<p class="total" class:mismatch={totalMismatch}>
 		Lines total {money(linesTotalCents)}
 		{#if totalMismatch}
-			but the bank line is {money(targetCents)}
+			but the bank line is {money(targetCents!)}
 		{/if}
 	</p>
 
@@ -314,10 +310,14 @@
 	<div class="actions">
 		<Button onclick={submit} disabled={!valid || uploadingReceipt}>Save</Button>
 	</div>
-</div>
+</fieldset>
 
 <style>
 	.expense-form {
+		border: 0;
+		padding: 0;
+		margin: 0;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4);

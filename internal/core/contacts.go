@@ -52,6 +52,19 @@ func GetContact(ctx context.Context, q Querier, orgID, id int64) (Contact, error
 	return c, err
 }
 
+// UpdateContact replaces profile details without changing kind or provider identity.
+func UpdateContact(ctx context.Context, q Querier, orgID, id int64, c Contact) (Contact, error) {
+	updated, err := scanContact(q.QueryRow(ctx, `
+		UPDATE contacts SET name=$3, email=NULLIF($4,''), phone=NULLIF($5,''),
+			company_name=NULLIF($6,''), abn=NULLIF($7,'')
+		WHERE org_id=$1 AND id=$2
+		RETURNING `+contactColumns, orgID, id, c.Name, c.Email, c.Phone, c.CompanyName, c.ABN))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Contact{}, ErrNotFound
+	}
+	return updated, err
+}
+
 // ListContacts lists an org's contacts, optionally filtered by kind. An
 // empty kind returns every contact.
 func ListContacts(ctx context.Context, q Querier, orgID int64, kind string) ([]Contact, error) {

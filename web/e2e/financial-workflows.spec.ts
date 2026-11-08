@@ -34,6 +34,91 @@ async function api<T>(request: APIRequestContext, method: string, path: string, 
 type Contact = { id: number; kind: string };
 type Invoice = { id: number; number: number; status: string; total: number; lines: { description: string }[]; payments: { amount: number }[] };
 
+test('contact details can be edited, cleared and reloaded without replacing identity', async ({ page }) => {
+	const original = `Contact ${crypto.randomUUID()}`;
+	const corrected = `Corrected ${crypto.randomUUID()}`;
+	const contact = await api<Contact>(page.request, 'POST', '/contacts', { kind: 'supplier', name: original, email: 'old@example.com', phone: '0400123456', company_name: 'Old Co', abn: '51824753556' });
+	await page.goto(`${base}/finance/contacts`);
+	await page.getByRole('button', { name: `Edit ${original}`, exact: true }).click();
+	await expect(page.getByLabel('Name', { exact: true })).toHaveValue(original);
+	await page.getByLabel('Name', { exact: true }).fill(corrected);
+	await page.getByLabel('Email', { exact: true }).fill('corrected@example.com');
+	for (const label of ['Phone', 'Company name', 'ABN']) await page.getByLabel(label, { exact: true }).fill('');
+	await page.getByRole('button', { name: 'Save contact', exact: true }).click();
+	await expect(page.getByText('Contact updated.', { exact: true })).toBeVisible();
+	await expect(page.getByRole('row').filter({ hasText: corrected })).toContainText('corrected@example.com');
+	await page.reload();
+	await page.getByRole('button', { name: `Edit ${corrected}`, exact: true }).click();
+	await expect(page.getByLabel('Email', { exact: true })).toHaveValue('corrected@example.com');
+	await expect(page.getByLabel('Phone', { exact: true })).toHaveValue('');
+	await page.getByLabel('Name', { exact: true }).fill('Discard this edit');
+	await page.getByRole('button', { name: 'Cancel editing', exact: true }).click();
+	await expect(page.getByRole('cell', { name: corrected, exact: true })).toBeVisible();
+	const stored = (await api<(Contact & { name: string; email?: string; phone?: string; company_name?: string; abn?: string })[]>(page.request, 'GET', '/contacts')).find((c) => c.id === contact.id)!;
+	expect(stored).toMatchObject({ id: contact.id, kind: 'supplier', name: corrected, email: 'corrected@example.com' });
+	expect(stored.phone ?? '').toBe('');
+	expect(stored.company_name ?? '').toBe('');
+	expect(stored.abn ?? '').toBe('');
+});
+
+test('standalone expense splits and receipt persist without a bank import', async ({ page }) => {
+	const suffix = crypto.randomUUID();
+	const description = `Cash supplies ${suffix}`;
+	const category = await api<{ id: number }>(page.request, 'POST', '/categories', { name: `Supplies ${suffix}`, type: 'expense', default_gst_code: 'FRE', capital: false });
+	const supplier = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'supplier', name: `Shop ${suffix}` });
+	const property = await api<{ id: number }>(page.request, 'POST', '/properties', { name: `Expense cottage ${suffix}`, residential: true });
+	await page.getByRole('link', { name: 'Expenses', exact: true }).click();
+	await expect(page).toHaveURL(`${base}/finance/expenses`);
+	await page.getByLabel('Spent on', { exact: true }).fill(today);
+	await page.getByLabel('Description', { exact: true }).fill(description);
+	await page.getByLabel('Supplier', { exact: true }).selectOption(String(supplier.id));
+	await page.getByLabel('Category', { exact: true }).selectOption(String(category.id));
+	await page.getByLabel('Amount ($)', { exact: true }).fill('12.34');
+	await page.getByLabel('Property', { exact: true }).selectOption(String(property.id));
+	await page.getByRole('button', { name: 'Add line', exact: true }).click();
+	await page.getByLabel('Category', { exact: true }).nth(1).selectOption(String(category.id));
+	await page.getByLabel('Amount ($)', { exact: true }).nth(1).fill('5.66');
+	const receipt = Buffer.from('%PDF-1.4\n%Shigoto expense receipt\n%%EOF\n');
+	await page.getByLabel('Receipt', { exact: true }).setInputFiles({ name: 'cash-receipt.pdf', mimeType: 'application/pdf', buffer: receipt });
+	await expect(page.getByText('Receipt attached.', { exact: true })).toBeVisible();
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(page.getByText('residential property expenses are input-taxed; GST credit not claimed', { exact: true })).toBeVisible();
+	const savedLink = page.getByRole('link', { name: 'View saved expense', exact: true });
+	const savedPath = await savedLink.getAttribute('href');
+	const id = savedPath!.split('/').at(-1);
+	const stored = await api<{ total: number; spent_on: string; supplier_contact_id: number; receipt_file_id: number; bank_line_id?: number; lines: { category_id: number; amount: number; gst_code: string; gst_amount: number; property_id?: number }[] }>(page.request, 'GET', `/expenses/${id}`);
+	expect(stored).toMatchObject({ spent_on: today, supplier_contact_id: supplier.id, total: 1800 });
+	expect(stored.bank_line_id).toBeUndefined();
+	expect(stored.receipt_file_id).toBeGreaterThan(0);
+	expect(stored.lines).toMatchObject([{ category_id: category.id, amount: 1234, gst_code: 'INP', gst_amount: 0, property_id: property.id }, { category_id: category.id, amount: 566, gst_code: 'FRE', gst_amount: 0 }]);
+	await page.getByLabel('From', { exact: true }).fill(today);
+	await page.getByLabel('To', { exact: true }).fill(today);
+	await expect(page.getByRole('link', { name: description, exact: true })).toBeVisible();
+	const next = new Date(`${today}T00:00:00Z`);
+	next.setUTCDate(next.getUTCDate() + 1);
+	await page.getByLabel('From', { exact: true }).fill(next.toISOString().slice(0, 10));
+	await expect(page.getByText('From must not be after To.', { exact: true })).toBeVisible();
+	await page.getByLabel('To', { exact: true }).fill(next.toISOString().slice(0, 10));
+	await expect(page.getByText('No expenses found.', { exact: true })).toBeVisible();
+	await savedLink.click();
+	await expect(page).toHaveURL(`${base}${savedPath}`);
+	await expect(page.getByRole('heading', { name: description, exact: true })).toBeVisible();
+	await page.reload();
+	await expect(page.getByRole('heading', { name: description, exact: true })).toBeVisible();
+	await expect(page.getByRole('cell', { name: `Supplies ${suffix}`, exact: true })).toHaveCount(2);
+	await expect(page.getByText('Not matched to bank', { exact: true })).toBeVisible();
+	const downloadLink = page.getByRole('link', { name: 'Download receipt', exact: true });
+	const filePath = await downloadLink.getAttribute('href');
+	const file = await page.request.get(`${base}${filePath}`);
+	expect(file.ok()).toBeTruthy();
+	expect(await file.body()).toEqual(receipt);
+	const downloadEvent = page.waitForEvent('download');
+	await downloadLink.click();
+	const download = await downloadEvent;
+	expect(download.suggestedFilename()).toBe('cash-receipt.pdf');
+	expect(await download.failure()).toBeNull();
+});
+
 test.beforeAll(async () => {
 	execFileSync('docker', ['compose', 'up', '-d', '--wait', 'db'], { cwd: root, stdio: 'inherit' });
 	psql(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`, 'shigoto');
@@ -115,7 +200,9 @@ test('logged time bills once and locks its entry', async ({ page }) => {
 	const client = contacts.find((c) => c.kind === 'client')!;
 	const project = await api<{ id: number }>(page.request, 'POST', '/projects', { name: 'Financial work', client_contact_id: client.id, hourly_rate: 12000 });
 	await api(page.request, 'POST', `/projects/${project.id}/tasks`, { name: 'Consulting' });
-	await page.goto(`${base}/finance/time`);
+	await page.getByRole('link', { name: 'Time & projects', exact: true }).click();
+	await expect(page).toHaveURL(`${base}/finance/time`);
+	await expect(page.getByRole('heading', { name: 'Projects and tasks', exact: true })).toBeVisible();
 	await page.getByLabel('Project', { exact: true }).selectOption(String(project.id));
 	await expect(page.getByLabel('Task', { exact: true })).toBeVisible();
 	await page.getByLabel('Date', { exact: true }).fill(today);
@@ -186,4 +273,258 @@ test('bank credit pays an invoice and reaches report and CSV', async ({ page }) 
 	const csv = await page.request.get(`${base}${href}`);
 	expect(csv.ok()).toBeTruthy();
 	expect(await csv.text()).toContain(`${today},income,Other income,FRE,150.00,0.00,150.00`);
+});
+
+test('owner updates settings and payment instructions persist after reload', async ({ page }) => {
+	const original = await api<Record<string, unknown>>(page.request, 'GET', '/settings');
+	expect(original.auto_send_rent).toBe(false);
+	try {
+		await page.getByRole('link', { name: 'Settings', exact: true }).click();
+		await page.getByLabel('Organisation name', { exact: true }).fill('Updated finance org');
+		await page.getByLabel('BSB', { exact: true }).fill('001002');
+		await page.getByLabel('Bank account', { exact: true }).fill('00123456');
+		await page.getByLabel('PayID', { exact: true }).fill('finance@example.com');
+		await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+		await expect(page.getByRole('status')).toHaveText('Settings saved.');
+		await expect(page.getByLabel('Organisation', { exact: true }).locator('option:checked')).toHaveText('Updated finance org');
+		await page.reload();
+		await expect(page.getByLabel('Organisation name', { exact: true })).toHaveValue('Updated finance org');
+		await expect(page.getByLabel('BSB', { exact: true })).toHaveValue('001-002');
+		await expect(page.getByLabel('Bank account', { exact: true })).toHaveValue('00123456');
+		await expect(page.getByLabel('PayID', { exact: true })).toHaveValue('finance@example.com');
+		expect(await api(page.request, 'GET', '/settings')).toEqual({
+			...original, name: 'Updated finance org', bank_bsb: '001-002',
+			bank_account: '00123456', payid: 'finance@example.com'
+		});
+	} finally {
+		await api(page.request, 'PUT', '/settings', original);
+	}
+});
+
+test('new contacts persist, filter and appear in lease and project forms', async ({ page }) => {
+	const suffix = crypto.randomUUID();
+	const created: Record<string, string> = {};
+	await page.getByRole('link', { name: 'Contacts', exact: true }).click();
+	for (const kind of ['tenant', 'client', 'supplier']) {
+		const name = `UI ${kind} ${suffix}`;
+		created[kind] = name;
+		await page.getByLabel('Contact kind', { exact: true }).selectOption(kind);
+		await page.getByLabel('Name', { exact: true }).fill(name);
+		await page.getByLabel('Email', { exact: true }).fill(`${kind}-${suffix}@example.com`);
+		await page.getByRole('button', { name: 'Create contact', exact: true }).click();
+		await expect(page.getByRole('cell', { name, exact: true })).toBeVisible();
+	}
+	await page.reload();
+	for (const kind of ['tenant', 'client', 'supplier']) {
+		await page.getByLabel('Filter by kind', { exact: true }).selectOption(kind);
+		await expect(page.getByRole('cell', { name: created[kind], exact: true })).toBeVisible();
+		for (const other of ['tenant', 'client', 'supplier'].filter((k) => k !== kind)) {
+			await expect(page.getByRole('cell', { name: created[other], exact: true })).toHaveCount(0);
+		}
+	}
+	const contacts = await api<{ id: number; name: string; kind: string }[]>(page.request, 'GET', '/contacts');
+	for (const [kind, name] of Object.entries(created)) {
+		expect(contacts.find((c) => c.name === name)).toMatchObject({ kind });
+	}
+	await api(page.request, 'POST', '/properties', { name: `Contact fixture ${suffix}`, residential: true });
+	await page.goto(`${base}/finance/properties`);
+	const tenant = contacts.find((c) => c.name === created.tenant)!;
+	await page.getByLabel('Tenant', { exact: true }).selectOption(String(tenant.id));
+	await expect(page.getByLabel('Tenant', { exact: true })).toHaveValue(String(tenant.id));
+	await page.goto(`${base}/finance/time`);
+	const client = contacts.find((c) => c.name === created.client)!;
+	await page.getByLabel('Client', { exact: true }).selectOption(String(client.id));
+	await expect(page.getByLabel('Client', { exact: true })).toHaveValue(String(client.id));
+});
+
+test('time entry edits persist and date filters update totals', async ({ page }) => {
+	const client = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'client', name: `Time edit ${crypto.randomUUID()}` });
+	const project = await api<{ id: number }>(page.request, 'POST', '/projects', { name: `Time edit ${crypto.randomUUID()}`, client_contact_id: client.id, hourly_rate: 12000 });
+	const task = await api<{ id: number }>(page.request, 'POST', `/projects/${project.id}/tasks`, { name: 'Edit task' });
+	const entry = await api<{ id: number }>(page.request, 'POST', '/time-entries', { task_id: task.id, work_date: today, minutes: 30, note: 'Before edit' });
+	const alternative = await api<{ id: number }>(page.request, 'POST', `/projects/${project.id}/tasks`, { name: 'Alternative task' });
+	await api(page.request, 'PUT', `/tasks/${task.id}`, { name: 'Edit task', hourly_rate: null, active: false });
+	await page.goto(`${base}/finance/time`);
+	await page.getByLabel('Project', { exact: true }).selectOption(String(project.id));
+	await page.getByRole('button', { name: `Edit entry ${entry.id}`, exact: true }).click();
+	await page.getByLabel('Entry minutes', { exact: true }).fill('75');
+	await page.getByLabel('Entry note', { exact: true }).fill('After edit');
+	await page.getByLabel('Entry task', { exact: true }).selectOption(String(alternative.id));
+	await page.getByLabel('Entry task', { exact: true }).selectOption(String(task.id));
+	await expect(page.getByLabel('Entry note', { exact: true })).toHaveValue('After edit');
+	await page.getByRole('button', { name: 'Save entry', exact: true }).click();
+	await expect(page.getByRole('cell', { name: 'After edit', exact: true })).toBeVisible();
+	const saved = await api<{ entries: { id: number; task_id: number; minutes: number; note: string }[] }>(page.request, 'GET', `/time-entries?project_id=${project.id}`);
+	expect(saved.entries).toEqual([expect.objectContaining({ id: entry.id, task_id: task.id, minutes: 75, note: 'After edit' })]);
+	await page.getByLabel('Entries from', { exact: true }).fill(today);
+	await page.getByLabel('Entries to', { exact: true }).fill(today);
+	await expect(page.getByRole('heading', { name: 'Entries (1h 15m)', exact: true })).toBeVisible();
+	await page.getByLabel('Entries from', { exact: true }).fill('');
+	const yesterday = new Date(`${today}T00:00:00Z`);
+	yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+	await page.getByLabel('Entries to', { exact: true }).fill(yesterday.toISOString().slice(0, 10));
+	await expect(page.getByRole('heading', { name: 'Entries (0h 00m)', exact: true })).toBeVisible();
+});
+
+test('project and task rates edit and archived project restores', async ({ page }) => {
+	const suffix = crypto.randomUUID();
+	const client = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'client', name: `Rates ${suffix}` });
+	const project = await api<{ id: number }>(page.request, 'POST', '/projects', { name: `Rates ${suffix}`, client_contact_id: client.id, hourly_rate: 12000 });
+	const task = await api<{ id: number }>(page.request, 'POST', `/projects/${project.id}/tasks`, { name: 'Rate task' });
+	await page.goto(`${base}/finance/time`);
+	await page.getByLabel('Project', { exact: true }).selectOption(String(project.id));
+	await page.getByRole('button', { name: 'Edit project', exact: true }).click();
+	await page.getByLabel('Project name', { exact: true }).fill(`Renamed ${suffix}`);
+	await page.getByLabel('Project hourly rate ($)', { exact: true }).fill('175.50');
+	await page.getByRole('button', { name: 'Save project', exact: true }).click();
+	await expect(page.getByRole('form', { name: 'Edit project', exact: true })).toHaveCount(0);
+	expect(await api(page.request, 'GET', `/projects/${project.id}`)).toMatchObject({ name: `Renamed ${suffix}`, hourly_rate: 17550, gst_code: 'GST', active: true });
+	await page.getByRole('button', { name: `Edit task ${task.id}`, exact: true }).click();
+	await page.getByLabel('Task name', { exact: true }).fill('Updated rate task');
+	await page.getByLabel('Task hourly rate ($)', { exact: true }).fill('125.50');
+	await page.getByRole('button', { name: 'Save task', exact: true }).click();
+	await expect(page.getByRole('form', { name: 'Edit task', exact: true })).toHaveCount(0);
+	expect((await api<{ hourly_rate?: number }[]>(page.request, 'GET', `/projects/${project.id}/tasks`))[0].hourly_rate).toBe(12550);
+	await page.getByRole('button', { name: `Edit task ${task.id}`, exact: true }).click();
+	await page.getByLabel('Task hourly rate ($)', { exact: true }).fill('');
+	await page.getByRole('button', { name: 'Save task', exact: true }).click();
+	await expect(page.getByRole('form', { name: 'Edit task', exact: true })).toHaveCount(0);
+	expect((await api<Record<string, unknown>[]>(page.request, 'GET', `/projects/${project.id}/tasks`))[0]).not.toHaveProperty('hourly_rate');
+	await page.getByRole('button', { name: 'Archive project', exact: true }).click();
+	await expect(page.getByLabel('Project', { exact: true })).not.toHaveValue(String(project.id));
+	await page.getByLabel('Show archived projects', { exact: true }).check();
+	await page.getByLabel('Project', { exact: true }).selectOption(String(project.id));
+	await expect(page.getByRole('button', { name: 'Log time', exact: true })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Restore project', exact: true }).click();
+	await expect(page.getByRole('button', { name: 'Archive project', exact: true })).toBeVisible();
+	expect(await api(page.request, 'GET', `/projects/${project.id}`)).toMatchObject({ active: true, hourly_rate: 17550, gst_code: 'GST' });
+});
+
+test('existing lease onboarding persists co-tenants and opening balances', async ({ page }) => {
+	const suffix = crypto.randomUUID();
+	const primary = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'tenant', name: `Primary ${suffix}` });
+	const co = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'tenant', name: `Co ${suffix}` });
+	const property = await api<{ id: number }>(page.request, 'POST', '/properties', { name: `Onboard ${suffix}`, residential: true });
+	await page.goto(`${base}/finance/properties`);
+	await page.getByLabel('Property', { exact: true }).selectOption(String(property.id));
+	await page.getByLabel('Tenant', { exact: true }).selectOption(String(primary.id));
+	await page.getByLabel(`Co-tenant: Co ${suffix}`, { exact: true }).check();
+	await page.getByLabel('Start', { exact: true }).fill('2026-11-01');
+	await page.getByLabel('Rent ($)', { exact: true }).fill('500');
+	await page.getByLabel('Paid-to date', { exact: true }).fill('2026-11-07');
+	await page.getByLabel('Opening arrears ($)', { exact: true }).fill('123.45');
+	let release!: () => void;
+	let arrived!: () => void;
+	const pending = new Promise<void>((resolve) => { release = resolve; });
+	const started = new Promise<void>((resolve) => { arrived = resolve; });
+	await page.route('**/api/v1/orgs/finance/leases', async (route) => {
+		arrived();
+		await pending;
+		await route.continue();
+	});
+	const response = page.waitForResponse((r) => r.url().endsWith('/leases') && r.request().method() === 'POST');
+	await page.getByRole('button', { name: 'Create lease', exact: true }).click();
+	await started;
+	try {
+		for (const label of ['Property', 'Tenant', 'Start', 'Frequency', 'Rent ($)', 'Bond ($)', 'Paid-to date', 'Opening arrears ($)']) {
+			await expect(page.getByLabel(label, { exact: true })).toBeDisabled();
+		}
+	} finally {
+		release();
+	}
+	const created = await response;
+	expect(created.status(), await created.text()).toBe(201);
+	const lease = await created.json() as { id: number; opening_arrears_invoice_id: number };
+	expect(await api(page.request, 'GET', `/leases/${lease.id}`)).toMatchObject({
+		paid_to_date: '2026-11-07', opening_arrears: 12345,
+		tenants: expect.arrayContaining([{ contact_id: primary.id, primary: true }, { contact_id: co.id, primary: false }])
+	});
+	expect(await api(page.request, 'GET', `/invoices/${lease.opening_arrears_invoice_id}`)).toMatchObject({ status: 'draft', total: 12345 });
+	await page.goto(`${base}/finance/leases/${lease.id}`);
+	await expect(page.getByRole('heading', { name: 'Ledger', exact: true })).toBeVisible();
+});
+
+test('billing-run error links retained invoice without creating a second run', async ({ page }) => {
+	const suffix = crypto.randomUUID();
+	const client = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'client', name: `Recovery ${suffix}` });
+	const project = await api<{ id: number }>(page.request, 'POST', '/projects', { name: `Recovery ${suffix}`, client_contact_id: client.id, hourly_rate: 12000 });
+	const task = await api<{ id: number }>(page.request, 'POST', `/projects/${project.id}/tasks`, { name: 'Recovery task' });
+	await api(page.request, 'POST', '/time-entries', { task_id: task.id, work_date: today, minutes: 45, note: 'Retained run' });
+	const before = await api<{ total: number }>(page.request, 'GET', '/invoices');
+	let retainedID = 0;
+	await page.route('**/api/v1/orgs/finance/billing-runs', async (route) => {
+		const body = route.request().postDataJSON();
+		expect(body.issue).toBe(true);
+		// Persist a real billing run, then simulate the subsequent issue failure.
+		const response = await route.fetch({ postData: { ...body, issue: false } });
+		expect(response.status()).toBe(201);
+		const result = await response.json();
+		retainedID = result.invoice.id;
+		await route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: 'Simulated issue failure', invoice_id: retainedID }) });
+	});
+	await page.goto(`${base}/finance/billing-run`);
+	await page.getByLabel('Client', { exact: true }).selectOption(String(client.id));
+	await page.getByLabel('From', { exact: true }).fill(today);
+	await page.getByLabel('To', { exact: true }).fill(today);
+	await page.getByLabel('Issue immediately', { exact: true }).check();
+	await page.getByRole('button', { name: 'Create invoice', exact: true }).click();
+	await expect(page.getByRole('alert')).toHaveText('Simulated issue failure');
+	const link = page.getByRole('link', { name: 'Open existing invoice', exact: true });
+	await expect(link).toHaveAttribute('href', `/finance/invoices/${retainedID}`);
+	await link.click();
+	await expect(page).toHaveURL(`${base}/finance/invoices/${retainedID}`);
+	expect(await api(page.request, 'GET', `/invoices/${retainedID}`)).toMatchObject({ status: 'draft', total: 9000 });
+	expect((await api<{ total: number }>(page.request, 'GET', '/invoices')).total).toBe(before.total + 1);
+	const entries = await api<{ entries: { invoice_line_id?: number }[] }>(page.request, 'GET', `/time-entries?project_id=${project.id}`);
+	expect(entries.entries[0].invoice_line_id).toBeGreaterThan(0);
+});
+
+test('billed-period lease changes save with invoice links and preserve financial records', async ({ page }) => {
+	const suffix = crypto.randomUUID();
+	const tenant = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'tenant', name: `Warning tenant ${suffix}` });
+	const property = await api<{ id: number }>(page.request, 'POST', '/properties', { name: `Warning property ${suffix}`, residential: true });
+	const start = new Date(`${today}T00:00:00Z`);
+	start.setUTCDate(start.getUTCDate() - 7);
+	const startDate = start.toISOString().slice(0, 10);
+	const lease = await api<{ id: number }>(page.request, 'POST', '/leases', {
+		property_id: property.id, tenants: [{ contact_id: tenant.id, primary: true }], start_date: startDate, frequency: 'weekly', rent_amount: 50000
+	});
+	await api(page.request, 'POST', '/rent-run');
+	const ledger = await api<{ periods: { start: string; end: string; invoice_id: number }[] }>(page.request, 'GET', `/leases/${lease.id}/ledger`);
+	expect(ledger.periods.length).toBeGreaterThanOrEqual(2);
+	const before = await Promise.all(ledger.periods.map((p) => api(page.request, 'GET', `/invoices/${p.invoice_id}`)));
+	await page.goto(`${base}/finance/leases/${lease.id}`);
+	const future = new Date(`${ledger.periods.at(-1)!.end}T00:00:00Z`);
+	future.setUTCDate(future.getUTCDate() + 1);
+	await page.getByLabel('New rent from', { exact: true }).fill(future.toISOString().slice(0, 10));
+	await page.getByLabel('Rent ($)', { exact: true }).fill('550');
+	await page.getByRole('button', { name: 'Change rent', exact: true }).click();
+	await expect(page.getByText('Rent change saved.', { exact: true })).toBeVisible();
+	await expect(page.getByRole('status', { name: 'Invoice review required' })).toHaveCount(0);
+	start.setUTCDate(start.getUTCDate() + 1);
+	await page.getByLabel('New rent from', { exact: true }).fill(start.toISOString().slice(0, 10));
+	await page.getByLabel('Rent ($)', { exact: true }).fill('520');
+	await page.getByRole('button', { name: 'Change rent', exact: true }).click();
+	const panel = page.getByRole('status', { name: 'Invoice review required' });
+	await expect(panel).toBeVisible();
+	for (const period of ledger.periods) {
+		await expect(panel.getByRole('link').filter({ hasText: `Draft invoice ${period.invoice_id}` })).toHaveAttribute('href', `/finance/invoices/${period.invoice_id}`);
+	}
+	await page.getByLabel('Charge', { exact: true }).fill('Backdated water charge');
+	await page.getByLabel('Amount per period ($)', { exact: true }).fill('10');
+	await page.getByLabel('From', { exact: true }).fill(startDate);
+	await page.getByRole('button', { name: 'Add charge', exact: true }).click();
+	await expect(page.getByText(/Charge added\./)).toBeVisible();
+	await expect(panel.getByRole('link')).toHaveCount(ledger.periods.length);
+	await page.getByLabel('Terminate on', { exact: true }).fill(start.toISOString().slice(0, 10));
+	page.once('dialog', (dialog) => dialog.accept());
+	await page.getByRole('button', { name: 'Terminate lease', exact: true }).click();
+	await expect(page.getByText(/Lease terminated\./)).toBeVisible();
+	await expect(panel.getByRole('link')).toHaveCount(ledger.periods.length);
+	const saved = await api<{ rent_changes: unknown[]; charges: unknown[]; termination_date: string }>(page.request, 'GET', `/leases/${lease.id}`);
+	expect(saved.rent_changes).toHaveLength(3);
+	expect(saved.charges).toHaveLength(1);
+	expect(saved.termination_date).toBe(start.toISOString().slice(0, 10));
+	const after = await Promise.all(ledger.periods.map((p) => api(page.request, 'GET', `/invoices/${p.invoice_id}`)));
+	expect(after).toEqual(before);
 });
