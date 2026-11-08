@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -111,6 +112,11 @@ func dashboardSection(ctx context.Context, q core.Querier, orgID int64, today ti
 			}
 			projects[task.ProjectID] = project
 		}
+		// Fixed-price time is never billed by the billing run, so it
+		// isn't unbilled revenue.
+		if project.BillingMethod == BillingFixed {
+			continue
+		}
 		unbilledMinutes += g.minutes
 		unbilledEstimate += core.Cents(core.DivRound(int64(g.minutes)*int64(task.EffectiveRate(project)), 60))
 	}
@@ -175,35 +181,85 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 // --- request/response shapes ---
 
 type projectRequest struct {
-	Name            string `json:"name"`
-	ClientContactID int64  `json:"client_contact_id"`
-	HourlyRate      int64  `json:"hourly_rate"`
-	GSTCode         string `json:"gst_code,omitempty"`
+	Name            string          `json:"name"`
+	ClientContactID int64           `json:"client_contact_id"`
+	HourlyRate      int64           `json:"hourly_rate"`
+	GSTCode         string          `json:"gst_code,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	Description     string          `json:"description,omitempty"`
+	StartDate       json.RawMessage `json:"start_date,omitempty"`
+	EndDate         json.RawMessage `json:"end_date,omitempty"`
+	BillingMethod   string          `json:"billing_method,omitempty"`
 }
 
 // projectUpdateRequest is a full replace: every field must be present, so
 // pointers detect an omitted key (handled as a 422, never silently
-// defaulted - unlike projectRequest's create-only gst_code default).
+// defaulted - unlike projectRequest's create-only defaults). The dates are
+// json.RawMessage for the same reason as taskUpdateRequest's hourly_rate:
+// an explicit null clears a date, an omitted key is a 422.
 type projectUpdateRequest struct {
-	Name       *string `json:"name"`
-	HourlyRate *int64  `json:"hourly_rate"`
-	GSTCode    *string `json:"gst_code"`
-	Active     *bool   `json:"active"`
+	Name            *string         `json:"name"`
+	ClientContactID *int64          `json:"client_contact_id"`
+	HourlyRate      *int64          `json:"hourly_rate"`
+	GSTCode         *string         `json:"gst_code"`
+	Status          *string         `json:"status"`
+	Description     *string         `json:"description"`
+	StartDate       json.RawMessage `json:"start_date"`
+	EndDate         json.RawMessage `json:"end_date"`
+	BillingMethod   *string         `json:"billing_method"`
 }
 
 type projectResponse struct {
-	ID              int64  `json:"id"`
-	ClientContactID int64  `json:"client_contact_id"`
-	Name            string `json:"name"`
-	HourlyRate      int64  `json:"hourly_rate"`
-	GSTCode         string `json:"gst_code"`
-	Active          bool   `json:"active"`
+	ID              int64   `json:"id"`
+	ClientContactID int64   `json:"client_contact_id"`
+	Name            string  `json:"name"`
+	HourlyRate      int64   `json:"hourly_rate"`
+	GSTCode         string  `json:"gst_code"`
+	Status          string  `json:"status"`
+	Description     string  `json:"description"`
+	StartDate       *string `json:"start_date"`
+	EndDate         *string `json:"end_date"`
+	BillingMethod   string  `json:"billing_method"`
+	Active          bool    `json:"active"`
+}
+
+// formatOptionalDate formats t as YYYY-MM-DD, or nil for no date.
+func formatOptionalDate(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format(dateLayout)
+	return &s
+}
+
+// parseOptionalDate decodes a JSON date field that may be null (or, on
+// create, omitted): nil or "null" or "" gives no date. name is used in the
+// error message.
+func parseOptionalDate(raw json.RawMessage, name string) (*time.Time, error) {
+	if raw == nil || string(raw) == "null" {
+		return nil, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("%s must be YYYY-MM-DD or null", name)
+	}
+	if s == "" {
+		return nil, nil
+	}
+	t, err := parseDate(s)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be YYYY-MM-DD or null", name)
+	}
+	return &t, nil
 }
 
 func projectToResponse(p Project) projectResponse {
 	return projectResponse{
 		ID: p.ID, ClientContactID: p.ClientContactID, Name: p.Name,
-		HourlyRate: int64(p.HourlyRate), GSTCode: string(p.GSTCode), Active: p.Active,
+		HourlyRate: int64(p.HourlyRate), GSTCode: string(p.GSTCode),
+		Status: p.Status, Description: p.Description,
+		StartDate: formatOptionalDate(p.StartDate), EndDate: formatOptionalDate(p.EndDate),
+		BillingMethod: p.BillingMethod, Active: p.Active,
 	}
 }
 
@@ -253,14 +309,26 @@ func createProject(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	if body.GSTCode == "" {
 		gstCode = core.GST
 	}
+	startDate, err := parseOptionalDate(body.StartDate, "start_date")
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	endDate, err := parseOptionalDate(body.EndDate, "end_date")
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 
 	p := auth.From(r.Context())
 	var created Project
-	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		created, err = CreateProject(r.Context(), tx, p.OrgID, Project{
 			ClientContactID: body.ClientContactID, Name: body.Name,
 			HourlyRate: core.Cents(body.HourlyRate), GSTCode: gstCode,
+			Status: body.Status, Description: body.Description,
+			StartDate: startDate, EndDate: endDate, BillingMethod: body.BillingMethod,
 		})
 		if err != nil {
 			return err
@@ -335,18 +403,45 @@ func updateProject(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	case body.GSTCode == nil:
 		module.WriteError(w, http.StatusUnprocessableEntity, "gst_code is required")
 		return
-	case body.Active == nil:
-		module.WriteError(w, http.StatusUnprocessableEntity, "active is required")
+	case body.ClientContactID == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "client_contact_id is required")
+		return
+	case body.Status == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "status is required")
+		return
+	case body.Description == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "description is required")
+		return
+	case body.StartDate == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "start_date is required (use null for none)")
+		return
+	case body.EndDate == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "end_date is required (use null for none)")
+		return
+	case body.BillingMethod == nil:
+		module.WriteError(w, http.StatusUnprocessableEntity, "billing_method is required")
+		return
+	}
+	startDate, err := parseOptionalDate(body.StartDate, "start_date")
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	endDate, err := parseOptionalDate(body.EndDate, "end_date")
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 
 	p := auth.From(r.Context())
 	var updated Project
-	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
 		updated, err = UpdateProject(r.Context(), tx, p.OrgID, id, Project{
-			Name: *body.Name, HourlyRate: core.Cents(*body.HourlyRate),
-			GSTCode: core.GSTCode(*body.GSTCode), Active: *body.Active,
+			Name: *body.Name, ClientContactID: *body.ClientContactID,
+			HourlyRate: core.Cents(*body.HourlyRate), GSTCode: core.GSTCode(*body.GSTCode),
+			Status: *body.Status, Description: *body.Description,
+			StartDate: startDate, EndDate: endDate, BillingMethod: *body.BillingMethod,
 		})
 		if err != nil {
 			return err
@@ -500,6 +595,16 @@ type entryResponse struct {
 	Minutes       int    `json:"minutes"`
 	Note          string `json:"note"`
 	InvoiceLineID *int64 `json:"invoice_line_id,omitempty"`
+
+	// Set only by the list endpoint (from EntryDetail).
+	TaskName        string `json:"task_name,omitempty"`
+	ProjectID       int64  `json:"project_id,omitempty"`
+	ProjectName     string `json:"project_name,omitempty"`
+	BillingMethod   string `json:"billing_method,omitempty"`
+	ClientContactID int64  `json:"client_contact_id,omitempty"`
+	ClientName      string `json:"client_name,omitempty"`
+	UserName        string `json:"user_name,omitempty"`
+	Rate            int64  `json:"rate,omitempty"`
 }
 
 func entryToResponse(e Entry) entryResponse {
@@ -671,6 +776,17 @@ func listEntries(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		}
 		filter.Unbilled = true
 	}
+	if s := q.Get("billed"); s != "" {
+		if s != "true" {
+			module.WriteError(w, http.StatusUnprocessableEntity, "billed must be true")
+			return
+		}
+		filter.Billed = true
+	}
+	if filter.Billed && filter.Unbilled {
+		module.WriteError(w, http.StatusUnprocessableEntity, "billed and unbilled are mutually exclusive")
+		return
+	}
 
 	p := auth.From(r.Context())
 	entries, err := ListEntries(r.Context(), d.Pool, p.OrgID, filter)
@@ -680,7 +796,11 @@ func listEntries(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	}
 	resp := entryListResponse{Entries: make([]entryResponse, len(entries))}
 	for i, e := range entries {
-		resp.Entries[i] = entryToResponse(e)
+		er := entryToResponse(e.Entry)
+		er.TaskName, er.ProjectID, er.ProjectName = e.TaskName, e.ProjectID, e.ProjectName
+		er.BillingMethod, er.ClientContactID, er.ClientName = e.BillingMethod, e.ClientContactID, e.ClientName
+		er.UserName, er.Rate = e.UserName, int64(e.Rate)
+		resp.Entries[i] = er
 		resp.TotalMinutes += e.Minutes
 	}
 	module.WriteJSON(w, http.StatusOK, resp)

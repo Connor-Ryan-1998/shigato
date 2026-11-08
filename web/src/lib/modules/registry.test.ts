@@ -33,9 +33,9 @@ const manifests: ModuleManifest[] = [
 
 describe('visibleNav', () => {
 	it.each([
-		{ perms: ['timesheets_read'], hrefs: ['time'] },
+		{ perms: ['timesheets_read'], hrefs: ['projects', 'time'] },
 		{ perms: ['invoices_write'], hrefs: ['billing-run'] },
-		{ perms: ['timesheets_read', 'invoices_write'], hrefs: ['time', 'billing-run'] },
+		{ perms: ['timesheets_read', 'invoices_write'], hrefs: ['projects', 'time', 'billing-run'] },
 		{ perms: [], hrefs: [] }
 	])('exposes timesheet screens according to permissions: $perms', ({ perms, hrefs }) => {
 		const items = visibleNav([timesheets], ['timesheets'], perms)[0].items;

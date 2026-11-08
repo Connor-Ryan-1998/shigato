@@ -51,9 +51,7 @@ func TestCreateEntryValidation(t *testing.T) {
 	}
 
 	inactiveProj := testProject2(t, pool, org.ID, client, "Dormant project")
-	if _, err := timesheets.UpdateProject(ctx, pool, org.ID, inactiveProj.ID, timesheets.Project{
-		Name: inactiveProj.Name, HourlyRate: inactiveProj.HourlyRate, GSTCode: inactiveProj.GSTCode, Active: false,
-	}); err != nil {
+	if _, err := timesheets.UpdateProject(ctx, pool, org.ID, inactiveProj.ID, withStatus(inactiveProj, timesheets.StatusCompleted)); err != nil {
 		t.Fatalf("UpdateProject(deactivate): %v", err)
 	}
 	taskInInactiveProj, err := timesheets.CreateTask(ctx, pool, org.ID, inactiveProj.ID, timesheets.Task{Name: "Orphaned"})
@@ -149,9 +147,7 @@ func TestUpdateEntrySameTaskSkipsTaskCheck(t *testing.T) {
 		t.Fatalf("CreateEntry: %v", err)
 	}
 
-	if _, err := timesheets.UpdateProject(ctx, pool, org.ID, proj.ID, timesheets.Project{
-		Name: proj.Name, HourlyRate: proj.HourlyRate, GSTCode: proj.GSTCode, Active: false,
-	}); err != nil {
+	if _, err := timesheets.UpdateProject(ctx, pool, org.ID, proj.ID, withStatus(proj, timesheets.StatusCompleted)); err != nil {
 		t.Fatalf("UpdateProject(deactivate): %v", err)
 	}
 
@@ -391,6 +387,20 @@ func TestListEntriesFilterAndTotal(t *testing.T) {
 	}
 	if len(byProject) != 1 || byProject[0].Minutes != 30 {
 		t.Fatalf("ListEntries(project_id) = %+v, want single 30-minute entry", byProject)
+	}
+	if d := byProject[0]; d.ProjectID != proj2.ID || d.ProjectName != proj2.Name || d.TaskName != task2.Name ||
+		d.ClientName == "" || d.UserName == "" || d.Rate != proj2.HourlyRate || d.BillingMethod != timesheets.BillingTM {
+		t.Fatalf("ListEntries(project_id) details = %+v", d)
+	}
+
+	// Nothing billed yet: billed filter is empty, unbilled has everything.
+	billed, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{Billed: true})
+	if err != nil || len(billed) != 0 {
+		t.Fatalf("ListEntries(billed) = %+v, %v; want none", billed, err)
+	}
+	unbilled, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{Unbilled: true})
+	if err != nil || len(unbilled) != 3 {
+		t.Fatalf("ListEntries(unbilled) len = %d, %v; want 3", len(unbilled), err)
 	}
 
 	// Inclusive date range covering e1 and e2 only (excludes e3's Nov 5).

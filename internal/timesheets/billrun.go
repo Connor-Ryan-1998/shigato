@@ -206,7 +206,8 @@ func RunBilling(ctx context.Context, b *billing.Service, orgID int64, orgSlug st
 }
 
 // lockUnbilledEntries selects and locks (FOR UPDATE) orgID's unbilled time
-// entries for in.ClientContactID's projects within [in.From, in.To], and
+// entries for in.ClientContactID's time-and-materials projects (fixed-price
+// time is never billed here) within [in.From, in.To], and
 // groups them by task. The locked query touches time_entries rows only; the
 // task/project filter is a subquery, never a join on the locked rows, so
 // Postgres only has to lock what it's actually billing, and re-checks
@@ -219,6 +220,7 @@ func lockUnbilledEntries(ctx context.Context, tx pgx.Tx, orgID int64, in RunInpu
 			SELECT t.id FROM project_tasks t
 			JOIN projects p ON p.id = t.project_id
 			WHERE t.org_id=$1 AND p.org_id=$1 AND p.client_contact_id=$4
+			AND p.billing_method = 'tm'
 		)
 		ORDER BY e.task_id, e.id FOR UPDATE`,
 		orgID, in.From, in.To, in.ClientContactID,

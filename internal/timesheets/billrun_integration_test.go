@@ -65,6 +65,57 @@ func testEntry(t *testing.T, pool *pgxpool.Pool, orgID, userID, taskID int64, wo
 	return e
 }
 
+// TestRunBillingSkipsFixedProjects covers fixed-price projects: their time
+// is tracked but never billed by a billing run.
+func TestRunBillingSkipsFixedProjects(t *testing.T) {
+	pool := db.TestPool(t)
+	ctx := context.Background()
+	org := testOrg(t, pool, "acme")
+	userID := testUser(t, pool, "fixed@example.com")
+	client := testContact(t, pool, org.ID, "client", "Client A")
+	b := testBillingService(pool)
+
+	fixed, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
+		ClientContactID: client, Name: "Fixed", HourlyRate: 12000, GSTCode: core.GST, BillingMethod: timesheets.BillingFixed,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(fixed): %v", err)
+	}
+	tm := testProject2(t, pool, org.ID, client, "Hourly")
+	fixedTask, err := timesheets.CreateTask(ctx, pool, org.ID, fixed.ID, timesheets.Task{Name: "Build"})
+	if err != nil {
+		t.Fatalf("CreateTask(fixed): %v", err)
+	}
+	tmTask, err := timesheets.CreateTask(ctx, pool, org.ID, tm.ID, timesheets.Task{Name: "Support"})
+	if err != nil {
+		t.Fatalf("CreateTask(tm): %v", err)
+	}
+	day := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	fixedEntry := testEntry(t, pool, org.ID, userID, fixedTask.ID, day, 120)
+	in := timesheets.RunInput{ClientContactID: client, From: day, To: day, DueInDays: 14}
+
+	// Only fixed time: nothing to bill.
+	if _, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in); !errors.Is(err, core.ErrInvalidInput) {
+		t.Fatalf("fixed-only run: err = %v, want ErrInvalidInput (no unbilled time)", err)
+	}
+
+	testEntry(t, pool, org.ID, userID, tmTask.ID, day, 60)
+	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in)
+	if err != nil {
+		t.Fatalf("RunBilling: %v", err)
+	}
+	if result.EntryCount != 1 || result.TotalMinutes != 60 {
+		t.Fatalf("billed %d entries / %d minutes, want 1 / 60", result.EntryCount, result.TotalMinutes)
+	}
+	after, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{TaskID: &fixedTask.ID})
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(after) != 1 || after[0].ID != fixedEntry.ID || after[0].InvoiceLineID != nil {
+		t.Fatalf("fixed entry after run = %+v, want still unbilled", after)
+	}
+}
+
 func TestRunBillingGroupsByTask(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()

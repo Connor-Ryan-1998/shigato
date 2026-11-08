@@ -60,14 +60,20 @@
 	{#each nav as group (group.module.name)}
 		{#if group.module.name === 'core' || group.items.length > 0}
 			<ul class="menu w-full">
-				<li class="menu-title">{group.module.label}</li>
-				{#each group.items as item (item.href)}
-					<li>
-						<a href={`/${page.params.org}/${item.href}`} onclick={() => (drawerOpen = false)}
-							>{item.label}</a
-						>
-					</li>
-				{/each}
+				<li>
+					<details open>
+						<summary class="font-semibold">{group.module.label}</summary>
+						<ul>
+							{#each group.items as item (item.href)}
+								<li>
+									<a href={`/${page.params.org}/${item.href}`} onclick={() => (drawerOpen = false)}
+										>{item.label}</a
+									>
+								</li>
+							{/each}
+						</ul>
+					</details>
+				</li>
 			</ul>
 		{/if}
 	{/each}

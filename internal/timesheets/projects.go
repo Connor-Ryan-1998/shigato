@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -33,19 +34,20 @@ func validateGSTCode(code core.GSTCode) error {
 
 // --- projects ---
 
-const projectColumns = `id, org_id, client_contact_id, name, hourly_rate, gst_code, active`
+const projectColumns = `id, org_id, client_contact_id, name, hourly_rate, gst_code,
+	status, description, start_date, end_date, billing_method, active`
 
 func scanProject(row pgx.Row) (Project, error) {
 	var p Project
 	var gstCode string
-	err := row.Scan(&p.ID, &p.OrgID, &p.ClientContactID, &p.Name, &p.HourlyRate, &gstCode, &p.Active)
+	err := row.Scan(&p.ID, &p.OrgID, &p.ClientContactID, &p.Name, &p.HourlyRate, &gstCode,
+		&p.Status, &p.Description, &p.StartDate, &p.EndDate, &p.BillingMethod, &p.Active)
 	p.GSTCode = core.GSTCode(gstCode)
 	return p, err
 }
 
-// validateProject checks the fields CreateProject/UpdateProject share:
-// name, rate and GST code. The client contact is validated separately by
-// CreateProject (UpdateProject never changes it).
+// validateProject checks the fields CreateProject/UpdateProject share. The
+// client contact is validated separately by checkClient.
 func validateProject(p Project) error {
 	if p.Name == "" {
 		return fmt.Errorf("%w: name is required", core.ErrInvalidInput)
@@ -53,27 +55,59 @@ func validateProject(p Project) error {
 	if p.HourlyRate <= 0 {
 		return fmt.Errorf("%w: hourly_rate must be positive", core.ErrInvalidInput)
 	}
+	switch p.Status {
+	case StatusPending, StatusInProgress, StatusCompleted, StatusCancelled:
+	default:
+		return fmt.Errorf("%w: status must be pending, in_progress, completed or cancelled", core.ErrInvalidInput)
+	}
+	switch p.BillingMethod {
+	case BillingTM, BillingFixed:
+	default:
+		return fmt.Errorf("%w: billing_method must be tm or fixed", core.ErrInvalidInput)
+	}
+	if utf8.RuneCountInString(p.Description) > 2000 {
+		return fmt.Errorf("%w: description must be at most 2000 characters", core.ErrInvalidInput)
+	}
+	if p.StartDate != nil && p.EndDate != nil && p.EndDate.Before(*p.StartDate) {
+		return fmt.Errorf("%w: end_date must not be before start_date", core.ErrInvalidInput)
+	}
 	return validateGSTCode(p.GSTCode)
+}
+
+// checkClient requires contactID to be a contact of kind "client" in orgID,
+// otherwise ErrInvalidInput.
+func checkClient(ctx context.Context, q core.Querier, orgID, contactID int64) error {
+	contact, err := core.GetContact(ctx, q, orgID, contactID)
+	if err != nil {
+		if errors.Is(err, core.ErrNotFound) {
+			return fmt.Errorf("%w: client_contact_id not found", core.ErrInvalidInput)
+		}
+		return err
+	}
+	if contact.Kind != "client" {
+		return fmt.Errorf("%w: client_contact_id is not a client", core.ErrInvalidInput)
+	}
+	return nil
 }
 
 // CreateProject validates p and inserts it for orgID. p.ClientContactID
 // must be a contact of kind "client" in orgID, otherwise ErrInvalidInput. A
 // duplicate name in the org also gives ErrInvalidInput, checked before
 // insert and backstopped against the unique_violation a concurrent request
-// could race into. p.Active is ignored: a new project is always active.
+// could race into. An empty Status defaults to in progress and an empty
+// BillingMethod to time and materials.
 func CreateProject(ctx context.Context, q core.Querier, orgID int64, p Project) (Project, error) {
+	if p.Status == "" {
+		p.Status = StatusInProgress
+	}
+	if p.BillingMethod == "" {
+		p.BillingMethod = BillingTM
+	}
 	if err := validateProject(p); err != nil {
 		return Project{}, err
 	}
-	contact, err := core.GetContact(ctx, q, orgID, p.ClientContactID)
-	if err != nil {
-		if errors.Is(err, core.ErrNotFound) {
-			return Project{}, fmt.Errorf("%w: client_contact_id not found", core.ErrInvalidInput)
-		}
+	if err := checkClient(ctx, q, orgID, p.ClientContactID); err != nil {
 		return Project{}, err
-	}
-	if contact.Kind != "client" {
-		return Project{}, fmt.Errorf("%w: client_contact_id is not a client", core.ErrInvalidInput)
 	}
 
 	var exists bool
@@ -85,10 +119,12 @@ func CreateProject(ctx context.Context, q core.Querier, orgID int64, p Project) 
 	}
 
 	row := q.QueryRow(ctx, `
-		INSERT INTO projects (org_id, client_contact_id, name, hourly_rate, gst_code, active)
-		VALUES ($1, $2, $3, $4, $5, true)
+		INSERT INTO projects (org_id, client_contact_id, name, hourly_rate, gst_code,
+			status, description, start_date, end_date, billing_method)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+projectColumns,
 		orgID, p.ClientContactID, p.Name, int64(p.HourlyRate), string(p.GSTCode),
+		p.Status, p.Description, p.StartDate, p.EndDate, p.BillingMethod,
 	)
 	created, err := scanProject(row)
 	if isUniqueViolation(err) {
@@ -139,17 +175,37 @@ func ListProjects(ctx context.Context, q core.Querier, orgID int64, clientID *in
 	return projects, rows.Err()
 }
 
-// UpdateProject validates p and updates name, hourly_rate, gst_code and
-// active for the project id in orgID. Its client contact cannot be
-// changed. It returns core.ErrNotFound if no such project exists in that
-// org, or ErrInvalidInput for a duplicate name among the org's other
-// projects.
+// UpdateProject validates p and replaces every editable field of the
+// project id in orgID (p.Active is ignored: it follows Status). The client
+// contact may only change while none of the project's time has been billed,
+// so an issued invoice never ends up under a project for another customer
+// (core.ErrInvalidState otherwise). It returns core.ErrNotFound if no such
+// project exists in that org, or ErrInvalidInput for a duplicate name among
+// the org's other projects.
 func UpdateProject(ctx context.Context, q core.Querier, orgID, id int64, p Project) (Project, error) {
 	if err := validateProject(p); err != nil {
 		return Project{}, err
 	}
-	if _, err := GetProject(ctx, q, orgID, id); err != nil {
+	existing, err := GetProject(ctx, q, orgID, id)
+	if err != nil {
 		return Project{}, err
+	}
+	if p.ClientContactID != existing.ClientContactID {
+		if err := checkClient(ctx, q, orgID, p.ClientContactID); err != nil {
+			return Project{}, err
+		}
+		var billed bool
+		if err := q.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM time_entries e JOIN project_tasks t ON t.id = e.task_id
+				WHERE e.org_id = $1 AND t.project_id = $2 AND e.invoice_line_id IS NOT NULL
+			)`, orgID, id,
+		).Scan(&billed); err != nil {
+			return Project{}, err
+		}
+		if billed {
+			return Project{}, fmt.Errorf("%w: the customer can't change once project time has been invoiced", core.ErrInvalidState)
+		}
 	}
 
 	var exists bool
@@ -164,10 +220,14 @@ func UpdateProject(ctx context.Context, q core.Querier, orgID, id int64, p Proje
 	}
 
 	row := q.QueryRow(ctx, `
-		UPDATE projects SET name = $1, hourly_rate = $2, gst_code = $3, active = $4
-		WHERE org_id = $5 AND id = $6
+		UPDATE projects SET name = $1, hourly_rate = $2, gst_code = $3, status = $4,
+			description = $5, start_date = $6, end_date = $7, billing_method = $8,
+			client_contact_id = $9
+		WHERE org_id = $10 AND id = $11
 		RETURNING `+projectColumns,
-		p.Name, int64(p.HourlyRate), string(p.GSTCode), p.Active, orgID, id,
+		p.Name, int64(p.HourlyRate), string(p.GSTCode), p.Status,
+		p.Description, p.StartDate, p.EndDate, p.BillingMethod,
+		p.ClientContactID, orgID, id,
 	)
 	updated, err := scanProject(row)
 	if isUniqueViolation(err) {

@@ -3,9 +3,31 @@
 // invoices.
 package timesheets
 
-import "shigoto/internal/core"
+import (
+	"time"
 
-// Project is a billable engagement for one client contact.
+	"shigoto/internal/core"
+)
+
+// Project statuses. Pending and in-progress projects accept time; the
+// others are closed.
+const (
+	StatusPending    = "pending"
+	StatusInProgress = "in_progress"
+	StatusCompleted  = "completed"
+	StatusCancelled  = "cancelled"
+)
+
+// Billing methods. Time on a fixed-price project is tracked but never
+// billed by the billing run.
+const (
+	BillingTM    = "tm"
+	BillingFixed = "fixed"
+)
+
+// Project is a billable engagement for one client contact. Active is
+// derived from Status by the database (pending or in progress) and is
+// read-only.
 type Project struct {
 	ID              int64
 	OrgID           int64
@@ -13,6 +35,11 @@ type Project struct {
 	Name            string
 	HourlyRate      core.Cents
 	GSTCode         core.GSTCode
+	Status          string
+	Description     string
+	StartDate       *time.Time
+	EndDate         *time.Time
+	BillingMethod   string
 	Active          bool
 }
 

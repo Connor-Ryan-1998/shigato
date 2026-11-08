@@ -181,18 +181,42 @@ func DeleteEntry(ctx context.Context, q core.Querier, orgID int64, actor auth.Pr
 // EntryFilter narrows ListEntries. From/To are inclusive date bounds.
 // ProjectID and ClientID filter through the task's project (ClientID via
 // the project's client contact). Unbilled, when true, restricts to entries
-// with no invoice_line_id.
+// with no invoice_line_id; Billed to entries with one.
 type EntryFilter struct {
 	From, To          *time.Time
 	TaskID, ProjectID *int64
 	UserID, ClientID  *int64
-	Unbilled          bool
+	Unbilled, Billed  bool
 }
 
-// ListEntries lists orgID's time entries matching filter, ordered by
-// work_date then id.
-func ListEntries(ctx context.Context, q core.Querier, orgID int64, filter EntryFilter) ([]Entry, error) {
-	sql := `SELECT ` + entryColumns + ` FROM time_entries WHERE org_id = $1`
+// EntryDetail is an Entry plus the names and rate a timesheet list shows
+// beside it, so a client doesn't need one lookup per task, project,
+// customer and user.
+type EntryDetail struct {
+	Entry
+	TaskName        string
+	ProjectID       int64
+	ProjectName     string
+	BillingMethod   string
+	ClientContactID int64
+	ClientName      string
+	UserName        string
+	// Rate is the task's effective hourly rate (its override, else the
+	// project's).
+	Rate core.Cents
+}
+
+// ListEntries lists orgID's time entries matching filter, with their
+// details, ordered by work_date then id.
+func ListEntries(ctx context.Context, q core.Querier, orgID int64, filter EntryFilter) ([]EntryDetail, error) {
+	sql := `SELECT e.id, e.org_id, e.task_id, e.user_id, e.work_date, e.minutes, e.note, e.invoice_line_id,
+		t.name, p.id, p.name, p.billing_method, c.id, c.name, u.name, COALESCE(t.hourly_rate, p.hourly_rate)
+		FROM time_entries e
+		JOIN project_tasks t ON t.id = e.task_id
+		JOIN projects p ON p.id = t.project_id
+		JOIN contacts c ON c.id = p.client_contact_id
+		JOIN users u ON u.id = e.user_id
+		WHERE e.org_id = $1`
 	args := []any{orgID}
 
 	add := func(clause string, val any) {
@@ -200,33 +224,30 @@ func ListEntries(ctx context.Context, q core.Querier, orgID int64, filter EntryF
 		sql += fmt.Sprintf(" AND %s $%d", clause, len(args))
 	}
 	if filter.From != nil {
-		add("work_date >=", *filter.From)
+		add("e.work_date >=", *filter.From)
 	}
 	if filter.To != nil {
-		add("work_date <=", *filter.To)
+		add("e.work_date <=", *filter.To)
 	}
 	if filter.TaskID != nil {
-		add("task_id =", *filter.TaskID)
+		add("e.task_id =", *filter.TaskID)
 	}
 	if filter.UserID != nil {
-		add("user_id =", *filter.UserID)
+		add("e.user_id =", *filter.UserID)
 	}
 	if filter.ProjectID != nil {
-		args = append(args, *filter.ProjectID)
-		sql += fmt.Sprintf(" AND task_id IN (SELECT id FROM project_tasks WHERE project_id = $%d)", len(args))
+		add("p.id =", *filter.ProjectID)
 	}
 	if filter.ClientID != nil {
-		args = append(args, *filter.ClientID)
-		sql += fmt.Sprintf(` AND task_id IN (
-			SELECT pt.id FROM project_tasks pt
-			JOIN projects p ON p.id = pt.project_id
-			WHERE p.client_contact_id = $%d
-		)`, len(args))
+		add("p.client_contact_id =", *filter.ClientID)
 	}
 	if filter.Unbilled {
-		sql += " AND invoice_line_id IS NULL"
+		sql += " AND e.invoice_line_id IS NULL"
 	}
-	sql += " ORDER BY work_date, id"
+	if filter.Billed {
+		sql += " AND e.invoice_line_id IS NOT NULL"
+	}
+	sql += " ORDER BY e.work_date, e.id"
 
 	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
@@ -234,13 +255,16 @@ func ListEntries(ctx context.Context, q core.Querier, orgID int64, filter EntryF
 	}
 	defer rows.Close()
 
-	entries := []Entry{}
+	entries := []EntryDetail{}
 	for rows.Next() {
-		e, err := scanEntry(rows)
-		if err != nil {
+		var d EntryDetail
+		e := &d.Entry
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.TaskID, &e.UserID, &e.WorkDate, &e.Minutes, &e.Note, &e.InvoiceLineID,
+			&d.TaskName, &d.ProjectID, &d.ProjectName, &d.BillingMethod, &d.ClientContactID, &d.ClientName, &d.UserName, &d.Rate,
+		); err != nil {
 			return nil, err
 		}
-		entries = append(entries, e)
+		entries = append(entries, d)
 	}
 	return entries, rows.Err()
 }

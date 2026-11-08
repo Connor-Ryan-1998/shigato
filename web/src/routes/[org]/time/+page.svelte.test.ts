@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
-import { act, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
 const page = $state({ params: { org: 'acme' } });
@@ -10,264 +10,136 @@ vi.mock('../../../lib/api', () => ({
 	api: apiMock,
 	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 }));
-import { ApiError } from '../../../lib/api';
 import Page from './+page.svelte';
 
-const project = { id: 3, name: 'Website', client_contact_id: 2, hourly_rate: 15000, gst_code: 'GST', active: true };
-const tasks = [{ id: 11, project_id: 3, name: 'Build', active: true }, { id: 12, project_id: 3, name: 'Old task', active: false }];
-const entry = { id: 5, task_id: 11, user_id: 1, work_date: '2026-11-01', minutes: 90, note: 'Design' };
+const project = {
+	id: 3, name: 'Website', client_contact_id: 2, hourly_rate: 15000, gst_code: 'GST', status: 'in_progress',
+	description: '', start_date: null, end_date: null, billing_method: 'tm', active: true
+};
+const base = {
+	task_id: 11, task_name: 'Build', project_id: 3, project_name: 'Website', billing_method: 'tm',
+	client_contact_id: 2, client_name: 'Rizzware', rate: 15000, note: ''
+};
+const entries = [
+	{ ...base, id: 5, user_id: 1, user_name: 'Me', work_date: '2026-11-01', minutes: 90, note: 'Design' },
+	{ ...base, id: 6, user_id: 2, user_name: 'Other', work_date: '2026-11-02', minutes: 30 },
+	{ ...base, id: 7, user_id: 1, user_name: 'Me', work_date: '2026-11-03', minutes: 45, invoice_line_id: 9 },
+	{ ...base, id: 8, user_id: 1, user_name: 'Me', work_date: '2026-11-04', minutes: 60, project_id: 4,
+		project_name: 'Fixed job', billing_method: 'fixed', client_contact_id: 5, client_name: 'Acme Co' }
+];
 
 function login(role = 'owner') {
 	const perms = ['timesheets_read', ...(role === 'bookkeeper' ? [] : ['timesheets_write']), ...(role === 'owner' ? ['timesheets_admin'] : [])];
 	session.setMe({ user: { id: 1, email: 'user@example.com', name: 'User' }, orgs: ['acme', 'other'].map((slug) => ({ slug, name: slug, role, perms })) });
 	session.setOrg('acme');
 }
-function route(method: string, path: string, body?: object): Promise<unknown> {
-	if (method !== 'GET') return Promise.resolve({ ...entry, ...body });
-	if (/\/projects(?:\?|$)/.test(path)) return Promise.resolve([{ ...project }, { ...project, id: 4, name: 'Second' }]);
-	if (path.endsWith('/tasks')) return Promise.resolve(tasks.map((t) => ({ ...t })));
-	if (path.includes('/time-entries?')) return Promise.resolve({ entries: [{ ...entry }], total_minutes: 90 });
-	if (path.endsWith('/contacts')) return Promise.resolve([{ id: 2, kind: 'client', name: 'Client' }]);
+function route(method: string, path: string): Promise<unknown> {
+	if (method !== 'GET') return Promise.resolve({});
+	if (path.endsWith('/projects')) return Promise.resolve([{ ...project }]);
+	if (path.endsWith('/tasks')) return Promise.resolve([{ id: 11, project_id: 3, name: 'Build', active: true }]);
+	if (path.includes('/time-entries?')) return Promise.resolve({ entries: entries.map((e) => ({ ...e })), total_minutes: 225 });
 	return Promise.reject(new Error(`Unexpected ${method} ${path}`));
 }
+const entryCalls = () => apiMock.mock.calls.filter(([m, p]) => m === 'GET' && p.includes('/time-entries?')).map(([, p]) => p);
+
 beforeEach(() => {
 	page.params.org = 'acme';
 	login();
 	apiMock.mockReset();
 	apiMock.mockImplementation(route);
+	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute('open', ''); });
+	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) { this.removeAttribute('open'); });
 });
-async function edit() {
-	await fireEvent.click(await screen.findByRole('button', { name: 'Edit entry 5' }));
-	return screen.getByRole('form', { name: 'Edit time entry' });
-}
 
-describe('time entry workflows', () => {
-	it.each([['Log time', 'Note'], ['Add task', 'New task'], ['Create project', 'Name']])('locks %s draft while saving', async (button, label) => {
-		let finish!: (v: unknown) => void;
-		apiMock.mockImplementation((m: string, p: string, b: object) => m === 'POST' ? new Promise((resolve) => { finish = resolve; }) : route(m, p, b));
+describe('time logging page', () => {
+	it('defaults to unbilled time and lists entries newest first with billing status', async () => {
 		render(Page);
 		await screen.findByText('Design');
-		const form = screen.getByRole('button', { name: button }).closest('form')!;
-		await fireEvent.submit(form);
-		expect(screen.getByLabelText(label, { exact: true }).matches(':disabled')).toBe(true);
-		finish({ ...project, id: 5 });
+		expect(screen.getByRole('heading', { name: 'Timesheets Yet to be Invoiced' })).toBeTruthy();
+		expect(entryCalls()[0]).toBe('/api/v1/orgs/acme/time-entries?unbilled=true');
+		const rows = screen.getAllByRole('row').slice(1, -1);
+		expect(within(rows[0]).getByText('Fixed fee')).toBeTruthy();
+		expect(within(rows[1]).getByText('Invoiced')).toBeTruthy();
+		expect(within(rows[3]).getByText('Unbilled')).toBeTruthy();
+		expect(screen.getByRole('link', { name: 'Fixed job' }).getAttribute('href')).toBe('/acme/projects/4');
+		expect(screen.getByText('03:45')).toBeTruthy();
 	});
-	it('saves full entry and can clear note', async () => {
+
+	it('switches status and period through server params', async () => {
 		render(Page);
-		const form = await edit();
-		await fireEvent.input(within(form).getByLabelText('Entry minutes'), { target: { value: '45' } });
-		await fireEvent.input(within(form).getByLabelText('Entry date'), { target: { value: '2026-11-02' } });
-		await fireEvent.input(within(form).getByLabelText('Entry note'), { target: { value: '' } });
-		await fireEvent.submit(form);
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/time-entries/5', {
-			task_id: 11, work_date: '2026-11-02', minutes: 45, note: ''
-		}));
+		await screen.findByText('Design');
+		await fireEvent.click(screen.getByRole('button', { name: 'Timesheets Invoiced' }));
+		await vi.waitFor(() => expect(entryCalls().at(-1)).toBe('/api/v1/orgs/acme/time-entries?billed=true'));
+		await fireEvent.click(screen.getByRole('button', { name: 'All Timesheets' }));
+		await fireEvent.change(screen.getByLabelText('Period'), { target: { value: 'this_month' } });
+		await vi.waitFor(() => expect(entryCalls().at(-1)).toMatch(/time-entries\?from=\d{4}-\d{2}-01&to=\d{4}-\d{2}-\d{2}$/));
 	});
-	it('cancel does not write', async () => {
+
+	it('filters customer, project and user client-side', async () => {
 		render(Page);
-		const form = await edit();
-		await fireEvent.input(within(form).getByLabelText('Entry minutes'), { target: { value: '45' } });
-		await fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }));
-		expect(screen.queryByRole('form', { name: 'Edit time entry' })).toBeNull();
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
+		await screen.findByText('Design');
+		await fireEvent.change(screen.getByLabelText('Customer'), { target: { value: '5' } });
+		expect(screen.queryByText('Design')).toBeNull();
+		expect(screen.getByRole('link', { name: 'Fixed job' })).toBeTruthy();
+		await fireEvent.change(screen.getByLabelText('Customer'), { target: { value: '' } });
+		await fireEvent.change(screen.getByLabelText('User'), { target: { value: '2' } });
+		expect(screen.getAllByRole('row')).toHaveLength(3);
+		expect(within(screen.getByLabelText('Project')).getAllByRole('option').map((o) => o.textContent)).toEqual(['All', 'Fixed job', 'Website']);
 	});
-	it.each([409, 422])('keeps draft and error after %s', async (status) => {
-		apiMock.mockImplementation((m: string, p: string, b: object) => m === 'PUT' ? Promise.reject(new ApiError(status, 'entry cannot be changed')) : route(m, p, b));
-		render(Page);
-		const form = await edit();
-		await fireEvent.input(within(form).getByLabelText('Entry note'), { target: { value: 'Retained' } });
-		await fireEvent.submit(form);
-		await screen.findByText('entry cannot be changed');
-		expect((within(form).getByLabelText('Entry note') as HTMLInputElement).value).toBe('Retained');
-	});
-	it('staff can edit only own unbilled entries', async () => {
+
+	it('staff edit and delete only their own unbilled entries', async () => {
 		login('staff');
-		apiMock.mockImplementation((m: string, p: string, b: object) => p.includes('/time-entries?') ? Promise.resolve({ entries: [entry, { ...entry, id: 6, user_id: 2 }, { ...entry, id: 7, invoice_line_id: 9 }], total_minutes: 270 }) : route(m, p, b));
 		render(Page);
-		await screen.findByRole('button', { name: 'Edit entry 5' });
+		await screen.findByText('Design');
+		expect(screen.getByRole('button', { name: 'Edit entry 5' })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: 'Edit entry 6' })).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Edit entry 7' })).toBeNull();
-		expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(1);
 	});
-	it('bookkeepers cannot log, edit or delete entries', async () => {
+
+	it('bookkeepers cannot log, edit or delete', async () => {
 		login('bookkeeper');
 		render(Page);
 		await screen.findByText('Design');
-		expect(screen.queryByRole('button', { name: 'Log time' })).toBeNull();
-		expect(screen.queryByRole('button', { name: 'Edit entry 5' })).toBeNull();
-		expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+		expect(screen.queryByRole('button', { name: '+ New Log Entry' })).toBeNull();
+		expect(screen.queryByRole('button', { name: /Edit entry/ })).toBeNull();
+		expect(screen.queryByRole('button', { name: /Delete entry/ })).toBeNull();
 	});
-	it('can reselect original inactive task without losing other edits', async () => {
-		apiMock.mockImplementation((m: string, p: string, b: object) => {
-			if (m === 'GET' && p.endsWith('/tasks')) return Promise.resolve([...tasks, { id: 13, project_id: 3, name: 'Other inactive task', active: false }]);
-			return p.includes('/time-entries?') ? Promise.resolve({ entries: [{ ...entry, task_id: 12 }], total_minutes: 90 }) : route(m, p, b);
-		});
+
+	it('deletes after confirmation and reloads', async () => {
+		vi.spyOn(window, 'confirm').mockReturnValue(true);
 		render(Page);
-		const form = await edit();
-		const select = within(form).getByLabelText('Entry task') as HTMLSelectElement;
-		expect(select.value).toBe('12');
-		await fireEvent.input(within(form).getByLabelText('Entry note'), { target: { value: 'Retained note' } });
-		await fireEvent.change(select, { target: { value: '11' } });
-		expect(within(select).getByRole('option', { name: 'Old task' })).toBeTruthy();
-		expect(within(select).queryByRole('option', { name: 'Other inactive task' })).toBeNull();
-		await fireEvent.change(select, { target: { value: '12' } });
-		expect(select.value).toBe('12');
-		expect((within(form).getByLabelText('Entry note') as HTMLInputElement).value).toBe('Retained note');
-		await fireEvent.submit(form);
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/time-entries/5', {
-			task_id: 12, work_date: '2026-11-01', minutes: 90, note: 'Retained note'
-		}));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Delete entry 5' }));
+		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('DELETE', '/api/v1/orgs/acme/time-entries/5'));
+		await vi.waitFor(() => expect(entryCalls()).toHaveLength(2));
 	});
-	it('filters inclusive dates and clears either bound', async () => {
+
+	it('opens the edit dialog prefilled', async () => {
 		render(Page);
-		await screen.findByText('Design');
-		await fireEvent.input(screen.getByLabelText('Entries from'), { target: { value: '2026-11-01' } });
-		await fireEvent.input(screen.getByLabelText('Entries to'), { target: { value: '2026-11-02' } });
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('GET', '/api/v1/orgs/acme/time-entries?project_id=3&from=2026-11-01&to=2026-11-02'));
-		await fireEvent.input(screen.getByLabelText('Entries from'), { target: { value: '' } });
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('GET', '/api/v1/orgs/acme/time-entries?project_id=3&to=2026-11-02'));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Edit entry 5' }));
+		expect((screen.getByLabelText('Time (H:MM)') as HTMLInputElement).value).toBe('01:30');
+		expect((screen.getByLabelText('Note') as HTMLTextAreaElement).value).toBe('Design');
 	});
-	it('rejects reversed date filter without request', async () => {
+
+	it('shows a permission message without timesheets_read', async () => {
+		session.setMe({ user: { id: 1, email: 'u@example.com', name: 'U' }, orgs: [{ slug: 'acme', name: 'acme', role: 'staff', perms: [] }] });
+		session.setOrg('acme');
 		render(Page);
-		await screen.findByText('Design');
-		await fireEvent.input(screen.getByLabelText('Entries from'), { target: { value: '2026-11-03' } });
-		await fireEvent.input(screen.getByLabelText('Entries to'), { target: { value: '2026-11-01' } });
-		await screen.findByText('Entries from must not be after entries to.');
-		expect(apiMock.mock.calls.some(([, p]) => p.includes('from=2026-11-03&to=2026-11-01'))).toBe(false);
+		expect(screen.getByRole('alert').textContent).toContain('permission');
+		expect(apiMock).not.toHaveBeenCalled();
 	});
-	it('cannot submit old entry when project changes', async () => {
-		render(Page);
-		const form = await edit();
-		const select = screen.getByLabelText('Project') as HTMLSelectElement;
-		select.value = '4';
-		select.dispatchEvent(new Event('change', { bubbles: true }));
-		form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
-		flushSync();
-	});
-	it('ignores old org response', async () => {
+
+	it('ignores an old org response', async () => {
 		let finish!: (v: unknown) => void;
-		apiMock.mockImplementation((m: string, p: string, b: object) => p.includes('/acme/time-entries?') ? new Promise((resolve) => { finish = resolve; }) : route(m, p, b));
+		apiMock.mockImplementation((m: string, p: string) => p.includes('/acme/time-entries?') ? new Promise((resolve) => { finish = resolve; }) : route(m, p));
 		render(Page);
 		await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
 		page.params.org = 'other';
 		session.setOrg('other');
 		flushSync();
 		await screen.findByText('Design');
-		finish({ entries: [{ ...entry, note: 'Old org note' }], total_minutes: 90 });
+		finish({ entries: [{ ...entries[0], id: 99, note: 'Old org note' }] });
 		await Promise.resolve();
 		flushSync();
 		expect(screen.queryByText('Old org note')).toBeNull();
-	});
-	it('prevents duplicate saves', async () => {
-		let finish!: (v: unknown) => void;
-		apiMock.mockImplementation((m: string, p: string, b: object) => m === 'PUT' ? new Promise((resolve) => { finish = resolve; }) : route(m, p, b));
-		render(Page);
-		const form = await edit();
-		await fireEvent.submit(form);
-		await fireEvent.submit(form);
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(1);
-		finish(entry);
-		await vi.waitFor(() => expect(screen.queryByRole('form', { name: 'Edit time entry' })).toBeNull());
-	});
-});
-
-describe('project and task workflows', () => {
-	it.each([false, true])('ignores superseded archive-filter failure with current filter %s', async (currentFilter) => {
-		let rejectOld!: (reason: unknown) => void;
-		let allRequests = 0;
-		apiMock.mockImplementation((m: string, p: string, b: object) => {
-			if (m === 'GET' && p.endsWith('/projects') && ++allRequests === 1) {
-				return new Promise((_resolve, reject) => { rejectOld = reject; });
-			}
-			return route(m, p, b);
-		});
-		render(Page);
-		await screen.findByText('Design');
-		const toggle = screen.getByLabelText('Show archived projects');
-		await fireEvent.click(toggle);
-		await fireEvent.click(toggle);
-		if (currentFilter) await fireEvent.click(toggle);
-		expect(toggle).toHaveProperty('checked', currentFilter);
-		await act(() => { rejectOld(new ApiError(500, 'Obsolete project load failed')); });
-		expect(screen.queryByText('Obsolete project load failed')).toBeNull();
-		expect(screen.getByText('Design')).toBeTruthy();
-	});
-	it('still reports current archive-filter failure', async () => {
-		apiMock.mockImplementation((m: string, p: string, b: object) => m === 'GET' && p.endsWith('/projects') ?
-			Promise.reject(new ApiError(500, 'Current project load failed')) : route(m, p, b));
-		render(Page);
-		await screen.findByText('Design');
-		await fireEvent.click(screen.getByLabelText('Show archived projects'));
-		expect(await screen.findByText('Current project load failed')).toBeTruthy();
-	});
-	it('edits project name and rate while preserving GST and active state', async () => {
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Edit project' }));
-		await fireEvent.input(screen.getByLabelText('Project name'), { target: { value: 'Renamed' } });
-		await fireEvent.input(screen.getByLabelText('Project hourly rate ($)'), { target: { value: '175.50' } });
-		await fireEvent.submit(screen.getByRole('form', { name: 'Edit project' }));
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/projects/3', {
-			name: 'Renamed', hourly_rate: 17550, gst_code: 'GST', active: true
-		}));
-	});
-	it.each([['125.50', 12550], ['', null]])('sends task override %s as %s', async (input, expected) => {
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Edit task 11' }));
-		await fireEvent.input(screen.getByLabelText('Task name'), { target: { value: 'Updated task' } });
-		await fireEvent.input(screen.getByLabelText('Task hourly rate ($)'), { target: { value: input } });
-		await fireEvent.submit(screen.getByRole('form', { name: 'Edit task' }));
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/tasks/11', {
-			name: 'Updated task', hourly_rate: expected, active: true
-		}));
-	});
-	it('rejects zero override without treating it as inherited rate', async () => {
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Edit task 11' }));
-		await fireEvent.input(screen.getByLabelText('Task hourly rate ($)'), { target: { value: '0' } });
-		await fireEvent.submit(screen.getByRole('form', { name: 'Edit task' }));
-		await screen.findByText('Task hourly rate must be greater than zero.');
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
-		expect((screen.getByLabelText('Task hourly rate ($)') as HTMLInputElement).value).toBe('0');
-	});
-	it('archives tasks using all required fields', async () => {
-		render(Page);
-		await screen.findByText('Design');
-		const task = screen.getAllByRole('listitem').find((li) => li.textContent?.includes('Build'))!;
-		await fireEvent.click(within(task).getByRole('button', { name: 'Archive' }));
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/tasks/11', { name: 'Build', hourly_rate: null, active: false }));
-	});
-	it('archives projects using all required fields', async () => {
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Archive project' }));
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/projects/3', { name: 'Website', hourly_rate: 15000, gst_code: 'GST', active: false }));
-	});
-	it('shows and restores archived projects without allowing new logging', async () => {
-		apiMock.mockImplementation((m: string, p: string, b: object) => m === 'GET' && p.endsWith('/projects') ? Promise.resolve([{ ...project, active: false }]) : route(m, p, b));
-		render(Page);
-		await screen.findByText('Design');
-		await fireEvent.click(screen.getByLabelText('Show archived projects'));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Restore project' }));
-		expect(screen.queryByRole('button', { name: 'Log time' })).toBeNull();
-		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/projects/3', { name: 'Website', hourly_rate: 15000, gst_code: 'GST', active: true }));
-	});
-	it('keeps failed project draft and cancels without additional writes', async () => {
-		apiMock.mockImplementation((m: string, p: string, b: object) => m === 'PUT' ? Promise.reject(new ApiError(422, 'duplicate name')) : route(m, p, b));
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Edit project' }));
-		await fireEvent.input(screen.getByLabelText('Project name'), { target: { value: 'Conflicting name' } });
-		const form = screen.getByRole('form', { name: 'Edit project' });
-		await fireEvent.submit(form);
-		await screen.findByText('duplicate name');
-		expect((screen.getByLabelText('Project name') as HTMLInputElement).value).toBe('Conflicting name');
-		await fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }));
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(1);
-	});
-	it('staff have no project/task editors', async () => {
-		login('staff');
-		render(Page);
-		await screen.findByText('Design');
-		expect(screen.queryByRole('button', { name: 'Edit project' })).toBeNull();
-		expect(screen.queryByRole('button', { name: 'Edit task 11' })).toBeNull();
 	});
 });
