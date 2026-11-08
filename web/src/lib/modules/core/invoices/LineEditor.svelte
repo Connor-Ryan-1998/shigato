@@ -88,11 +88,13 @@
 	}
 </script>
 
-<div class="line-editor">
+<div class="flex flex-col gap-4">
 	{#each rows as row, i (row.id)}
-		<div class="row">
+		<div
+			class="grid grid-cols-1 items-end gap-3 border-b border-base-300 pb-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] [&_select]:w-full [&_select]:min-w-0"
+		>
 			<Field label="Description" id={`line-${uid}-${row.id}-description`}>
-				<input id={`line-${uid}-${row.id}-description`} bind:value={row.description} />
+				<input class="input w-full" id={`line-${uid}-${row.id}-description`} bind:value={row.description} />
 			</Field>
 			<Field
 				label="Quantity"
@@ -100,6 +102,7 @@
 				error={quantityError(row)}
 			>
 				<input
+					class="input w-full"
 					id={`line-${uid}-${row.id}-quantity`}
 					inputmode="decimal"
 					bind:value={row.quantity}
@@ -111,6 +114,7 @@
 				error={amountError(row)}
 			>
 				<input
+					class="input w-full"
 					id={`line-${uid}-${row.id}-amount`}
 					inputmode="decimal"
 					bind:value={row.unitAmount}
@@ -120,61 +124,13 @@
 				<Select id={`line-${uid}-${row.id}-gst`} bind:value={row.gstCode} options={GST_OPTIONS} />
 			</Field>
 			<Button variant="secondary" onclick={() => removeRow(row.id)}>
-				Remove<span class="visually-hidden"> line {i + 1}</span>
+				Remove<span class="sr-only"> line {i + 1}</span>
 			</Button>
 		</div>
 	{/each}
 
-	<div class="actions">
+	<div class="flex gap-3">
 		<Button variant="secondary" onclick={addRow}>Add line</Button>
 		<Button onclick={save} disabled={!valid}>Save</Button>
 	</div>
 </div>
-
-<style>
-	.line-editor {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-	.row {
-		display: grid;
-		grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto;
-		gap: var(--space-3);
-		align-items: end;
-		padding-bottom: var(--space-3);
-		border-bottom: 1px solid var(--border);
-	}
-	.row input {
-		width: 100%;
-		box-sizing: border-box;
-	}
-	/* Select renders its own <select>, outside this component's scope - the
-	   extra .row class keeps this selector's specificity above Select's own
-	   scoped rule so the column can actually shrink instead of the select's
-	   content (the longest GST option text) forcing an overflow. */
-	.line-editor .row :global(select) {
-		width: 100%;
-		min-width: 0;
-		box-sizing: border-box;
-	}
-	.actions {
-		display: flex;
-		gap: var(--space-3);
-	}
-
-	@media (max-width: 639px) {
-		.row {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.visually-hidden {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		overflow: hidden;
-		clip: rect(0, 0, 0, 0);
-		white-space: nowrap;
-	}
-</style>

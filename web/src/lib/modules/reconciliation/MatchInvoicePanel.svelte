@@ -50,20 +50,20 @@
 	);
 </script>
 
-<div class="panel">
+<div class="flex flex-col gap-3">
 	<Field label="Search open invoices" id="match-invoice-search">
-		<input id="match-invoice-search" bind:value={search} placeholder="Contact or invoice number" />
+		<input class="input w-full" id="match-invoice-search" bind:value={search} placeholder="Contact or invoice number" />
 	</Field>
 
 	{#if loadError}
-		<p class="error" role="alert">{loadError}</p>
+		<p class="text-error" role="alert">{loadError}</p>
 	{:else if filtered.length === 0}
-		<p class="empty">No open invoices match.</p>
+		<p class="text-base-content/70">No open invoices match.</p>
 	{:else}
-		<ul class="invoice-list">
+		<ul class="m-0 flex list-none flex-col gap-2 p-0">
 			{#each filtered as inv (inv.id)}
-				<li>
-					<span class="invoice-info">
+				<li class="flex items-center justify-between gap-3 rounded-box border border-base-300 px-3 py-2">
+					<span class="text-sm">
 						{inv.number !== null ? `#${inv.number}` : 'Draft'} — {inv.contact_name} —
 						<Money cents={inv.outstanding} />
 					</span>
@@ -73,37 +73,3 @@
 		</ul>
 	{/if}
 </div>
-
-<style>
-	.panel {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-	.invoice-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-	.invoice-list li {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-	}
-	.invoice-info {
-		font-size: var(--text-sm);
-	}
-	.error {
-		color: var(--danger);
-	}
-	.empty {
-		color: var(--text-muted);
-	}
-</style>

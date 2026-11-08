@@ -28,7 +28,11 @@ class ThemeStore {
 		if (this.current === 'system') {
 			document.documentElement.removeAttribute('data-theme');
 		} else {
-			document.documentElement.setAttribute('data-theme', this.current);
+			// daisyUI theme names (see app.css): corporate is light, business dark.
+			document.documentElement.setAttribute(
+				'data-theme',
+				this.current === 'light' ? 'corporate' : 'business'
+			);
 		}
 		try {
 			if (this.current === 'system') {

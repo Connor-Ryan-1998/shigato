@@ -23,66 +23,23 @@
 	let { core, org }: { core: CoreDashboard; org: string } = $props();
 </script>
 
-<div class="tiles">
-	<a class="tile" href={`/${org}/invoices?status=open`}>
-		<p class="label">Open invoices</p>
-		<p class="value">{core.open_count}</p>
-		<p class="sub"><Money cents={core.open_outstanding} /> outstanding</p>
+<div class="mb-6 grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-4">
+	<a class="card card-border bg-base-100 p-4 shadow-sm hover:bg-base-200" href={`/${org}/invoices?status=open`}>
+		<p class="m-0 mb-2 text-sm font-semibold text-base-content/70">Open invoices</p>
+		<p class="m-0 text-3xl font-bold">{core.open_count}</p>
+		<p class="m-0 mt-1 text-sm text-base-content/70"><Money cents={core.open_outstanding} /> outstanding</p>
 	</a>
 
 	<!-- Styled as a warning, but "Overdue" is also shown as text, so the
 	     status never depends on colour alone. -->
-	<a class="tile tile-warning" href={`/${org}/invoices?status=overdue`}>
-		<p class="label">Overdue</p>
-		<p class="value">{core.overdue_count}</p>
-		<p class="sub"><Money cents={core.overdue_outstanding} /> outstanding</p>
+	<a class="card card-border bg-base-100 p-4 shadow-sm border-warning hover:bg-base-200" href={`/${org}/invoices?status=overdue`}>
+		<p class="m-0 mb-2 text-sm font-semibold text-warning">Overdue</p>
+		<p class="m-0 text-3xl font-bold">{core.overdue_count}</p>
+		<p class="m-0 mt-1 text-sm text-base-content/70"><Money cents={core.overdue_outstanding} /> outstanding</p>
 	</a>
 
-	<div class="tile">
-		<p class="label">Drafts</p>
-		<p class="value">{core.draft_count}</p>
+	<div class="card card-border bg-base-100 p-4 shadow-sm">
+		<p class="m-0 mb-2 text-sm font-semibold text-base-content/70">Drafts</p>
+		<p class="m-0 text-3xl font-bold">{core.draft_count}</p>
 	</div>
 </div>
-
-<style>
-	.tiles {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-		gap: var(--space-4);
-		margin-bottom: var(--space-6);
-	}
-	.tile {
-		display: block;
-		padding: var(--space-4);
-		border-radius: var(--radius-lg);
-		background: var(--surface);
-		border: 1px solid var(--border);
-		text-decoration: none;
-		color: inherit;
-	}
-	a.tile:hover {
-		background: var(--surface-raised);
-	}
-	.tile-warning {
-		border-color: var(--warning);
-	}
-	.tile-warning .label {
-		color: var(--warning);
-	}
-	.label {
-		margin: 0 0 var(--space-2);
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--text-muted);
-	}
-	.value {
-		margin: 0;
-		font-size: var(--text-2xl);
-		font-weight: 700;
-	}
-	.sub {
-		margin: var(--space-1) 0 0;
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-	}
-</style>

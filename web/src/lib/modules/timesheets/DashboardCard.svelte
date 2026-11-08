@@ -14,50 +14,16 @@
 	let { data }: { data: TimesheetsDashboard } = $props();
 </script>
 
-<section class="card">
-	<h2>Timesheets</h2>
-	<dl>
-		<div class="row">
-			<dt>Unbilled time</dt>
-			<dd>{minutes(data.unbilled_minutes)}</dd>
+<section class="card card-border bg-base-100 p-4 shadow-sm">
+	<h2 class="mb-3 text-lg font-bold">Timesheets</h2>
+	<dl class="m-0">
+		<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
+			<dt class="text-base-content/70">Unbilled time</dt>
+			<dd class="m-0 font-semibold tabular-nums">{minutes(data.unbilled_minutes)}</dd>
 		</div>
-		<div class="row">
-			<dt>Unbilled estimate</dt>
-			<dd><Money cents={data.unbilled_estimate} /></dd>
+		<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
+			<dt class="text-base-content/70">Unbilled estimate</dt>
+			<dd class="m-0 font-semibold tabular-nums"><Money cents={data.unbilled_estimate} /></dd>
 		</div>
 	</dl>
 </section>
-
-<style>
-	.card {
-		padding: var(--space-4);
-		border-radius: var(--radius-lg);
-		background: var(--surface);
-		border: 1px solid var(--border);
-	}
-	h2 {
-		margin: 0 0 var(--space-3);
-		font-size: var(--text-lg);
-	}
-	dl {
-		margin: 0;
-	}
-	.row {
-		display: flex;
-		justify-content: space-between;
-		gap: var(--space-4);
-		padding: var(--space-2) 0;
-		border-top: 1px solid var(--border);
-	}
-	.row:first-child {
-		border-top: none;
-	}
-	dt {
-		color: var(--text-muted);
-	}
-	dd {
-		margin: 0;
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-	}
-</style>

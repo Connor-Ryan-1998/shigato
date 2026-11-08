@@ -129,9 +129,9 @@
 {#if loadError}
 	<Toast message={loadError} tone="danger" />
 {:else}
-	<div class="form">
+	<div class="flex max-w-3xl flex-col gap-5">
 		<Field label="Contact" id="contact-select">
-			<div class="contact-row">
+			<div class="flex items-center gap-3">
 				<Select id="contact-select" bind:value={contactId} options={contactOptions} />
 				<Button variant="secondary" onclick={openNewContactDialog}>New contact</Button>
 			</div>
@@ -143,7 +143,7 @@
 			hint="Default 14 days from issue."
 			error={dueInDaysError}
 		>
-			<input id="due-in-days" inputmode="numeric" bind:value={dueInDays} />
+			<input class="input" id="due-in-days" inputmode="numeric" bind:value={dueInDays} />
 		</Field>
 
 		<LineEditor onSave={save} />
@@ -155,53 +155,21 @@
 {/if}
 
 <Dialog bind:open={newContactOpen} title="New contact">
-	<div class="fields">
+	<div class="mb-4 flex flex-col gap-3">
 		<Field label="Name" id="new-contact-name">
-			<input id="new-contact-name" bind:value={newContactName} />
+			<input class="input w-full" id="new-contact-name" bind:value={newContactName} />
 		</Field>
 		<Field label="Kind" id="new-contact-kind">
 			<Select id="new-contact-kind" bind:value={newContactKind} options={CONTACT_KIND_OPTIONS} />
 		</Field>
 	</div>
 	{#if contactError}
-		<p class="dialog-error" role="alert">{contactError}</p>
+		<p class="alert alert-error alert-soft mb-4" role="alert">{contactError}</p>
 	{/if}
-	<div class="dialog-actions">
+	<div class="modal-action">
 		<Button variant="secondary" onclick={() => (newContactOpen = false)}>Cancel</Button>
 		<Button onclick={createContact} disabled={creatingContact || newContactName.trim() === ''}>
 			Create
 		</Button>
 	</div>
 </Dialog>
-
-<style>
-	.form {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-5);
-		max-width: 48rem;
-	}
-	.contact-row {
-		display: flex;
-		gap: var(--space-3);
-		align-items: center;
-	}
-	.fields {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		margin-bottom: var(--space-4);
-	}
-	.dialog-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.dialog-error {
-		margin: 0 0 var(--space-4);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-</style>

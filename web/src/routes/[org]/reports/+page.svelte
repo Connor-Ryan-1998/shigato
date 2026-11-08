@@ -124,41 +124,41 @@
 
 <PageHeader title="Reports" />
 
-<section aria-labelledby="pnl-heading">
-	<h2 id="pnl-heading">Profit and loss</h2>
-	<div class="controls">
-		<Field label="From" id="pnl-from"><input id="pnl-from" type="date" bind:value={from} /></Field>
-		<Field label="To" id="pnl-to"><input id="pnl-to" type="date" bind:value={to} /></Field>
+<section class="mb-8" aria-labelledby="pnl-heading">
+	<h2 id="pnl-heading" class="mb-3 text-lg font-semibold">Profit and loss</h2>
+	<div class="flex flex-wrap gap-4">
+		<Field label="From" id="pnl-from"><input class="input" id="pnl-from" type="date" bind:value={from} /></Field>
+		<Field label="To" id="pnl-to"><input class="input" id="pnl-to" type="date" bind:value={to} /></Field>
 		<Field label="Group by" id="pnl-group">
-			<select id="pnl-group" bind:value={groupBy}>
+			<select class="select" id="pnl-group" bind:value={groupBy}>
 				<option value="org">Organisation</option>
 				<option value="property">Property</option>
 				<option value="project">Project</option>
 			</select>
 		</Field>
 	</div>
-	<p class="exports">
-		<a href={`${base}/pnl.csv?${pnlParams}`} download>P&amp;L CSV</a>
-		<a href={`${base}/transactions.csv?${txParams}`} download>Transactions CSV</a>
+	<p class="my-3 flex gap-4">
+		<a href={`${base}/pnl.csv?${pnlParams}`} class="link link-primary" download>P&amp;L CSV</a>
+		<a href={`${base}/transactions.csv?${txParams}`} class="link link-primary" download>Transactions CSV</a>
 	</p>
 	{#if pnlError}
-		<p class="error" role="alert">{pnlError}</p>
+		<p class="alert alert-error alert-soft" role="alert">{pnlError}</p>
 	{:else if pnl && pnl.length === 0}
 		<p>No income or expenses in this range.</p>
 	{:else if pnl}
 		{#each pnl as g (g.key)}
-			<table>
+			<table class="table mb-6 max-w-xl [&_caption]:pb-2 [&_caption]:text-left [&_caption]:font-semibold [&_tbody_th]:font-normal [&_td]:text-right [&_td]:tabular-nums">
 				<caption>{g.key}</caption>
 				<tbody>
 					{#each Object.entries(g.income) as [cat, cents] (cat)}
 						<tr><th scope="row">{cat}</th><td>{money(cents)}</td></tr>
 					{/each}
-					<tr class="total"><th scope="row">Total income</th><td>{money(g.total_income)}</td></tr>
+					<tr class="font-semibold [&_th]:font-semibold"><th scope="row">Total income</th><td>{money(g.total_income)}</td></tr>
 					{#each Object.entries(g.expenses) as [cat, cents] (cat)}
 						<tr><th scope="row">{cat}</th><td>{money(cents)}</td></tr>
 					{/each}
-					<tr class="total"><th scope="row">Total expenses</th><td>{money(g.total_expenses)}</td></tr>
-					<tr class="total net"><th scope="row">Net</th><td>{money(g.net)}</td></tr>
+					<tr class="font-semibold [&_th]:font-semibold"><th scope="row">Total expenses</th><td>{money(g.total_expenses)}</td></tr>
+					<tr class="font-semibold [&_th]:font-semibold"><th scope="row">Net</th><td>{money(g.net)}</td></tr>
 				</tbody>
 			</table>
 		{/each}
@@ -167,14 +167,14 @@
 	{/if}
 </section>
 
-<section aria-labelledby="bas-heading">
-	<h2 id="bas-heading">BAS summary</h2>
-	<div class="controls">
+<section class="mb-8" aria-labelledby="bas-heading">
+	<h2 id="bas-heading" class="mb-3 text-lg font-semibold">BAS summary</h2>
+	<div class="flex flex-wrap gap-4">
 		<Field label="Financial year ending" id="bas-year">
-			<input id="bas-year" type="number" min="2000" max="2100" bind:value={basYear} />
+			<input class="input" id="bas-year" type="number" min="2000" max="2100" bind:value={basYear} />
 		</Field>
 		<Field label="Quarter" id="bas-quarter">
-			<select id="bas-quarter" bind:value={basQuarter}>
+			<select class="select" id="bas-quarter" bind:value={basQuarter}>
 				<option value={1}>Q1 (Jul–Sep)</option>
 				<option value={2}>Q2 (Oct–Dec)</option>
 				<option value={3}>Q3 (Jan–Mar)</option>
@@ -182,11 +182,11 @@
 			</select>
 		</Field>
 	</div>
-	<p class="exports"><a href={`${base}/bas.csv?${basParams}`} download>BAS CSV</a></p>
+	<p class="my-3 flex gap-4"><a href={`${base}/bas.csv?${basParams}`} class="link link-primary" download>BAS CSV</a></p>
 	{#if basError}
-		<p class="error" role="alert">{basError}</p>
+		<p class="alert alert-error alert-soft" role="alert">{basError}</p>
 	{:else if bas}
-		<table>
+		<table class="table mb-6 max-w-xl [&_caption]:pb-2 [&_caption]:text-left [&_caption]:font-semibold [&_tbody_th]:font-normal [&_td]:text-right [&_td]:tabular-nums">
 			<caption>{period}</caption>
 			<tbody>
 				{#each BAS_ROWS as [k, label] (k)}
@@ -195,7 +195,7 @@
 							{#if k === 'g2'}
 								{label}
 							{:else}
-								<button type="button" class="link" onclick={() => loadDetail(k.toUpperCase())}>{label}</button>
+								<button type="button" class="link link-primary" onclick={() => loadDetail(k.toUpperCase())}>{label}</button>
 							{/if}
 						</th>
 						<td>{money(bas.figures_cents[k] ?? 0)}</td>
@@ -204,10 +204,11 @@
 			</tbody>
 		</table>
 		{#if detailError}
-			<p class="error" role="alert">{detailError}</p>
+			<p class="alert alert-error alert-soft" role="alert">{detailError}</p>
 		{:else if detail}
 			{@const rows = [...(detail.income ?? []), ...(detail.expenses ?? [])]}
-			<table class="detail">
+			<div class="overflow-x-auto">
+			<table class="table mb-6 [&_caption]:pb-2 [&_caption]:text-left [&_caption]:font-semibold [&_td]:tabular-nums">
 				<caption>{detail.field} detail</caption>
 				<thead>
 					<tr><th>Date</th><th>Source</th><th>Category</th><th>GST code</th><th>Ex GST</th><th>GST</th><th>Incl GST</th></tr>
@@ -234,68 +235,9 @@
 					{/each}
 				</tbody>
 			</table>
+			</div>
 		{/if}
 	{:else}
 		<p>Loading…</p>
 	{/if}
 </section>
-
-<style>
-	section {
-		margin-bottom: var(--space-8, 2rem);
-	}
-	.controls {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4, 1rem);
-	}
-	.exports {
-		display: flex;
-		gap: var(--space-4, 1rem);
-	}
-	table {
-		width: 100%;
-		max-width: 36rem;
-		border-collapse: collapse;
-		margin-bottom: var(--space-6, 1.5rem);
-	}
-	caption {
-		text-align: left;
-		font-weight: 600;
-		padding-bottom: var(--space-2, 0.5rem);
-	}
-	th,
-	td {
-		padding: var(--space-2, 0.5rem) 0;
-		border-bottom: 1px solid var(--border, #ddd);
-		font-weight: normal;
-		text-align: left;
-	}
-	td {
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-	.total th,
-	.total td {
-		font-weight: 600;
-	}
-	.detail {
-		max-width: none;
-	}
-	.detail td,
-	.detail th {
-		padding-right: var(--space-2, 0.5rem);
-	}
-	.link {
-		background: none;
-		border: 0;
-		padding: 0;
-		color: var(--accent, inherit);
-		text-decoration: underline;
-		cursor: pointer;
-		font: inherit;
-	}
-	.error {
-		color: var(--danger, #b00020);
-	}
-</style>

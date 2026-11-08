@@ -69,68 +69,33 @@
 			<p>Invite sent.</p>
 		{:else if result.link}
 			<p>Invite created. Share this link with them:</p>
-			<div class="link-row">
-				<input readonly value={result.link} aria-label="Portal invite link" />
+			<div class="mb-4 flex gap-2">
+				<input class="input flex-1" readonly value={result.link} aria-label="Portal invite link" />
 				<Button variant="secondary" onclick={copyLink}>{copied ? 'Copied' : 'Copy'}</Button>
 			</div>
 		{:else if result.message}
 			<p>{result.message}</p>
 		{/if}
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button onclick={() => (open = false)}>Done</Button>
 		</div>
 	{:else if contacts.length === 0}
 		<p>No tenant or client contacts yet.</p>
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button variant="secondary" onclick={() => (open = false)}>Close</Button>
 		</div>
 	{:else}
-		<div class="fields">
+		<div class="mb-4 flex flex-col gap-3">
 			<Field label="Contact" id="portal-invite-contact">
 				<Select id="portal-invite-contact" bind:value={contactId} {options} />
 			</Field>
 		</div>
 		{#if error}
-			<p class="dialog-error" role="alert">{error}</p>
+			<p class="alert alert-error alert-soft mb-4" role="alert">{error}</p>
 		{/if}
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
 			<Button onclick={submit} disabled={contactId === '' || busy}>Invite</Button>
 		</div>
 	{/if}
 </Dialog>
-
-<style>
-	.fields {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		margin-bottom: var(--space-4);
-	}
-	.link-row {
-		display: flex;
-		gap: var(--space-2);
-		margin-bottom: var(--space-4);
-	}
-	.link-row input {
-		flex: 1;
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border);
-		background: var(--surface);
-		color: var(--text);
-		font: inherit;
-	}
-	.actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.dialog-error {
-		margin: 0 0 var(--space-4);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-</style>

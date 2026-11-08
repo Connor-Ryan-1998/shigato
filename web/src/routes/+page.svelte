@@ -19,7 +19,9 @@
 </script>
 
 {#if session.me && session.me.orgs.length === 0}
-	<p>You don't have access to any organisation yet.</p>
+	<p class="p-8 text-center">You don't have access to any organisation yet.</p>
 {:else}
-	<p>Loading…</p>
+	<p class="flex items-center justify-center gap-2 p-8">
+		<span class="loading loading-spinner" aria-hidden="true"></span>Loading…
+	</p>
 {/if}

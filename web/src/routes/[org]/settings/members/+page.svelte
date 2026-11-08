@@ -214,12 +214,12 @@
 	</EmptyState>
 {:else}
 	{#if refreshing}
-		<p class="refreshing" aria-live="polite">Refreshing…</p>
+		<p class="mb-3 text-sm text-base-content/70" aria-live="polite">Refreshing…</p>
 	{:else if errorMessage}
-		<p class="inline-error" role="alert">{errorMessage}</p>
+		<p class="alert alert-error alert-soft mb-4" role="alert">{errorMessage}</p>
 	{/if}
 	{#if memberError}
-		<p class="inline-error" role="alert">{memberError}</p>
+		<p class="alert alert-error alert-soft mb-4" role="alert">{memberError}</p>
 	{/if}
 	{#if members.length === 0}
 		<EmptyState title="No members yet" />
@@ -227,14 +227,14 @@
 		<MembersTable {members} {busyUserId} onRoleChange={changeRole} onRemove={removeMember} />
 	{/if}
 
-	<h2>Outstanding invites</h2>
+	<h2 class="mt-6 mb-3 text-lg font-semibold">Outstanding invites</h2>
 	{#if invites.length === 0}
 		<EmptyState title="No outstanding invites" />
 	{:else}
-		<ul class="invite-list">
+		<ul class="list rounded-box bg-base-100 shadow-sm">
 			{#each invites as invite (invite.id)}
-				<li>
-					<span>{invite.email} — {invite.role}</span>
+				<li class="list-row items-center">
+					<span class="list-col-grow">{invite.email} — {invite.role}</span>
 					<Button variant="secondary" onclick={() => revokeInvite(invite.id)}>Revoke</Button>
 				</li>
 			{/each}
@@ -260,37 +260,3 @@
 	result={portalInviteResult}
 	onSubmit={createPortalInvite}
 />
-
-<style>
-	h2 {
-		margin-top: var(--space-6);
-		font-size: var(--text-lg);
-	}
-	.refreshing {
-		color: var(--text-muted);
-	}
-	.inline-error {
-		margin: 0 0 var(--space-4);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-	.invite-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-	.invite-list li {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-	}
-</style>

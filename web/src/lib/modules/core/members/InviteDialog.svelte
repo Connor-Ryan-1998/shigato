@@ -77,64 +77,29 @@
 			<p>Invite sent to <strong>{invitedEmail}</strong>.</p>
 		{:else}
 			<p>Invite created. Share this link with them:</p>
-			<div class="link-row">
-				<input readonly value={link} aria-label="Invite link" />
+			<div class="mb-4 flex gap-2">
+				<input class="input flex-1" readonly value={link} aria-label="Invite link" />
 				<Button variant="secondary" onclick={copyLink}>{copied ? 'Copied' : 'Copy'}</Button>
 			</div>
 		{/if}
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button onclick={() => (open = false)}>Done</Button>
 		</div>
 	{:else}
-		<div class="fields">
+		<div class="mb-4 flex flex-col gap-3">
 			<Field label="Email" id="invite-email">
-				<input id="invite-email" type="email" bind:value={email} autocomplete="off" />
+				<input class="input w-full" id="invite-email" type="email" bind:value={email} autocomplete="off" />
 			</Field>
 			<Field label="Role" id="invite-role">
 				<Select id="invite-role" bind:value={role} options={ROLE_OPTIONS} />
 			</Field>
 		</div>
 		{#if error}
-			<p class="dialog-error" role="alert">{error}</p>
+			<p class="alert alert-error alert-soft mb-4" role="alert">{error}</p>
 		{/if}
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
 			<Button onclick={submit} disabled={!valid || busy}>Send invite</Button>
 		</div>
 	{/if}
 </Dialog>
-
-<style>
-	.fields {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		margin-bottom: var(--space-4);
-	}
-	.link-row {
-		display: flex;
-		gap: var(--space-2);
-		margin-bottom: var(--space-4);
-	}
-	.link-row input {
-		flex: 1;
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border);
-		background: var(--surface);
-		color: var(--text);
-		font: inherit;
-	}
-	.actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.dialog-error {
-		margin: 0 0 var(--space-4);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-</style>

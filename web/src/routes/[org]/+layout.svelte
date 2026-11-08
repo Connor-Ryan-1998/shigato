@@ -59,38 +59,40 @@
 {#snippet navList()}
 	{#each nav as group (group.module.name)}
 		{#if group.module.name === 'core' || group.items.length > 0}
-			<div class="nav-group">
-				<p class="nav-group-label">{group.module.label}</p>
-				<ul>
-					{#each group.items as item (item.href)}
-						<li>
-							<a href={`/${page.params.org}/${item.href}`} onclick={() => (drawerOpen = false)}
+			<ul class="menu w-full">
+				<li class="menu-title">{group.module.label}</li>
+				{#each group.items as item (item.href)}
+					<li>
+						<a href={`/${page.params.org}/${item.href}`} onclick={() => (drawerOpen = false)}
 							>{item.label}</a
 						>
-						</li>
-					{/each}
-				</ul>
-			</div>
+					</li>
+				{/each}
+			</ul>
 		{/if}
 	{/each}
 {/snippet}
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a
+	href="#main-content"
+	class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-box focus:bg-base-100 focus:px-4 focus:py-2 focus:shadow"
+>Skip to content</a>
 
-<div class="shell">
-	<header class="topbar">
+<div class="grid min-h-screen grid-cols-1 grid-rows-[auto_1fr] bg-base-200 md:grid-cols-[16rem_1fr]">
+	<header class="navbar col-span-full flex-wrap gap-2 border-b border-base-300 bg-base-100 px-4">
 		<button
 			type="button"
-			class="menu-button"
+			class="btn btn-square btn-ghost md:hidden"
 			aria-label="Open navigation"
 			onclick={() => (drawerOpen = true)}
 		>
 			☰
 		</button>
 
-		<div class="org-switcher">
-			<label for="org-select">Organisation</label>
+		<div class="flex min-w-0 items-center gap-2">
+			<label for="org-select" class="text-sm whitespace-nowrap text-base-content/70">Organisation</label>
 			<select
+				class="select select-sm max-w-40 min-w-0"
 				id="org-select"
 				value={page.params.org}
 				onchange={(e) => switchOrg((e.target as HTMLSelectElement).value)}
@@ -101,30 +103,30 @@
 			</select>
 		</div>
 
-		<div class="topbar-actions">
+		<div class="ml-auto flex flex-wrap items-center gap-2">
 			<button
 				type="button"
-				class="icon-button"
+				class="btn btn-ghost btn-sm"
 				onclick={() => theme.cycle()}
 				aria-label={`Theme: ${themeLabel} (click to change)`}
 			>
 				{themeLabel}
 			</button>
-			<div class="user-menu">
-				<span>{session.me?.user.name}</span>
+			<div class="flex items-center gap-2">
+				<span class="hidden max-w-32 truncate min-[375px]:inline">{session.me?.user.name}</span>
 				{#if session.me?.orgs.some((o) => o.portal)}
-					<a href="/portal">Portal</a>
+					<a href="/portal" class="btn btn-ghost btn-sm">Portal</a>
 				{/if}
-				<button type="button" onclick={logout}>Logout</button>
+				<button type="button" class="btn btn-outline btn-sm" onclick={logout}>Logout</button>
 			</div>
 		</div>
 	</header>
 
-	<nav class="sidebar" aria-label="Primary">
+	<nav class="hidden border-r border-base-300 bg-base-100 py-2 md:block" aria-label="Primary">
 		{@render navList()}
 	</nav>
 
-	<main id="main-content">
+	<main id="main-content" class="min-w-0 p-4 md:p-6">
 		<!-- Switching org keeps the same route, so SvelteKit would reuse the
 		     page component and its onMount-loaded data would still be the
 		     previous org's. Keying on the org remounts the page instead. -->
@@ -139,152 +141,3 @@
 		{@render navList()}
 	</nav>
 </Drawer>
-
-<style>
-	.shell {
-		display: grid;
-		grid-template-columns: 16rem 1fr;
-		grid-template-rows: auto 1fr;
-		grid-template-areas: 'topbar topbar' 'sidebar main';
-		min-height: 100vh;
-	}
-
-	.topbar {
-		grid-area: topbar;
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: var(--space-2) var(--space-4);
-		padding: var(--space-3) var(--space-4);
-		background: var(--surface);
-		border-bottom: 1px solid var(--border);
-	}
-
-	.menu-button {
-		display: none;
-		background: none;
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		padding: var(--space-2) var(--space-3);
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-
-	.org-switcher {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
-	.org-switcher label {
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-		white-space: nowrap;
-	}
-
-	.org-switcher select {
-		min-width: 0;
-		max-width: 10rem;
-	}
-
-	.topbar-actions {
-		margin-left: auto;
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		flex-wrap: wrap;
-	}
-
-	.icon-button,
-	.user-menu button {
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		padding: var(--space-2) var(--space-3);
-		cursor: pointer;
-	}
-
-	.user-menu {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-	}
-
-	.user-menu a {
-		color: var(--text);
-	}
-
-	.user-menu span {
-		max-width: 8rem;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.sidebar {
-		grid-area: sidebar;
-		padding: var(--space-4);
-		border-right: 1px solid var(--border);
-		background: var(--surface);
-	}
-
-	.nav-group {
-		margin-bottom: var(--space-6);
-	}
-
-	.nav-group-label {
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		margin: 0 0 var(--space-2);
-	}
-
-	.nav-group ul {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-
-	.nav-group a {
-		display: block;
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		color: var(--text);
-		text-decoration: none;
-	}
-
-	.nav-group a:hover {
-		background: var(--surface-raised);
-	}
-
-	main {
-		grid-area: main;
-		padding: var(--space-6);
-		min-width: 0;
-	}
-
-	@media (max-width: 767px) {
-		.shell {
-			grid-template-columns: 1fr;
-			grid-template-areas: 'topbar' 'main';
-		}
-		.sidebar {
-			display: none;
-		}
-		.menu-button {
-			display: inline-flex;
-		}
-	}
-
-	@media (max-width: 374px) {
-		.user-menu span {
-			display: none;
-		}
-	}
-</style>

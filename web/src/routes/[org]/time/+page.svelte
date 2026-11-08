@@ -304,10 +304,10 @@
 <Field label="Project" id="time-project">
 	<Select id="time-project" bind:value={projectId} options={projectOptions} />
 </Field>
-<label><input type="checkbox" bind:checked={showArchived} onchange={changeArchived} disabled={busy} /> Show archived projects</label>
-<div class="row">
-	<Field label="Entries from" id="entries-from"><input id="entries-from" type="date" bind:value={from} /></Field>
-	<Field label="Entries to" id="entries-to"><input id="entries-to" type="date" bind:value={to} /></Field>
+<label class="label my-2"><input class="checkbox" type="checkbox" bind:checked={showArchived} onchange={changeArchived} disabled={busy} /> Show archived projects</label>
+<div class="flex flex-wrap items-end gap-4">
+	<Field label="Entries from" id="entries-from"><input class="input" id="entries-from" type="date" bind:value={from} /></Field>
+	<Field label="Entries to" id="entries-to"><input class="input" id="entries-to" type="date" bind:value={to} /></Field>
 </div>
 {#if projects.length === 0}
 	<p>No {showArchived ? '' : 'active '}projects.{isAdmin ? ' Create one below.' : ''}</p>
@@ -316,24 +316,24 @@
 {#if projectId !== '' && !detailsReady && !error}<p role="status">Loading entries…</p>{/if}
 {#if projectId !== '' && detailsReady}
 	{#if canWrite && selectedProject?.active}
-	<section aria-labelledby="log-heading">
-		<h2 id="log-heading">Log time</h2>
+	<section class="mt-8" aria-labelledby="log-heading">
+		<h2 id="log-heading" class="mb-3 text-lg font-semibold">Log time</h2>
 		{#if taskOptions.length === 0}
 			<p>This project has no active tasks.</p>
 		{:else}
 			<form onsubmit={logTime}>
-				<fieldset class="row" disabled={busy}>
-				<legend>Time entry details</legend>
+				<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+				<legend class="fieldset-legend">Time entry details</legend>
 				<Field label="Task" id="log-task">
 					<Select id="log-task" bind:value={taskId} options={taskOptions} />
 				</Field>
 				<Field label="Date" id="log-date">
-					<input id="log-date" type="date" bind:value={workDate} required />
+					<input class="input" id="log-date" type="date" bind:value={workDate} required />
 				</Field>
 				<Field label="Minutes" id="log-minutes">
-					<input id="log-minutes" type="number" min="1" step="1" bind:value={minutes} required />
+					<input class="input" id="log-minutes" type="number" min="1" step="1" bind:value={minutes} required />
 				</Field>
-				<Field label="Note" id="log-note"><input id="log-note" bind:value={note} /></Field>
+				<Field label="Note" id="log-note"><input class="input" id="log-note" bind:value={note} /></Field>
 				<Button type="submit" disabled={busy}>Log time</Button>
 				</fieldset>
 			</form>
@@ -341,27 +341,28 @@
 	</section>
 	{/if}
 	{#if editing && editing.scope === view}
-		<form aria-label="Edit time entry" onsubmit={saveEntry}>
-			<fieldset disabled={busy}>
-				<legend>Edit time entry</legend>
+		<form class="my-4" aria-label="Edit time entry" onsubmit={saveEntry}>
+			<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+				<legend class="fieldset-legend">Edit time entry</legend>
 				<Field label="Entry task" id="entry-task">
-					<select id="entry-task" bind:value={editing.task_id}>{#each editTaskOptions as t}<option value={Number(t.value)}>{t.label}</option>{/each}</select>
+					<select class="select" id="entry-task" bind:value={editing.task_id}>{#each editTaskOptions as t}<option value={Number(t.value)}>{t.label}</option>{/each}</select>
 				</Field>
-				<Field label="Entry date" id="entry-date"><input id="entry-date" type="date" bind:value={editing.work_date} required /></Field>
-				<Field label="Entry minutes" id="entry-minutes"><input id="entry-minutes" type="number" min="1" max="1440" step="1" bind:value={editing.minutes} required /></Field>
-				<Field label="Entry note" id="entry-note"><input id="entry-note" maxlength="1000" bind:value={editing.note} /></Field>
+				<Field label="Entry date" id="entry-date"><input class="input" id="entry-date" type="date" bind:value={editing.work_date} required /></Field>
+				<Field label="Entry minutes" id="entry-minutes"><input class="input" id="entry-minutes" type="number" min="1" max="1440" step="1" bind:value={editing.minutes} required /></Field>
+				<Field label="Entry note" id="entry-note"><input class="input" id="entry-note" maxlength="1000" bind:value={editing.note} /></Field>
 				<Button type="submit" disabled={busy}>Save entry</Button>
 				<Button variant="secondary" disabled={busy} onclick={() => { editing = null; }}>Cancel</Button>
 			</fieldset>
 		</form>
 	{/if}
 
-	<section aria-labelledby="entries-heading">
-		<h2 id="entries-heading">Entries ({hours(totalMinutes)})</h2>
+	<section class="mt-8" aria-labelledby="entries-heading">
+		<h2 id="entries-heading" class="mb-3 text-lg font-semibold">Entries ({hours(totalMinutes)})</h2>
 		{#if entries.length === 0}
 			<p>No time logged on this project.</p>
 		{:else}
-			<table>
+			<div class="overflow-x-auto">
+			<table class="table">
 				<thead>
 					<tr><th>Date</th><th>Task</th><th>Time</th><th>Note</th><th></th></tr>
 				</thead>
@@ -384,33 +385,34 @@
 					{/each}
 				</tbody>
 			</table>
+			</div>
 		{/if}
 	</section>
 {/if}
 
 {#if isAdmin}
-	<section aria-labelledby="admin-heading">
-		<h2 id="admin-heading">Projects and tasks</h2>
+	<section class="mt-8" aria-labelledby="admin-heading">
+		<h2 id="admin-heading" class="mb-3 text-lg font-semibold">Projects and tasks</h2>
 		{#if projectId !== '' && detailsReady}
 			{#if selectedProject}
-				<p>Rate changes apply when unbilled time is invoiced. Existing billed invoices do not change.</p>
+				<p class="mb-2 text-base-content/70">Rate changes apply when unbilled time is invoiced. Existing billed invoices do not change.</p>
 				<Button disabled={busy} onclick={() => { if (selectedProject) projectDraft = { ...selectedProject, rate: (selectedProject.hourly_rate / 100).toFixed(2), scope: view }; }}>Edit project</Button>
 				{#if projectDraft && projectDraft.scope === view}
-					<form aria-label="Edit project" onsubmit={saveProject}>
-						<fieldset disabled={busy}>
-							<legend>Edit project</legend>
-							<Field label="Project name" id="edit-project-name"><input id="edit-project-name" bind:value={projectDraft.name} required /></Field>
-							<Field label="Project hourly rate ($)" id="edit-project-rate"><input id="edit-project-rate" type="number" min="0.01" step="0.01" bind:value={projectDraft.rate} required /></Field>
+					<form class="my-4" aria-label="Edit project" onsubmit={saveProject}>
+						<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+							<legend class="fieldset-legend">Edit project</legend>
+							<Field label="Project name" id="edit-project-name"><input class="input" id="edit-project-name" bind:value={projectDraft.name} required /></Field>
+							<Field label="Project hourly rate ($)" id="edit-project-rate"><input class="input" id="edit-project-rate" type="number" min="0.01" step="0.01" bind:value={projectDraft.rate} required /></Field>
 							<Button type="submit" disabled={busy}>Save project</Button>
 							<Button variant="secondary" disabled={busy} onclick={() => { projectDraft = null; }}>Cancel</Button>
 						</fieldset>
 					</form>
 				{/if}
 			{/if}
-			<h3>Tasks</h3>
-			<ul>
+			<h3 class="mt-4 mb-2 font-semibold">Tasks</h3>
+			<ul class="mb-4 flex flex-col gap-2">
 				{#each tasks as t (t.id)}
-					<li>
+					<li class="flex flex-wrap items-center gap-2">
 						{t.name}{t.hourly_rate !== undefined ? ` (${money(t.hourly_rate)}/h)` : ''}
 						<Button disabled={busy} onclick={() => { taskDraft = { ...t, rate: t.hourly_rate == null ? '' : (t.hourly_rate / 100).toFixed(2), scope: view }; }}>Edit task {t.id}</Button>
 						<Button disabled={busy} variant="secondary" onclick={() => setTaskActive(t, !t.active)}>
@@ -420,12 +422,12 @@
 				{/each}
 			</ul>
 			{#if taskDraft && taskDraft.scope === view}
-				<form aria-label="Edit task" onsubmit={saveTask}>
-					<fieldset disabled={busy}>
-						<legend>Edit task</legend>
-						<Field label="Task name" id="edit-task-name"><input id="edit-task-name" bind:value={taskDraft.name} required /></Field>
+				<form class="my-4" aria-label="Edit task" onsubmit={saveTask}>
+					<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+						<legend class="fieldset-legend">Edit task</legend>
+						<Field label="Task name" id="edit-task-name"><input class="input" id="edit-task-name" bind:value={taskDraft.name} required /></Field>
 						<Field label="Task hourly rate ($)" id="edit-task-rate" hint="Leave blank to use the project rate. Overrides must be greater than zero.">
-							<input id="edit-task-rate" type="number" min="0.01" step="0.01" value={taskDraft.rate} oninput={(e) => { if (taskDraft) taskDraft.rate = e.currentTarget.value; }} />
+							<input class="input" id="edit-task-rate" type="number" min="0.01" step="0.01" value={taskDraft.rate} oninput={(e) => { if (taskDraft) taskDraft.rate = e.currentTarget.value; }} />
 						</Field>
 						<Button type="submit" disabled={busy}>Save task</Button>
 						<Button variant="secondary" disabled={busy} onclick={() => { taskDraft = null; }}>Cancel</Button>
@@ -433,28 +435,28 @@
 				</form>
 			{/if}
 			<form onsubmit={createTask}>
-				<fieldset class="row" disabled={busy}>
-				<legend>New task details</legend>
+				<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+				<legend class="fieldset-legend">New task details</legend>
 				<Field label="New task" id="new-task">
-					<input id="new-task" bind:value={newTaskName} required />
+					<input class="input" id="new-task" bind:value={newTaskName} required />
 				</Field>
 				<Button type="submit" disabled={busy}>Add task</Button>
 				</fieldset>
 			</form>
-			<p><Button disabled={busy} variant={selectedProject?.active ? 'danger' : 'secondary'} onclick={archiveProject}>{selectedProject?.active ? 'Archive project' : 'Restore project'}</Button></p>
+			<p class="my-4"><Button disabled={busy} variant={selectedProject?.active ? 'danger' : 'secondary'} onclick={archiveProject}>{selectedProject?.active ? 'Archive project' : 'Restore project'}</Button></p>
 		{/if}
-		<h3>New project</h3>
+		<h3 class="mt-4 mb-2 font-semibold">New project</h3>
 		<form onsubmit={createProject}>
-			<fieldset class="row" disabled={busy}>
-			<legend>New project details</legend>
+			<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+			<legend class="fieldset-legend">New project details</legend>
 			<Field label="Name" id="new-project-name">
-				<input id="new-project-name" bind:value={newProjectName} required />
+				<input class="input" id="new-project-name" bind:value={newProjectName} required />
 			</Field>
 			<Field label="Client" id="new-project-client">
 				<Select id="new-project-client" bind:value={newProjectClient} options={clientOptions} />
 			</Field>
 			<Field label="Hourly rate ($)" id="new-project-rate">
-				<input
+				<input class="input"
 					id="new-project-rate"
 					type="number"
 					min="0"
@@ -473,26 +475,3 @@
 {#if error}
 	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
 {/if}
-
-<style>
-	fieldset { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
-	section {
-		margin-top: var(--space-8, 2rem);
-	}
-	.row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4, 1rem);
-		align-items: flex-end;
-	}
-	table {
-		width: 100%;
-		border-collapse: collapse;
-	}
-	th,
-	td {
-		text-align: left;
-		padding: var(--space-2, 0.5rem);
-		border-bottom: 1px solid var(--border, #ddd);
-	}
-</style>

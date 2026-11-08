@@ -95,11 +95,11 @@
 	{/snippet}
 </PageHeader>
 
-<nav class="tabs" aria-label="Invoice status">
+<nav class="tabs tabs-border mb-4" aria-label="Invoice status">
 	{#each TABS as tab (tab.value)}
 		<a
 			href={tabHref(tab.value)}
-			class="tab"
+			class={['tab', activeTab === tab.value && 'tab-active']}
 			aria-current={activeTab === tab.value ? 'page' : undefined}
 		>
 			{tab.label}
@@ -125,9 +125,9 @@
 	<EmptyState title="No invoices in this view" />
 {:else}
 	<InvoiceTable org={page.params.org ?? ''} {invoices} />
-	<div class="pagination">
-		<p>{offset + 1}–{Math.min(offset + invoices.length, total)} of {total}</p>
-		<div class="pagination-buttons">
+	<div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+		<p class="text-sm text-base-content/70">{offset + 1}–{Math.min(offset + invoices.length, total)} of {total}</p>
+		<div class="flex gap-2">
 			<Button variant="secondary" disabled={offset === 0} onclick={() => gotoOffset(Math.max(0, offset - PAGE_SIZE))}>
 				Previous
 			</Button>
@@ -141,39 +141,3 @@
 		</div>
 	</div>
 {/if}
-
-<style>
-	.tabs {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		margin-bottom: var(--space-4);
-		border-bottom: 1px solid var(--border);
-	}
-	.tab {
-		padding: var(--space-2) var(--space-3);
-		color: var(--text-muted);
-		text-decoration: none;
-		border-bottom: 2px solid transparent;
-	}
-	.tab:hover {
-		color: var(--text);
-	}
-	.tab[aria-current='page'] {
-		color: var(--text);
-		font-weight: 600;
-		border-bottom-color: var(--accent);
-	}
-	.pagination {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		margin-top: var(--space-4);
-	}
-	.pagination-buttons {
-		display: flex;
-		gap: var(--space-2);
-	}
-</style>

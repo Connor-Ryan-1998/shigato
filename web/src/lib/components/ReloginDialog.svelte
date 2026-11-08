@@ -94,12 +94,13 @@
 	     (e.g. the login form's) once more than one is ever mounted at once. -->
 	{#if open}
 		<p>Your session has expired. Sign in again to continue.</p>
-		<form onsubmit={submit}>
+		<form onsubmit={submit} class="flex flex-col gap-3">
 			<Field label="Email" id="relogin-email">
-				<input id="relogin-email" type="email" value={email} readonly autocomplete="username" />
+				<input class="input w-full" id="relogin-email" type="email" value={email} readonly autocomplete="username" />
 			</Field>
 			<Field label="Password" id="relogin-password">
 				<input
+					class="input w-full"
 					id="relogin-password"
 					type="password"
 					bind:value={password}
@@ -108,9 +109,9 @@
 				/>
 			</Field>
 			{#if error}
-				<p class="dialog-error" role="alert">{error}</p>
+				<p class="alert alert-error alert-soft" role="alert">{error}</p>
 			{/if}
-			<div class="actions">
+			<div class="flex justify-end gap-3">
 				<Button variant="secondary" type="button" disabled={submitting} onclick={onCancel}>
 					Cancel
 				</Button>
@@ -118,31 +119,7 @@
 			</div>
 		</form>
 		{#if sso}
-			<p class="sso"><a href={ssoStartUrl()}>Sign in with SSO</a></p>
+			<p class="m-0 text-center"><a class="link link-primary" href={ssoStartUrl()}>Sign in with SSO</a></p>
 		{/if}
 	{/if}
 </Dialog>
-
-<style>
-	form {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-	.actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.sso {
-		margin: 0;
-		text-align: center;
-	}
-	.dialog-error {
-		margin: 0;
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-</style>

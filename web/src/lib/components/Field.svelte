@@ -19,34 +19,12 @@
 	} = $props();
 </script>
 
-<div class="field">
-	<label for={id}>{label}</label>
+<div class="fieldset py-0">
+	<label for={id} class="fieldset-legend pb-0">{label}</label>
 	{@render children()}
 	{#if error}
-		<p class="error" role="alert">{error}</p>
+		<p class="m-0 text-sm text-error" role="alert">{error}</p>
 	{:else if hint}
-		<p class="hint">{hint}</p>
+		<p class="m-0 text-sm text-base-content/70">{hint}</p>
 	{/if}
 </div>
-
-<style>
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-	label {
-		font-weight: 600;
-		font-size: var(--text-sm);
-	}
-	.hint {
-		margin: 0;
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-	}
-	.error {
-		margin: 0;
-		font-size: var(--text-sm);
-		color: var(--danger);
-	}
-</style>

@@ -210,23 +210,25 @@
 	}
 </script>
 
-<fieldset class="expense-form" disabled={busy || uploadingReceipt}>
-	<legend>Expense details</legend>
-	<div class="fields">
+<fieldset class="m-0 flex min-w-0 flex-col gap-4 border-0 p-0" disabled={busy || uploadingReceipt}>
+	<legend class="mb-2 font-semibold">Expense details</legend>
+	<div class="flex flex-col gap-3">
 		<Field label="Spent on" id={`expense-${uid}-spent-on`}>
-			<input id={`expense-${uid}-spent-on`} type="date" bind:value={spentOn} />
+			<input class="input w-full" id={`expense-${uid}-spent-on`} type="date" bind:value={spentOn} />
 		</Field>
 		<Field label="Supplier" id={`expense-${uid}-supplier`}>
 			<Select id={`expense-${uid}-supplier`} bind:value={supplierId} options={supplierOptions} />
 		</Field>
 		<Field label="Description" id={`expense-${uid}-description`}>
-			<input id={`expense-${uid}-description`} bind:value={description} />
+			<input class="input w-full" id={`expense-${uid}-description`} bind:value={description} />
 		</Field>
 	</div>
 
-	<h3>Lines</h3>
+	<h3 class="m-0 mt-2 font-bold">Lines</h3>
 	{#each rows as row, i (row.id)}
-		<div class="row">
+		<div
+			class="grid grid-cols-1 items-end gap-3 border-b border-base-300 pb-3 sm:grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] [&_select]:w-full [&_select]:min-w-0"
+		>
 			<Field label="Category" id={`expense-${uid}-${row.id}-category`}>
 				<Select
 					id={`expense-${uid}-${row.id}-category`}
@@ -236,6 +238,7 @@
 			</Field>
 			<Field label="Amount ($)" id={`expense-${uid}-${row.id}-amount`}>
 				<input
+					class="input w-full"
 					id={`expense-${uid}-${row.id}-amount`}
 					inputmode="decimal"
 					bind:value={row.amount}
@@ -267,16 +270,16 @@
 				</Field>
 			{/if}
 			<Button variant="secondary" onclick={() => removeRow(row.id)}>
-				Remove<span class="visually-hidden"> line {i + 1}</span>
+				Remove<span class="sr-only"> line {i + 1}</span>
 			</Button>
 		</div>
 	{/each}
 
-	<div class="actions">
+	<div class="flex justify-end gap-3">
 		<Button variant="secondary" onclick={addRow}>Add line</Button>
 	</div>
 
-	<p class="total" class:mismatch={totalMismatch}>
+	<p class="font-semibold tabular-nums" class:text-error={totalMismatch}>
 		Lines total {money(linesTotalCents)}
 		{#if totalMismatch}
 			but the bank line is {money(targetCents!)}
@@ -290,6 +293,7 @@
 		error={receiptError || undefined}
 	>
 		<input
+			class="file-input w-full"
 			id={`expense-${uid}-receipt`}
 			type="file"
 			accept="application/pdf,image/jpeg,image/png"
@@ -298,79 +302,16 @@
 		/>
 	</Field>
 	{#if uploadingReceipt}
-		<p class="uploading">Uploading…</p>
+		<p class="m-0 text-sm text-base-content/70">Uploading…</p>
 	{:else if receiptFileId !== undefined}
-		<p class="uploaded">Receipt attached.</p>
+		<p class="m-0 text-sm text-base-content/70">Receipt attached.</p>
 	{/if}
 
 	{#if error}
-		<p class="form-error" role="alert">{error}</p>
+		<p class="alert alert-error alert-soft" role="alert">{error}</p>
 	{/if}
 
-	<div class="actions">
+	<div class="flex justify-end gap-3">
 		<Button onclick={submit} disabled={!valid || uploadingReceipt}>Save</Button>
 	</div>
 </fieldset>
-
-<style>
-	.expense-form {
-		border: 0;
-		padding: 0;
-		margin: 0;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-	.fields {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-	h3 {
-		margin: var(--space-2) 0 0;
-		font-size: var(--text-md, 1rem);
-	}
-	.row {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-		gap: var(--space-3);
-		align-items: end;
-		padding-bottom: var(--space-3);
-		border-bottom: 1px solid var(--border);
-	}
-	.actions {
-		display: flex;
-		gap: var(--space-3);
-		justify-content: flex-end;
-	}
-	.actions:first-of-type {
-		justify-content: flex-start;
-	}
-	.total {
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-	}
-	.total.mismatch {
-		color: var(--danger);
-	}
-	.uploading,
-	.uploaded {
-		margin: 0;
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-	}
-	.form-error {
-		margin: 0;
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-
-	@media (max-width: 639px) {
-		.row {
-			grid-template-columns: 1fr;
-		}
-	}
-</style>

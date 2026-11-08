@@ -88,21 +88,21 @@
 {#if !canManage}
 	<p role="alert">You do not have permission to manage settings.</p>
 {:else}
-	{#if error}<p role="alert" class="error">{error}</p>{/if}
-	{#if success}<p role="status">{success}</p>{/if}
+	{#if error}<p role="alert" class="alert alert-error alert-soft mb-4">{error}</p>{/if}
+	{#if success}<p role="status" class="alert alert-success alert-soft mb-4">{success}</p>{/if}
 	{#if loading || (loadedOrg !== org && !error)}
 		<p role="status">Loading settings…</p>
 	{:else if settings && loadedOrg === org}
-		<form onsubmit={save}>
-			<fieldset disabled={saving}>
-				<legend>Organisation and tax</legend>
+		<form onsubmit={save} class="grid max-w-2xl gap-4">
+			<fieldset disabled={saving} class="fieldset grid gap-3 rounded-box border border-base-300 bg-base-100 p-4">
+				<legend class="fieldset-legend">Organisation and tax</legend>
 				<Field label="Organisation name" id="settings-name">
-					<input id="settings-name" bind:value={settings.name} required />
+					<input class="input w-full" id="settings-name" bind:value={settings.name} required />
 				</Field>
 				<Field label="ABN" id="settings-abn">
-					<input id="settings-abn" bind:value={settings.abn} />
+					<input class="input w-full" id="settings-abn" bind:value={settings.abn} />
 				</Field>
-				<label><input type="checkbox" bind:checked={settings.gst_registered} /> GST registered</label>
+				<label class="label"><input class="checkbox" type="checkbox" bind:checked={settings.gst_registered} /> GST registered</label>
 				<Field label="BAS frequency" id="settings-bas">
 					<Select id="settings-bas" bind:value={settings.bas_frequency} options={[
 						{ value: '', label: 'Not set' },
@@ -111,20 +111,20 @@
 					]} />
 				</Field>
 			</fieldset>
-			<fieldset disabled={saving}>
-				<legend>Payment instructions</legend>
-				<p>Clearing these instructions can remove payment options from rent and bond invoices.</p>
-				<Field label="BSB" id="settings-bsb"><input id="settings-bsb" bind:value={settings.bank_bsb} /></Field>
-				<Field label="Bank account" id="settings-account"><input id="settings-account" bind:value={settings.bank_account} /></Field>
-				<Field label="PayID" id="settings-payid"><input id="settings-payid" bind:value={settings.payid} /></Field>
+			<fieldset disabled={saving} class="fieldset grid gap-3 rounded-box border border-base-300 bg-base-100 p-4">
+				<legend class="fieldset-legend">Payment instructions</legend>
+				<p class="text-base-content/70">Clearing these instructions can remove payment options from rent and bond invoices.</p>
+				<Field label="BSB" id="settings-bsb"><input class="input w-full" id="settings-bsb" bind:value={settings.bank_bsb} /></Field>
+				<Field label="Bank account" id="settings-account"><input class="input w-full" id="settings-account" bind:value={settings.bank_account} /></Field>
+				<Field label="PayID" id="settings-payid"><input class="input w-full" id="settings-payid" bind:value={settings.payid} /></Field>
 			</fieldset>
-			<fieldset disabled={saving}>
-				<legend>Rent invoicing</legend>
+			<fieldset disabled={saving} class="fieldset grid gap-3 rounded-box border border-base-300 bg-base-100 p-4">
+				<legend class="fieldset-legend">Rent invoicing</legend>
 				<Field label="Invoice lead days" id="settings-lead">
-					<input id="settings-lead" type="number" min="0" max="14" step="1" bind:value={settings.invoice_lead_days} required />
+					<input class="input w-full" id="settings-lead" type="number" min="0" max="14" step="1" bind:value={settings.invoice_lead_days} required />
 				</Field>
-				<label><input type="checkbox" bind:checked={settings.auto_send_rent} /> Send rent invoices automatically</label>
-				<p>Automatic sending uses the configured payment provider.</p>
+				<label class="label"><input class="checkbox" type="checkbox" bind:checked={settings.auto_send_rent} /> Send rent invoices automatically</label>
+				<p class="text-base-content/70">Automatic sending uses the configured payment provider.</p>
 			</fieldset>
 			<Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</Button>
 		</form>
@@ -132,11 +132,3 @@
 		<Button onclick={() => org && load(org)}>Retry</Button>
 	{/if}
 {/if}
-
-<style>
-	form { display: grid; gap: var(--space-4); max-width: 40rem; }
-	fieldset { display: grid; gap: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
-	legend { font-weight: 600; }
-	p { margin: 0; }
-	.error { color: var(--danger); }
-</style>

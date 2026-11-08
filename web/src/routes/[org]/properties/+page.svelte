@@ -187,76 +187,78 @@
 	<p>No properties yet.</p>
 {/if}
 {#each properties as p (p.id)}
-	<section class="property">
-		<h2>{p.name}</h2>
-		{#if p.address}<p class="muted">{p.address}</p>{/if}
+	<section class="card mb-4 bg-base-100 shadow-sm">
+		<div class="card-body">
+		<h2 class="card-title">{p.name}</h2>
+		{#if p.address}<p class="text-base-content/70">{p.address}</p>{/if}
 		{#each leases.filter((l) => l.property_id === p.id) as l (l.id)}
 			<p>
-				<a href={`/${page.params.org}/leases/${l.id}`}>
+				<a class="link link-primary" href={`/${page.params.org}/leases/${l.id}`}>
 					Lease from {l.start_date}{l.termination_date ? ` to ${l.termination_date}` : ''}
 				</a>
 				· {l.tenants.map((t) => contactName.get(t.contact_id) ?? t.contact_id).join(', ')}
 				· {money(currentRent(l))} {l.frequency}
 			</p>
 		{:else}
-			<p class="muted">No leases.</p>
+			<p class="text-base-content/70">No leases.</p>
 		{/each}
+		</div>
 	</section>
 {/each}
 
 {#if canWrite}
-	<section>
-		<h2>New property</h2>
+	<section class="mb-8">
+		<h2 class="mb-3 text-lg font-semibold">New property</h2>
 		<form onsubmit={createProperty}>
-			<fieldset class="row" disabled={busy}>
-			<legend>Property details</legend>
-			<Field label="Name" id="prop-name"><input id="prop-name" bind:value={propName} required /></Field>
-			<Field label="Address" id="prop-address"><input id="prop-address" bind:value={propAddress} /></Field>
-			<label class="check"><input type="checkbox" bind:checked={propResidential} /> Residential</label>
+			<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+			<legend class="fieldset-legend">Property details</legend>
+			<Field label="Name" id="prop-name"><input class="input" id="prop-name" bind:value={propName} required /></Field>
+			<Field label="Address" id="prop-address"><input class="input" id="prop-address" bind:value={propAddress} /></Field>
+			<label class="label"><input class="checkbox" type="checkbox" bind:checked={propResidential} /> Residential</label>
 			<Button type="submit" disabled={busy}>Create property</Button>
 			</fieldset>
 		</form>
 	</section>
 
 	{#if properties.length > 0}
-		<section>
-			<h2>New lease</h2>
+		<section class="mb-8">
+			<h2 class="mb-3 text-lg font-semibold">New lease</h2>
 			{#if tenantOptions.length === 0}
-				<p>Add a contact of kind "tenant" first.</p>
+				<p class="text-base-content/70">Add a contact of kind "tenant" first.</p>
 			{:else}
 				<form onsubmit={createLease}>
-					<fieldset class="row" disabled={busy}>
-					<legend>Lease details</legend>
+					<fieldset class="fieldset rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+					<legend class="fieldset-legend">Lease details</legend>
 					<Field label="Property" id="lease-property">
 						<Select id="lease-property" bind:value={leaseProperty} options={propertyOptions} />
 					</Field>
 					<Field label="Tenant" id="lease-tenant">
 						<Select id="lease-tenant" bind:value={leaseTenant} options={tenantOptions} onchange={(value) => { coTenants = coTenants.filter((id) => id !== value); }} disabled={busy} />
 					</Field>
-					<fieldset disabled={busy}>
-						<legend>Co-tenants (optional)</legend>
+					<fieldset disabled={busy} class="fieldset w-full rounded-box border border-base-300 p-4">
+						<legend class="fieldset-legend">Co-tenants (optional)</legend>
 						<p>The selected Tenant is primary and receives invoices.</p>
 						{#each tenantOptions.filter((tenant) => tenant.value !== leaseTenant) as tenant (tenant.value)}
-							<label><input type="checkbox" value={tenant.value} bind:group={coTenants} /> Co-tenant: {tenant.label}</label>
+							<label class="label"><input class="checkbox" type="checkbox" value={tenant.value} bind:group={coTenants} /> Co-tenant: {tenant.label}</label>
 						{/each}
 					</fieldset>
 					<Field label="Start" id="lease-start">
-						<input id="lease-start" type="date" bind:value={leaseStart} required />
+						<input class="input" id="lease-start" type="date" bind:value={leaseStart} required />
 					</Field>
 					<Field label="Frequency" id="lease-frequency">
 						<Select id="lease-frequency" bind:value={leaseFrequency} options={FREQUENCIES} />
 					</Field>
 					<Field label="Rent ($)" id="lease-rent">
-						<input id="lease-rent" type="number" min="0" step="0.01" bind:value={leaseRent} required />
+						<input class="input" id="lease-rent" type="number" min="0" step="0.01" bind:value={leaseRent} required />
 					</Field>
 					<Field label="Bond ($)" id="lease-bond">
-						<input id="lease-bond" type="number" min="0" step="0.01" bind:value={leaseBond} />
+						<input class="input" id="lease-bond" type="number" min="0" step="0.01" bind:value={leaseBond} />
 					</Field>
 					<Field label="Paid-to date" id="lease-paid-to" hint="Must be the last day of a rent period; leave blank for a new lease.">
-						<input id="lease-paid-to" type="date" bind:value={paidTo} disabled={busy} />
+						<input class="input" id="lease-paid-to" type="date" bind:value={paidTo} disabled={busy} />
 					</Field>
 					<Field label="Opening arrears ($)" id="lease-arrears" hint="Positive arrears create a separate draft invoice; it is not sent automatically by this form.">
-						<input id="lease-arrears" type="number" min="0" step="0.01" bind:value={openingArrears} disabled={busy} />
+						<input class="input" id="lease-arrears" type="number" min="0" step="0.01" bind:value={openingArrears} disabled={busy} />
 					</Field>
 					<Button type="submit" disabled={busy}>Create lease</Button>
 					</fieldset>
@@ -270,24 +272,3 @@
 {#if error}
 	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
 {/if}
-
-<style>
-	fieldset { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
-	section {
-		margin-bottom: var(--space-8, 2rem);
-	}
-	.muted {
-		color: var(--text-muted, #666);
-	}
-	.row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4, 1rem);
-		align-items: flex-end;
-	}
-	.check {
-		display: flex;
-		gap: var(--space-2, 0.5rem);
-		align-items: center;
-	}
-</style>

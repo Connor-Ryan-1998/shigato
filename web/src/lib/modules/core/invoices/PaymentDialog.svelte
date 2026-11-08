@@ -69,43 +69,22 @@
 </script>
 
 <Dialog bind:open title="Record payment">
-	<div class="fields">
+	<div class="mb-4 flex flex-col gap-3">
 		<Field label="Amount ($)" id="payment-amount" error={amountError}>
-			<input id="payment-amount" inputmode="decimal" bind:value={amount} />
+			<input class="input w-full" id="payment-amount" inputmode="decimal" bind:value={amount} />
 		</Field>
 		<Field label="Date paid" id="payment-paid-on">
-			<input id="payment-paid-on" type="date" bind:value={paidOn} />
+			<input class="input w-full" id="payment-paid-on" type="date" bind:value={paidOn} />
 		</Field>
 		<Field label="Method" id="payment-method">
 			<Select id="payment-method" bind:value={method} options={METHOD_OPTIONS} />
 		</Field>
 	</div>
 	{#if error}
-		<p class="dialog-error" role="alert">{error}</p>
+		<p class="alert alert-error alert-soft mb-4" role="alert">{error}</p>
 	{/if}
-	<div class="actions">
+	<div class="flex justify-end gap-3">
 		<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
 		<Button onclick={submit} disabled={!valid || busy}>Record payment</Button>
 	</div>
 </Dialog>
-
-<style>
-	.fields {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		margin-bottom: var(--space-4);
-	}
-	.actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.dialog-error {
-		margin: 0 0 var(--space-4);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-</style>

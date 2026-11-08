@@ -57,10 +57,10 @@
 
 <Dialog bind:open title={`Import CSV — ${accountName}`}>
 	{#if result}
-		<p class="result">
+		<p class="mb-4">
 			Imported {result.rows_new} new of {result.rows_total} rows.
 		</p>
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button onclick={() => (open = false)}>Done</Button>
 		</div>
 	{:else}
@@ -70,34 +70,15 @@
 			     dialog reopened after a previous import still displayed the
 			     old filename without this remount. -->
 			{#key open}
-				<input id="import-file" type="file" accept=".csv,text/csv" onchange={pickFile} />
+				<input class="file-input w-full" id="import-file" type="file" accept=".csv,text/csv" onchange={pickFile} />
 			{/key}
 		</Field>
 		{#if error}
-			<p class="dialog-error" role="alert">{error}</p>
+			<p class="alert alert-error alert-soft my-3 whitespace-pre-wrap" role="alert">{error}</p>
 		{/if}
-		<div class="actions">
+		<div class="flex justify-end gap-3">
 			<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
 			<Button disabled={busy || !file} onclick={submit}>Import</Button>
 		</div>
 	{/if}
 </Dialog>
-
-<style>
-	.result {
-		margin: 0 0 var(--space-4);
-	}
-	.actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.dialog-error {
-		margin: var(--space-3) 0;
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-		white-space: pre-wrap;
-	}
-</style>

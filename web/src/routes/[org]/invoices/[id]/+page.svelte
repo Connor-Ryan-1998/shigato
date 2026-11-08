@@ -228,17 +228,17 @@
 	</PageHeader>
 
 	{#if refreshing}
-		<p class="refreshing" aria-live="polite">Refreshing…</p>
+		<p class="mb-3 text-sm text-base-content/70" aria-live="polite">Refreshing…</p>
 	{/if}
 
-	<p class="contact">{inv.contact_name}</p>
+	<p class="mb-2 text-base-content/70">{inv.contact_name}</p>
 
-	<div class="dates">
+	<div class="mb-4 flex gap-4 text-sm text-base-content/70">
 		{#if inv.issue_date}<span>Issued <DateText iso={inv.issue_date} /></span>{/if}
 		{#if inv.due_date}<span>Due <DateText iso={inv.due_date} /></span>{/if}
 	</div>
 
-	<section class="actions-row" aria-label="Invoice actions">
+	<section class="mb-6 flex flex-wrap gap-3" aria-label="Invoice actions">
 		{#if inv.status === 'draft'}
 			<Button disabled={actionBusy} onclick={issue}>Issue</Button>
 			<Button variant="danger" disabled={actionBusy} onclick={voidInvoice}>Void</Button>
@@ -253,7 +253,7 @@
 		{/if}
 	</section>
 
-	<h2>Lines</h2>
+	<h2 class="mt-6 mb-3 text-lg font-semibold">Lines</h2>
 	<DataTable
 		columns={[
 			{ key: 'description', label: 'Description', cell: descCell },
@@ -266,7 +266,7 @@
 		rowKey={(line) => line.id}
 	/>
 
-	<dl class="totals">
+	<dl class="my-6 flex max-w-xs flex-col gap-1 *:flex *:justify-between [&_div:nth-child(3)]:font-semibold">
 		<div><dt>Subtotal</dt><dd><Money cents={inv.subtotal} /></dd></div>
 		<div><dt>GST</dt><dd><Money cents={inv.gst_total} /></dd></div>
 		<div><dt>Total</dt><dd><Money cents={inv.total} /></dd></div>
@@ -275,16 +275,16 @@
 	</dl>
 
 	{#if inv.pay_options.length > 0}
-		<p class="pay-options">Pay options: {inv.pay_options.join(', ')}</p>
+		<p class="text-sm text-base-content/70">Pay options: {inv.pay_options.join(', ')}</p>
 	{/if}
 
 	{#if inv.provider_url}
-		<p><a href={inv.provider_url} target="_blank" rel="noopener noreferrer">Pay online</a></p>
+		<p class="my-2"><a class="link link-primary" href={inv.provider_url} target="_blank" rel="noopener noreferrer">Pay online</a></p>
 	{/if}
 
-	<h2>Payments</h2>
+	<h2 class="mt-6 mb-3 text-lg font-semibold">Payments</h2>
 	{#if inv.payments.length === 0}
-		<p class="no-payments">No payments recorded.</p>
+		<p class="text-base-content/70">No payments recorded.</p>
 	{:else}
 		<DataTable
 			columns={[
@@ -309,53 +309,3 @@
 {#if actionError}
 	<Toast message={actionError} tone="danger" onDismiss={() => (actionError = '')} />
 {/if}
-
-<style>
-	.contact {
-		color: var(--text-muted);
-		margin: 0 0 var(--space-2);
-	}
-	.dates {
-		display: flex;
-		gap: var(--space-4);
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-		margin-bottom: var(--space-4);
-	}
-	.actions-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-3);
-		margin-bottom: var(--space-6);
-	}
-	.refreshing {
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-		margin: 0 0 var(--space-3);
-	}
-	.totals {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-		max-width: 20rem;
-		margin-bottom: var(--space-6);
-	}
-	.totals div {
-		display: flex;
-		justify-content: space-between;
-	}
-	.totals dt,
-	.totals dd {
-		margin: 0;
-	}
-	.pay-options {
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-	}
-	.no-payments {
-		color: var(--text-muted);
-	}
-	h2 {
-		margin-top: var(--space-6);
-	}
-</style>

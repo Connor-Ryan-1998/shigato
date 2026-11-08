@@ -117,15 +117,16 @@
 	}
 </script>
 
-<div class="login-page">
-	<div class="forms">
-	<form onsubmit={submit}>
-		<h1>Sign in</h1>
+<div class="flex min-h-screen items-center justify-center bg-base-200 p-4">
+	<div class="flex w-full max-w-sm flex-col gap-4">
+	<form onsubmit={submit} class="card-body card bg-base-100 shadow">
+		<h1 class="card-title text-2xl">Sign in</h1>
 		<Field label="Email" id="email">
-			<input id="email" type="email" bind:value={email} required autocomplete="username" />
+			<input class="input w-full" id="email" type="email" bind:value={email} required autocomplete="username" />
 		</Field>
 		<Field label="Password" id="password">
 			<input
+				class="input w-full"
 				id="password"
 				type="password"
 				bind:value={password}
@@ -134,21 +135,23 @@
 			/>
 		</Field>
 		{#if error}
-			<p class="error" role="alert">{error}</p>
+			<p class="alert alert-error alert-soft" role="alert">{error}</p>
 		{/if}
 		<Button type="submit" disabled={submitting}>Sign in</Button>
 		{#if sso}
-			<p class="sso"><a href={oidcStartUrl()}>Sign in with SSO</a></p>
+			<div class="divider my-0">or</div>
+			<a class="btn btn-outline" href={oidcStartUrl()}>Sign in with SSO</a>
 		{/if}
 	</form>
 
-	<form class="magic-form" onsubmit={submitMagic}>
-		<h2>Tenant or client?</h2>
+	<form class="card-body card bg-base-100 shadow" onsubmit={submitMagic}>
+		<h2 class="card-title">Tenant or client?</h2>
 		{#if magicSent}
-			<p role="status">If that's a shigoto account, check your inbox for a sign-in link.</p>
+			<p role="status" class="alert alert-success alert-soft">If that's a shigoto account, check your inbox for a sign-in link.</p>
 		{:else}
 			<Field label="Your email" id="magic-email">
 				<input
+					class="input w-full"
 					id="magic-email"
 					type="email"
 					bind:value={magicEmail}
@@ -157,7 +160,7 @@
 				/>
 			</Field>
 			{#if magicError}
-				<p class="error" role="alert">{magicError}</p>
+				<p class="alert alert-error alert-soft" role="alert">{magicError}</p>
 			{/if}
 			<Button type="submit" variant="secondary" disabled={magicSubmitting}>
 				Email me a sign-in link
@@ -166,44 +169,3 @@
 	</form>
 	</div>
 </div>
-
-<style>
-	.login-page {
-		display: flex;
-		justify-content: center;
-		align-items: center;
-		min-height: 100vh;
-		padding: var(--space-4);
-	}
-	.forms {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-		width: 100%;
-		max-width: 24rem;
-	}
-	form {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-		width: 100%;
-		max-width: 24rem;
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-lg);
-		padding: var(--space-6);
-		box-shadow: var(--shadow-md);
-	}
-	.error {
-		margin: 0;
-		color: var(--danger);
-	}
-	.sso {
-		margin: 0;
-		text-align: center;
-	}
-	.magic-form h2 {
-		margin: 0;
-		font-size: var(--text-lg);
-	}
-</style>

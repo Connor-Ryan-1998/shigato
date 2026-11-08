@@ -140,7 +140,7 @@
 	{#if loading || loadedOrg !== org || loadedKind !== filter}
 		<p role="status">Loading contacts…</p>
 	{:else if loadError}
-		<p role="alert" class="error">{loadError}</p>
+		<p role="alert" class="alert alert-error alert-soft mb-2">{loadError}</p>
 		<Button onclick={() => org && load(org, filter)}>Retry</Button>
 	{:else if contacts.length === 0}
 		<p>No contacts found.</p>
@@ -149,35 +149,29 @@
 	{/if}
 
 	{#if canWrite && formOrg === org}
-		<section>
-			<h2>{editingID === null ? 'New contact' : 'Edit contact'}</h2>
+		<section class="card mt-6 bg-base-100 shadow-sm">
+			<div class="card-body">
+			<h2 class="card-title">{editingID === null ? 'New contact' : 'Edit contact'}</h2>
 			{#if editingID !== null}
 				<p>Kind: {draft.kind}. Contact kind cannot be changed.</p>
 				<p>Changing contact details does not transfer or revoke portal access, change an existing user's login email, or update existing Stripe customer or invoice details.</p>
 			{/if}
-			{#if createError}<p role="alert" class="error">{createError}</p>{/if}
-			{#if success}<p role="status">{success}</p>{/if}
-			<form onsubmit={create}>
-				<fieldset disabled={creating}>
-					<legend>Contact details</legend>
+			{#if createError}<p role="alert" class="alert alert-error alert-soft">{createError}</p>{/if}
+			{#if success}<p role="status" class="alert alert-success alert-soft">{success}</p>{/if}
+			<form onsubmit={create} class="grid max-w-2xl gap-4">
+				<fieldset disabled={creating} class="fieldset grid gap-3 rounded-box border border-base-300 p-4">
+					<legend class="fieldset-legend">Contact details</legend>
 					{#if editingID === null}<Field label="Contact kind" id="contact-kind"><Select id="contact-kind" bind:value={draft.kind} options={kinds} /></Field>{/if}
-					<Field label="Name" id="contact-name"><input id="contact-name" bind:value={draft.name} required /></Field>
-					<Field label="Email" id="contact-email"><input id="contact-email" type="email" bind:value={draft.email} /></Field>
-					<Field label="Phone" id="contact-phone"><input id="contact-phone" type="tel" bind:value={draft.phone} /></Field>
-					<Field label="Company name" id="contact-company"><input id="contact-company" bind:value={draft.company_name} /></Field>
-					<Field label="ABN" id="contact-abn"><input id="contact-abn" bind:value={draft.abn} /></Field>
+					<Field label="Name" id="contact-name"><input class="input w-full" id="contact-name" bind:value={draft.name} required /></Field>
+					<Field label="Email" id="contact-email"><input class="input w-full" id="contact-email" type="email" bind:value={draft.email} /></Field>
+					<Field label="Phone" id="contact-phone"><input class="input w-full" id="contact-phone" type="tel" bind:value={draft.phone} /></Field>
+					<Field label="Company name" id="contact-company"><input class="input w-full" id="contact-company" bind:value={draft.company_name} /></Field>
+					<Field label="ABN" id="contact-abn"><input class="input w-full" id="contact-abn" bind:value={draft.abn} /></Field>
 				</fieldset>
 				<Button type="submit" disabled={creating}>{creating ? editingID === null ? 'Creating…' : 'Saving…' : editingID === null ? 'Create contact' : 'Save contact'}</Button>
 				{#if editingID !== null}<Button variant="secondary" disabled={creating} onclick={cancelEdit}>Cancel editing</Button>{/if}
 			</form>
+			</div>
 		</section>
 	{/if}
 {/if}
-
-<style>
-	section { margin-top: var(--space-6); }
-	form { display: grid; gap: var(--space-4); max-width: 40rem; }
-	fieldset { display: grid; gap: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
-	legend { font-weight: 600; }
-	.error { color: var(--danger); }
-</style>

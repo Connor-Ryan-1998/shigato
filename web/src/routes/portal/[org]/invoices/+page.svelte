@@ -62,7 +62,7 @@
 </script>
 
 {#snippet numberCell(inv: InvoiceListItem)}
-	<a href={`/portal/${page.params.org}/invoices/${inv.id}`}>
+	<a class="link link-primary" href={`/portal/${page.params.org}/invoices/${inv.id}`}>
 		{inv.number !== null ? `#${inv.number}` : 'Invoice'}
 	</a>
 {/snippet}

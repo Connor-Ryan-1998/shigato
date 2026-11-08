@@ -18,18 +18,9 @@
 	}
 </script>
 
-<div class="panel">
+<div class="flex flex-col items-start gap-3">
 	<Field label="Stripe payout reference" id="match-payout-ref">
-		<input id="match-payout-ref" bind:value={payoutRef} />
+		<input class="input w-full" id="match-payout-ref" bind:value={payoutRef} />
 	</Field>
 	<Button disabled={busy || payoutRef.trim() === ''} onclick={submit}>Match payout</Button>
 </div>
-
-<style>
-	.panel {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		align-items: flex-start;
-	}
-</style>

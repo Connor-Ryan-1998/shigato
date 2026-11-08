@@ -37,7 +37,7 @@
 {#snippet dateCell(line: BankLine)}<DateText iso={line.posted_on} />{/snippet}
 {#snippet descCell(line: BankLine)}{line.description}{/snippet}
 {#snippet amountCell(line: BankLine)}
-	<span class="amount" class:credit={line.amount > 0} class:debit={line.amount < 0}>
+	<span class="tabular-nums" class:text-success={line.amount > 0} class:text-error={line.amount < 0}>
 		{line.amount > 0 ? '+' : line.amount < 0 ? '−' : ''}<Money cents={Math.abs(line.amount)} />
 	</span>
 {/snippet}
@@ -45,7 +45,7 @@
 	<StatusBadge status={statusLabel(line)} tone={STATUS_TONE[line.status] ?? 'info'} />
 {/snippet}
 {#snippet rowButtonCell(line: BankLine)}
-	<button type="button" class="row-link" onclick={() => onSelect(line)}>View</button>
+	<button type="button" class="btn btn-outline btn-sm" onclick={() => onSelect(line)}>View</button>
 {/snippet}
 
 <DataTable
@@ -59,27 +59,3 @@
 	rows={lines}
 	rowKey={(line) => line.id}
 />
-
-<style>
-	.amount {
-		font-variant-numeric: tabular-nums;
-	}
-	.credit {
-		color: var(--success);
-	}
-	.debit {
-		color: var(--danger);
-	}
-	.row-link {
-		background: none;
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		padding: var(--space-1) var(--space-3);
-		cursor: pointer;
-		color: var(--text);
-		font: inherit;
-	}
-	.row-link:hover {
-		background: var(--surface-raised);
-	}
-</style>

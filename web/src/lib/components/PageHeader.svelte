@@ -10,24 +10,9 @@
 	} = $props();
 </script>
 
-<header class="page-header">
-	<h1>{title}</h1>
+<header class="mb-6 flex flex-wrap items-center justify-between gap-4">
+	<h1 class="m-0 text-2xl font-bold">{title}</h1>
 	{#if actions}
-		<div class="actions">{@render actions()}</div>
+		<div class="flex flex-wrap gap-2">{@render actions()}</div>
 	{/if}
 </header>
-
-<style>
-	.page-header {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-4);
-		margin-bottom: var(--space-6);
-	}
-	h1 {
-		font-size: var(--text-xl);
-		margin: 0;
-	}
-</style>

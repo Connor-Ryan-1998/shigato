@@ -220,15 +220,15 @@
 	{/snippet}
 </PageHeader>
 
-<nav class="tabs" aria-label="Bank line status">
+<nav class="tabs tabs-border mb-4" aria-label="Bank line status">
 	{#each TABS as tab (tab.value)}
-		<a href={tabHref(tab.value)} class="tab" aria-current={activeTab === tab.value ? 'page' : undefined}>
+		<a href={tabHref(tab.value)} class={['tab', activeTab === tab.value && 'tab-active']} aria-current={activeTab === tab.value ? 'page' : undefined}>
 			{tab.label}
 		</a>
 	{/each}
 </nav>
 
-<div class="filters">
+<div class="mb-4 flex flex-wrap gap-4 *:min-w-0 *:flex-[1_1_10rem] [&_select]:w-full [&_select]:min-w-0">
 	<Field label="Account" id="account-filter">
 		<Select
 			id="account-filter"
@@ -242,6 +242,7 @@
 	</Field>
 	<Field label="From" id="from-filter">
 		<input
+			class="input w-full"
 			id="from-filter"
 			type="date"
 			value={fromFilter}
@@ -250,6 +251,7 @@
 	</Field>
 	<Field label="To" id="to-filter">
 		<input
+			class="input w-full"
 			id="to-filter"
 			type="date"
 			value={toFilter}
@@ -268,17 +270,17 @@
 	</EmptyState>
 {:else}
 	{#if refreshing}
-		<p class="refreshing" aria-live="polite">Refreshing…</p>
+		<p class="mb-3 text-sm text-base-content/70" aria-live="polite">Refreshing…</p>
 	{:else if errorMessage}
-		<p class="refresh-error" role="alert">{errorMessage}</p>
+		<p class="alert alert-error alert-soft mb-3" role="alert">{errorMessage}</p>
 	{/if}
 	{#if lines.length === 0}
 		<EmptyState title="No bank lines in this view" />
 	{:else}
 		<BankLineTable {lines} onSelect={selectLine} />
-		<div class="pagination">
-			<p>{offset + 1}–{Math.min(offset + lines.length, total)} of {total}</p>
-			<div class="pagination-buttons">
+		<div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+			<p class="text-sm text-base-content/70">{offset + 1}–{Math.min(offset + lines.length, total)} of {total}</p>
+			<div class="flex gap-2">
 				<Button variant="secondary" disabled={offset === 0} onclick={() => gotoOffset(Math.max(0, offset - PAGE_SIZE))}>
 					Previous
 				</Button>
@@ -305,70 +307,3 @@
 {#if toastMessage}
 	<Toast message={toastMessage} tone={toastTone} onDismiss={() => (toastMessage = '')} />
 {/if}
-
-<style>
-	.tabs {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		margin-bottom: var(--space-4);
-		border-bottom: 1px solid var(--border);
-	}
-	.tab {
-		padding: var(--space-2) var(--space-3);
-		color: var(--text-muted);
-		text-decoration: none;
-		border-bottom: 2px solid transparent;
-	}
-	.tab:hover {
-		color: var(--text);
-	}
-	.tab[aria-current='page'] {
-		color: var(--text);
-		font-weight: 600;
-		border-bottom-color: var(--accent);
-	}
-	.filters {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4);
-		margin-bottom: var(--space-4);
-	}
-	/* A native <select>'s intrinsic width follows its longest option text
-	   (an account name can be long), which can overflow the viewport at
-	   360px. Give each filter field a shrinkable flex basis and force the
-	   select to fill it, rather than its own content width - the same fix
-	   as the drawer's ignore row. */
-	.filters :global(.field) {
-		flex: 1 1 10rem;
-		min-width: 0;
-	}
-	.filters :global(select) {
-		width: 100%;
-		min-width: 0;
-	}
-	.refreshing {
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-		margin: 0 0 var(--space-3);
-	}
-	.refresh-error {
-		margin: 0 0 var(--space-3);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-	.pagination {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		margin-top: var(--space-4);
-	}
-	.pagination-buttons {
-		display: flex;
-		gap: var(--space-2);
-	}
-</style>

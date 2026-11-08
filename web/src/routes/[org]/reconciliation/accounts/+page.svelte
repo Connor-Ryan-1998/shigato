@@ -177,10 +177,10 @@
 {:else if accounts.length === 0}
 	<EmptyState title="No bank accounts yet" description="Add one to start importing statements." />
 {:else}
-	<ul class="account-list">
+	<ul class="list rounded-box bg-base-100 shadow-sm">
 		{#each accounts as account (account.id)}
-			<li>
-				<span class="account-name">{account.name}</span>
+			<li class="list-row items-center">
+				<span class="list-col-grow font-semibold">{account.name}</span>
 				<Button variant="secondary" onclick={() => openImport(account)}>Import CSV</Button>
 			</li>
 		{/each}
@@ -188,9 +188,9 @@
 {/if}
 
 <Dialog bind:open={addOpen} title="Add bank account">
-	<div class="fields">
+	<div class="mb-4 flex flex-col gap-3">
 		<Field label="Name" id="account-name">
-			<input id="account-name" bind:value={newName} />
+			<input class="input w-full" id="account-name" bind:value={newName} />
 		</Field>
 		<Field label="CSV format" id="mapping-kind">
 			<Select id="mapping-kind" bind:value={mappingKind} options={MAPPING_KIND_OPTIONS} />
@@ -198,16 +198,16 @@
 
 		{#if mappingKind === 'custom'}
 			<Field label="Has header row?" id="has-header">
-				<input id="has-header" type="checkbox" bind:checked={hasHeader} />
+				<input class="checkbox" id="has-header" type="checkbox" bind:checked={hasHeader} />
 			</Field>
 			<Field label="Date column (0-based)" id="date-column">
-				<input id="date-column" inputmode="numeric" bind:value={dateColumn} />
+				<input class="input" id="date-column" inputmode="numeric" bind:value={dateColumn} />
 			</Field>
 			<Field label="Date format" id="date-format">
 				<Select id="date-format" bind:value={dateFormat} options={DATE_FORMAT_OPTIONS} />
 			</Field>
 			<Field label="Description column (0-based)" id="description-column">
-				<input id="description-column" inputmode="numeric" bind:value={descriptionColumn} />
+				<input class="input" id="description-column" inputmode="numeric" bind:value={descriptionColumn} />
 			</Field>
 			<Field label="Amount style" id="amount-style">
 				<Select
@@ -221,22 +221,22 @@
 			</Field>
 			{#if amountStyle === 'single'}
 				<Field label="Amount column (0-based)" id="amount-column">
-					<input id="amount-column" inputmode="numeric" bind:value={amountColumn} />
+					<input class="input" id="amount-column" inputmode="numeric" bind:value={amountColumn} />
 				</Field>
 			{:else}
 				<Field label="Debit column (0-based)" id="debit-column">
-					<input id="debit-column" inputmode="numeric" bind:value={debitColumn} />
+					<input class="input" id="debit-column" inputmode="numeric" bind:value={debitColumn} />
 				</Field>
 				<Field label="Credit column (0-based)" id="credit-column">
-					<input id="credit-column" inputmode="numeric" bind:value={creditColumn} />
+					<input class="input" id="credit-column" inputmode="numeric" bind:value={creditColumn} />
 				</Field>
 			{/if}
 		{/if}
 	</div>
 	{#if addError}
-		<p class="dialog-error" role="alert">{addError}</p>
+		<p class="alert alert-error alert-soft mb-4" role="alert">{addError}</p>
 	{/if}
-	<div class="dialog-actions">
+	<div class="modal-action">
 		<Button variant="secondary" disabled={addBusy} onclick={() => (addOpen = false)}>Cancel</Button>
 		<Button disabled={addBusy} onclick={createAccount}>Create</Button>
 	</div>
@@ -250,44 +250,3 @@
 		accountName={importAccount.name}
 	/>
 {/if}
-
-<style>
-	.account-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-	.account-list li {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-	}
-	.account-name {
-		font-weight: 600;
-	}
-	.fields {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		margin-bottom: var(--space-4);
-	}
-	.dialog-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-3);
-	}
-	.dialog-error {
-		margin: 0 0 var(--space-4);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-		color: var(--danger);
-	}
-</style>

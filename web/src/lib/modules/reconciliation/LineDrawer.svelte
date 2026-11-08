@@ -224,26 +224,26 @@
 
 <Drawer bind:open label="Bank line details" side="right" width="28rem">
 	{#if line}
-		<div class="drawer-content">
-			<h2>
+		<div class="flex flex-col gap-4">
+			<h2 class="m-0 text-lg font-bold">
 				<DateText iso={line.posted_on} /> — {line.description}
 			</h2>
-			<p class="amount">
+			<p class="m-0 font-semibold tabular-nums">
 				<Money cents={line.amount} />
 				{line.amount > 0 ? '(in)' : '(out)'}
 			</p>
 
 			{#if line.status === 'unmatched'}
 				<section>
-					<h3>Suggestions</h3>
+					<h3 class="m-0 mb-2 text-sm text-base-content/70 uppercase">Suggestions</h3>
 					{#if suggestionsError}
-						<p class="error" role="alert">{suggestionsError}</p>
+						<p class="alert alert-error alert-soft" role="alert">{suggestionsError}</p>
 					{:else if suggestions.length === 0}
-						<p class="muted">No suggestions.</p>
+						<p class="text-base-content/70">No suggestions.</p>
 					{:else}
-						<ul class="suggestion-list">
+						<ul class="m-0 flex list-none flex-col gap-2 p-0">
 							{#each suggestions as s, i (i)}
-								<li>
+								<li class="flex items-center justify-between gap-3 rounded-box border border-base-300 px-3 py-2 text-sm">
 									<span>
 										{s.kind} — {s.reason} (score {s.score})
 									</span>
@@ -255,27 +255,27 @@
 						</ul>
 					{/if}
 					{#if matchError}
-						<p class="error" role="alert">{matchError}</p>
+						<p class="alert alert-error alert-soft" role="alert">{matchError}</p>
 					{/if}
 				</section>
 
 				{#if line.amount > 0}
 					<section>
-						<h3>Match invoice</h3>
+						<h3 class="m-0 mb-2 text-sm text-base-content/70 uppercase">Match invoice</h3>
 						<MatchInvoicePanel {org} busy={actionBusy} onMatch={matchInvoice} />
 					</section>
 					<section>
-						<h3>Match Stripe payout</h3>
+						<h3 class="m-0 mb-2 text-sm text-base-content/70 uppercase">Match Stripe payout</h3>
 						<MatchPayoutPanel busy={actionBusy} onMatch={matchPayout} />
 					</section>
 				{:else}
 					<section>
-						<h3>Create expense</h3>
+						<h3 class="m-0 mb-2 text-sm text-base-content/70 uppercase">Create expense</h3>
 						{#if expenseWarnings.length > 0}
-							<p class="muted">Expense created.</p>
-							<ul class="warning-list">
+							<p class="text-base-content/70">Expense created.</p>
+							<ul class="m-0 mb-3 pl-5">
 								{#each expenseWarnings as w, i (i)}
-									<li class="warning">{w}</li>
+									<li class="text-warning">{w}</li>
 								{/each}
 							</ul>
 							<Button variant="secondary" onclick={() => (open = false)}>Done</Button>
@@ -299,15 +299,15 @@
 				{/if}
 
 				<section>
-					<h3>Ignore</h3>
-					<div class="ignore-row">
+					<h3 class="m-0 mb-2 text-sm text-base-content/70 uppercase">Ignore</h3>
+					<div class="flex flex-wrap items-center gap-3 [&_select]:min-w-0 [&_select]:flex-[1_1_12rem]">
 						<Select id="ignore-reason" bind:value={ignoreReason} options={IGNORE_REASON_OPTIONS} />
 						<Button variant="secondary" disabled={actionBusy} onclick={ignoreLine}>
 							Ignore line
 						</Button>
 					</div>
 					{#if ignoreError}
-						<p class="error" role="alert">{ignoreError}</p>
+						<p class="alert alert-error alert-soft" role="alert">{ignoreError}</p>
 					{/if}
 				</section>
 			{:else}
@@ -318,81 +318,10 @@
 					</p>
 					<Button variant="secondary" disabled={actionBusy} onclick={unmatchLine}>Unmatch</Button>
 					{#if unmatchError}
-						<p class="error" role="alert">{unmatchError}</p>
+						<p class="alert alert-error alert-soft" role="alert">{unmatchError}</p>
 					{/if}
 				</section>
 			{/if}
 		</div>
 	{/if}
 </Drawer>
-
-<style>
-	.drawer-content {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-	h2 {
-		font-size: var(--text-lg);
-		margin: 0;
-	}
-	.amount {
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-		margin: 0;
-	}
-	h3 {
-		margin: 0 0 var(--space-2);
-		font-size: var(--text-sm);
-		text-transform: uppercase;
-		color: var(--text-muted);
-	}
-	.suggestion-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-	.suggestion-list li {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		font-size: var(--text-sm);
-	}
-	.ignore-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-3);
-		align-items: center;
-	}
-	/* Select renders its own <select>, outside this component's scope - a
-	   native <select>'s intrinsic width follows its longest option text
-	   ("Transfer between own accounts"), which can overflow a narrow
-	   drawer; force it to the row's own width instead. */
-	.ignore-row :global(select) {
-		flex: 1 1 12rem;
-		min-width: 0;
-	}
-	.muted {
-		color: var(--text-muted);
-	}
-	.error {
-		color: var(--danger);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--danger-subtle);
-	}
-	.warning-list {
-		margin: 0 0 var(--space-3);
-		padding-left: var(--space-5);
-	}
-	.warning {
-		color: var(--warning);
-	}
-</style>

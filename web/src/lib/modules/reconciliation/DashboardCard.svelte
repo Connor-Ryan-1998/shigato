@@ -18,62 +18,22 @@
 	let { data, org }: { data: ReconciliationDashboard; org: string } = $props();
 </script>
 
-<a class="card" href={`/${org}/reconciliation`}>
-	<h2>Reconciliation</h2>
-	<dl>
-		<div class="row">
-			<dt>Unmatched lines</dt>
-			<dd>{data.unmatched_count}</dd>
+<a class="card card-border bg-base-100 p-4 shadow-sm hover:bg-base-200" href={`/${org}/reconciliation`}>
+	<h2 class="mb-3 text-lg font-bold">Reconciliation</h2>
+	<dl class="m-0">
+		<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
+			<dt class="text-base-content/70">Unmatched lines</dt>
+			<dd class="m-0 font-semibold tabular-nums">{data.unmatched_count}</dd>
 		</div>
 		{#if data.oldest_unmatched_on}
-			<div class="row">
-				<dt>Oldest unmatched</dt>
-				<dd><DateText iso={data.oldest_unmatched_on} /></dd>
+			<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
+				<dt class="text-base-content/70">Oldest unmatched</dt>
+				<dd class="m-0 font-semibold tabular-nums"><DateText iso={data.oldest_unmatched_on} /></dd>
 			</div>
 		{/if}
-		<div class="row">
-			<dt>Unmatched in / out</dt>
-			<dd><Money cents={data.unmatched_in} /> / <Money cents={data.unmatched_out} /></dd>
+		<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
+			<dt class="text-base-content/70">Unmatched in / out</dt>
+			<dd class="m-0 font-semibold tabular-nums"><Money cents={data.unmatched_in} /> / <Money cents={data.unmatched_out} /></dd>
 		</div>
 	</dl>
 </a>
-
-<style>
-	.card {
-		display: block;
-		padding: var(--space-4);
-		border-radius: var(--radius-lg);
-		background: var(--surface);
-		border: 1px solid var(--border);
-		color: inherit;
-		text-decoration: none;
-	}
-	.card:hover {
-		background: var(--surface-raised);
-	}
-	h2 {
-		margin: 0 0 var(--space-3);
-		font-size: var(--text-lg);
-	}
-	dl {
-		margin: 0;
-	}
-	.row {
-		display: flex;
-		justify-content: space-between;
-		gap: var(--space-4);
-		padding: var(--space-2) 0;
-		border-top: 1px solid var(--border);
-	}
-	.row:first-child {
-		border-top: none;
-	}
-	dt {
-		color: var(--text-muted);
-	}
-	dd {
-		margin: 0;
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-	}
-</style>

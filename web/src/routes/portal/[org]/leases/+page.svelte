@@ -67,52 +67,24 @@
 {:else if leases.length === 0}
 	<EmptyState title="No leases yet" />
 {:else}
-	<ul class="lease-list">
+	<ul class="flex flex-col gap-4">
 		{#each leases as lease (lease.id)}
-			<li class="lease-card">
-				<p class="address">{lease.property_address}</p>
-				<p class="rent"><Money cents={lease.rent_amount} /> {lease.frequency}</p>
+			<li class="card bg-base-100 shadow-sm">
+				<div class="card-body gap-1">
+				<p class="font-semibold">{lease.property_address}</p>
+				<p class="text-base-content/70"><Money cents={lease.rent_amount} /> {lease.frequency}</p>
 				{#if lease.next_due}
-					<p class="next-due">
+					<p class="text-base-content/70">
 						Next due <DateText iso={lease.next_due.start} />&ndash;<DateText
 							iso={lease.next_due.end}
 						/>: <Money cents={lease.next_due.amount_due} />
 					</p>
 				{/if}
 				{#if lease.arrears > 0}
-					<p class="arrears">You're <Money cents={lease.arrears} /> behind</p>
+					<p class="mt-1 font-semibold text-error">You're <Money cents={lease.arrears} /> behind</p>
 				{/if}
+				</div>
 			</li>
 		{/each}
 	</ul>
 {/if}
-
-<style>
-	.lease-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-	.lease-card {
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		padding: var(--space-4);
-	}
-	.address {
-		font-weight: 600;
-		margin: 0 0 var(--space-2);
-	}
-	.rent,
-	.next-due {
-		margin: 0 0 var(--space-1);
-		color: var(--text-muted);
-	}
-	.arrears {
-		margin: var(--space-2) 0 0;
-		color: var(--danger);
-		font-weight: 600;
-	}
-</style>

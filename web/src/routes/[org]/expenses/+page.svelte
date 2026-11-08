@@ -141,7 +141,7 @@
 </script>
 
 <PageHeader title="Expenses" />
-{#snippet descriptionCell(expense: Expense)}<a href={`/${org}/expenses/${expense.id}`}>{expense.description}</a>{/snippet}
+{#snippet descriptionCell(expense: Expense)}<a class="link" href={`/${org}/expenses/${expense.id}`}>{expense.description}</a>{/snippet}
 {#snippet totalCell(expense: Expense)}{money(expense.total)}{/snippet}
 {#snippet supplierCell(expense: Expense)}{expense.supplier_contact_id ? (optionsOrg === org ? suppliers.find((s) => s.id === expense.supplier_contact_id)?.name : undefined) ?? `Supplier #${expense.supplier_contact_id}` : 'No supplier'}{/snippet}
 {#snippet statusCell(expense: Expense)}{expense.bank_line_id ? 'Matched to bank' : 'Not matched to bank'}{/snippet}
@@ -149,14 +149,14 @@
 {#if !canRead}
 	<p role="alert">Expenses are unavailable for this organisation.</p>
 {:else}
-	<div class="filters">
-		<Field label="From" id="expenses-from"><input id="expenses-from" type="date" bind:value={from} /></Field>
-		<Field label="To" id="expenses-to"><input id="expenses-to" type="date" bind:value={to} /></Field>
+	<div class="mb-4 flex flex-wrap gap-3">
+		<Field label="From" id="expenses-from"><input class="input" id="expenses-from" type="date" bind:value={from} /></Field>
+		<Field label="To" id="expenses-to"><input class="input" id="expenses-to" type="date" bind:value={to} /></Field>
 	</div>
 	{#if loadedKey !== listKey}
 		<p role="status">Loading expenses…</p>
 	{:else if listError}
-		<p role="alert">{listError}</p>
+		<p role="alert" class="alert alert-error alert-soft mb-2">{listError}</p>
 		<Button onclick={() => org && load(org, from, to)}>Retry expenses</Button>
 	{:else if expenses.length === 0}
 		<p>No expenses found.</p>
@@ -168,15 +168,16 @@
 		]} rows={expenses} rowKey={(expense) => expense.id} />
 	{/if}
 	{#if canWrite && formOrg === org}
-		<section>
-			<h2>New expense</h2>
+		<section class="card mt-6 bg-base-100 shadow-sm">
+			<div class="card-body">
+			<h2 class="card-title">New expense</h2>
 			<p>Record a paid expense without a bank import. If it appears in a later bank import, match the existing expense rather than creating it again.</p>
 			{#if savedID !== null}
-				<p role="status">Expense saved. <a href={`/${org}/expenses/${savedID}`}>View saved expense</a></p>
-				{#each warnings as warning}<p role="status">{warning}</p>{/each}
+				<p role="status" class="alert alert-success alert-soft">Expense saved. <a class="link" href={`/${org}/expenses/${savedID}`}>View saved expense</a></p>
+				{#each warnings as warning}<p role="status" class="alert alert-warning alert-soft">{warning}</p>{/each}
 			{/if}
 			{#if optionsError}
-				<p role="alert">{optionsError}</p>
+				<p role="alert" class="alert alert-error alert-soft">{optionsError}</p>
 				<Button onclick={() => org && loadOptions(org)}>Retry expense options</Button>
 			{:else if optionsOrg !== org}
 				<p role="status">Loading expense options…</p>
@@ -187,11 +188,7 @@
 					<ExpenseForm lineDate={today} {categories} {suppliers} {properties} {projects} busy={saving} error={saveError || undefined} onSubmit={save} onReceiptUpload={uploadReceipt} />
 				{/key}
 			{/if}
+			</div>
 		</section>
 	{/if}
 {/if}
-
-<style>
-	.filters { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-4); }
-	section { margin-top: var(--space-6); }
-</style>

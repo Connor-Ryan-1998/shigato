@@ -44,24 +44,15 @@
 	});
 </script>
 
-<div class="magic-page">
+<div class="flex min-h-screen items-center justify-center bg-base-200 p-4">
+	<div class="card w-full max-w-sm bg-base-100 shadow">
+		<div class="card-body items-center text-center">
 	{#if status === 'verifying'}
 		<p aria-live="polite">Signing you in…</p>
 	{:else}
-		<p role="alert">{errorMessage}</p>
-		<p><a href="/login">Request a new link</a></p>
+		<p role="alert" class="alert alert-error alert-soft">{errorMessage}</p>
+		<p><a class="link link-primary" href="/login">Request a new link</a></p>
 	{/if}
+		</div>
+	</div>
 </div>
-
-<style>
-	.magic-page {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-3);
-		min-height: 100vh;
-		padding: var(--space-4);
-		text-align: center;
-	}
-</style>

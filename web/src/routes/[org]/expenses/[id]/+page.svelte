@@ -71,7 +71,7 @@
 </script>
 
 <PageHeader title={`Expense ${id}`} />
-<p><a href={`/${org}/expenses`}>Back to expenses</a></p>
+<p class="mb-4"><a class="link" href={`/${org}/expenses`}>Back to expenses</a></p>
 {#snippet categoryCell(line: ExpenseLine)}{label(categories, line.category_id, 'Category')}{/snippet}
 {#snippet amountCell(line: ExpenseLine)}{money(line.amount)}{/snippet}
 {#snippet gstCell(line: ExpenseLine)}{money(line.gst_amount)}{/snippet}
@@ -83,26 +83,26 @@
 {:else if loadedKey !== key}
 	<p role="status">Loading expense…</p>
 {:else if error}
-	<p role="alert">{error}</p>
+	<p role="alert" class="alert alert-error alert-soft mb-2">{error}</p>
 	<Button onclick={() => org && id && load(org, id)}>Retry expense</Button>
 {:else if expense}
-	<h2>{expense.description}</h2>
-	<dl>
+	<h2 class="mb-2 text-lg font-semibold">{expense.description}</h2>
+	<dl class="mb-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 [&_dt]:font-semibold [&_dt]:text-base-content/70">
 		<dt>Spent on</dt><dd>{expense.spent_on}</dd>
 		<dt>Supplier</dt><dd>{expense.supplier_contact_id ? label(suppliers, expense.supplier_contact_id, 'Supplier') : 'No supplier'}</dd>
 		<dt>Total</dt><dd>{money(expense.total)}</dd>
 		<dt>Bank match</dt><dd>{expense.bank_line_id ? `Matched to bank line ${expense.bank_line_id}` : 'Not matched to bank'}</dd>
 	</dl>
-	{#if lookupWarning}<p role="status">{lookupWarning}</p>{/if}
-	<h2>Category splits</h2>
+	{#if lookupWarning}<p role="status" class="alert alert-warning alert-soft mb-4">{lookupWarning}</p>{/if}
+	<h2 class="mb-2 text-lg font-semibold">Category splits</h2>
 	<DataTable columns={[
 		{ key: 'category', label: 'Category', cell: categoryCell }, { key: 'amount', label: 'Amount', cell: amountCell },
 		{ key: 'gst_code', label: 'GST code' }, { key: 'gst_amount', label: 'GST amount', cell: gstCell },
 		{ key: 'property', label: 'Property', cell: propertyCell }, { key: 'project', label: 'Project', cell: projectCell }
 	]} rows={expense.lines} rowKey={(line) => line.id} />
 	{#if expense.receipt_file_id}
-		<p><a href={`/api/v1/orgs/${org}/files/${expense.receipt_file_id}`} download>Download receipt</a></p>
+		<p class="mt-4"><a class="link link-primary" href={`/api/v1/orgs/${org}/files/${expense.receipt_file_id}`} download>Download receipt</a></p>
 	{:else}
-		<p>No receipt attached.</p>
+		<p class="mt-4 text-base-content/70">No receipt attached.</p>
 	{/if}
 {/if}

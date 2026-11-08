@@ -37,27 +37,9 @@
 	}
 </script>
 
-<dialog bind:this={dialogEl} onclose={handleClose} aria-labelledby={titleId}>
-	<h2 id={titleId}>{title}</h2>
-	{@render children()}
+<dialog bind:this={dialogEl} onclose={handleClose} aria-labelledby={titleId} class="modal">
+	<div class="modal-box">
+		<h2 id={titleId} class="mb-4 text-lg font-bold">{title}</h2>
+		{@render children()}
+	</div>
 </dialog>
-
-<style>
-	dialog {
-		border: 1px solid var(--border);
-		border-radius: var(--radius-lg);
-		background: var(--surface-raised);
-		color: var(--text);
-		padding: var(--space-6);
-		max-width: 32rem;
-		width: calc(100% - var(--space-8));
-		box-shadow: var(--shadow-lg);
-	}
-	dialog::backdrop {
-		background: rgb(0 0 0 / 0.5);
-	}
-	h2 {
-		margin: 0 0 var(--space-4);
-		font-size: var(--text-lg);
-	}
-</style>

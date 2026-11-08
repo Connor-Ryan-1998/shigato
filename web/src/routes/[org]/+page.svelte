@@ -70,12 +70,12 @@
 <PageHeader title="Dashboard" />
 
 {#if status === 'loading'}
-	<div class="skeleton" role="status" aria-live="polite">
-		<span class="visually-hidden">Loading dashboard…</span>
-		<div class="skeleton-tiles" aria-hidden="true">
-			<div class="skeleton-tile"></div>
-			<div class="skeleton-tile"></div>
-			<div class="skeleton-tile"></div>
+	<div role="status" aria-live="polite">
+		<span class="sr-only">Loading dashboard…</span>
+		<div class="grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-4" aria-hidden="true">
+			<div class="skeleton h-24"></div>
+			<div class="skeleton h-24"></div>
+			<div class="skeleton h-24"></div>
 		</div>
 	</div>
 {:else if status === 'error'}
@@ -89,56 +89,10 @@
 {:else if core}
 	<DashboardCore {core} org={page.params.org ?? ''} />
 	{#if cards.length > 0}
-		<div class="module-cards">
+		<div class="mt-4 grid grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-4">
 			{#each cards as { name, Component, data } (name)}
 				<Component {data} org={page.params.org ?? ''} />
 			{/each}
 		</div>
 	{/if}
 {/if}
-
-<style>
-	.visually-hidden {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		overflow: hidden;
-		clip: rect(0, 0, 0, 0);
-		white-space: nowrap;
-	}
-	.skeleton-tiles {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-		gap: var(--space-4);
-	}
-	.skeleton-tile {
-		height: 6rem;
-		border-radius: var(--radius-lg);
-		background: linear-gradient(
-			90deg,
-			var(--surface) 25%,
-			var(--surface-raised) 50%,
-			var(--surface) 75%
-		);
-		background-size: 200% 100%;
-		animation: shimmer 1.4s ease-in-out infinite;
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.skeleton-tile {
-			animation: none;
-		}
-	}
-	@keyframes shimmer {
-		0% {
-			background-position: 200% 0;
-		}
-		100% {
-			background-position: -200% 0;
-		}
-	}
-	.module-cards {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-		gap: var(--space-4);
-	}
-</style>

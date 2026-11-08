@@ -39,88 +39,36 @@
 	}
 </script>
 
-<div class="portal-shell">
-	<header class="topbar">
-		<span class="org-name">{currentOrg?.name ?? 'Portal'}</span>
+<div class="flex min-h-screen flex-col bg-base-200">
+	<header class="navbar flex-wrap gap-2 border-b border-base-300 bg-base-100 px-4">
+		<span class="hidden font-semibold min-[375px]:inline">{currentOrg?.name ?? 'Portal'}</span>
 		{#if org}
-			<nav aria-label="Portal" class="nav">
-				<a href={`/portal/${org}/invoices`}>Invoices</a>
+			<nav aria-label="Portal" class="flex gap-1">
+				<a class="btn btn-ghost btn-sm" href={`/portal/${org}/invoices`}>Invoices</a>
 				{#if currentOrg?.role === 'tenant'}
-					<a href={`/portal/${org}/leases`}>Leases</a>
+					<a class="btn btn-ghost btn-sm" href={`/portal/${org}/leases`}>Leases</a>
 				{/if}
 			</nav>
 		{/if}
-		<div class="topbar-actions">
+		<div class="ml-auto flex flex-wrap items-center gap-2">
 			{#if staffOrg}
-				<a href={`/${staffOrg.slug}`}>Back to {staffOrg.name}</a>
+				<a class="btn btn-ghost btn-sm" href={`/${staffOrg.slug}`}>Back to {staffOrg.name}</a>
 			{/if}
 			<button
 				type="button"
-				class="icon-button"
+				class="btn btn-ghost btn-sm"
 				onclick={() => theme.cycle()}
 				aria-label={`Theme: ${themeLabel} (click to change)`}
 			>
 				{themeLabel}
 			</button>
-			<button type="button" onclick={logout}>Logout</button>
+			<button type="button" class="btn btn-outline btn-sm" onclick={logout}>Logout</button>
 		</div>
 	</header>
 
-	<main id="main-content">
+	<main id="main-content" class="min-w-0 flex-1 px-4 py-6">
 		{#key org}
 			{@render children()}
 		{/key}
 	</main>
 </div>
-
-<style>
-	.portal-shell {
-		min-height: 100vh;
-		display: flex;
-		flex-direction: column;
-	}
-	.topbar {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: var(--space-2) var(--space-4);
-		padding: var(--space-3) var(--space-4);
-		background: var(--surface);
-		border-bottom: 1px solid var(--border);
-	}
-	.org-name {
-		font-weight: 600;
-	}
-	.nav {
-		display: flex;
-		gap: var(--space-3);
-	}
-	.nav a {
-		color: var(--text);
-	}
-	.topbar-actions {
-		margin-left: auto;
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-	}
-	.icon-button,
-	.topbar-actions button {
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		padding: var(--space-2) var(--space-3);
-		cursor: pointer;
-	}
-	main {
-		flex: 1;
-		padding: var(--space-6) var(--space-4);
-		min-width: 0;
-	}
-
-	@media (max-width: 374px) {
-		.org-name {
-			display: none;
-		}
-	}
-</style>

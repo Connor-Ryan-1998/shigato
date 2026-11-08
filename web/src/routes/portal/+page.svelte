@@ -44,29 +44,10 @@
 {:else if orgs.length === 0}
 	<EmptyState title="No organisations yet" />
 {:else}
-	<h1>Choose an organisation</h1>
-	<ul class="org-list">
+	<h1 class="mb-4 text-2xl font-bold">Choose an organisation</h1>
+	<ul class="menu w-full max-w-md rounded-box bg-base-100 shadow-sm">
 		{#each orgs as org (org.slug)}
 			<li><a href={`/portal/${org.slug}/invoices`}>{org.name}</a></li>
 		{/each}
 	</ul>
 {/if}
-
-<style>
-	.org-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-	.org-list a {
-		display: block;
-		padding: var(--space-3) var(--space-4);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		color: var(--text);
-		text-decoration: none;
-	}
-</style>

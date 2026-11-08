@@ -1,5 +1,6 @@
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
+import tailwindcss from '@tailwindcss/vite';
 import type { ProxyOptions } from 'vite';
 import { defineConfig } from 'vitest/config';
 
@@ -26,6 +27,7 @@ function rewriteOrigin(proxy: ProxyOptions): ProxyOptions {
 
 export default defineConfig({
 	plugins: [
+		tailwindcss(),
 		sveltekit({
 			// Built as a plain SPA and served by the Go binary
 			// (internal/webui), not as statically pre-rendered pages: every

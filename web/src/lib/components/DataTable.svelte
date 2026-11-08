@@ -18,7 +18,8 @@
 	} = $props();
 </script>
 
-<table class="data-table">
+<div class="overflow-x-auto">
+<table class="table">
 	<thead>
 		<tr>
 			{#each columns as col (col.key)}
@@ -42,54 +43,4 @@
 		{/each}
 	</tbody>
 </table>
-
-<style>
-	.data-table {
-		width: 100%;
-		border-collapse: collapse;
-	}
-	th,
-	td {
-		text-align: left;
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border);
-	}
-	th {
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-		font-weight: 600;
-	}
-
-	/* Below 640px a row becomes a card: each cell stacks with its column
-	   label in front of it, rather than scrolling a cramped table
-	   sideways. */
-	@media (max-width: 639px) {
-		thead {
-			display: none;
-		}
-		.data-table,
-		tbody,
-		tr,
-		td {
-			display: block;
-			width: 100%;
-		}
-		tr {
-			border: 1px solid var(--border);
-			border-radius: var(--radius-md);
-			margin-bottom: var(--space-3);
-			padding: var(--space-2);
-		}
-		td {
-			display: flex;
-			justify-content: space-between;
-			gap: var(--space-3);
-			border-bottom: none;
-		}
-		td::before {
-			content: attr(data-label);
-			font-weight: 600;
-			color: var(--text-muted);
-		}
-	}
-</style>
+</div>

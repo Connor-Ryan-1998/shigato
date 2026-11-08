@@ -1,6 +1,5 @@
 <script lang="ts">
-	import '../lib/styles/tokens.css';
-	import '../lib/styles/base.css';
+	import '../app.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { api, ApiError, registerReloginPrompt } from '../lib/api';
@@ -93,9 +92,9 @@
 </script>
 
 {#if loading}
-	<p>Loading…</p>
+	<p class="flex items-center justify-center gap-2 p-8"><span class="loading loading-spinner" aria-hidden="true"></span>Loading…</p>
 {:else if error}
-	<div class="session-error">
+	<div class="flex flex-col items-center gap-4 px-4 py-8 text-center">
 		<p role="alert">{error}</p>
 		<Button onclick={loadSession}>Retry</Button>
 	</div>
@@ -110,14 +109,3 @@
 	onSuccess={handleReloginSuccess}
 	onCancel={handleReloginCancel}
 />
-
-<style>
-	.session-error {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--space-4);
-		padding: var(--space-8) var(--space-4);
-		text-align: center;
-	}
-</style>

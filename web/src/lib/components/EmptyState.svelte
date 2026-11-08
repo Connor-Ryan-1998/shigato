@@ -12,32 +12,12 @@
 	} = $props();
 </script>
 
-<div class="empty-state">
-	<p class="title">{title}</p>
+<div class="flex flex-col items-center gap-2 px-4 py-8 text-center text-base-content/70">
+	<p class="m-0 font-semibold text-base-content">{title}</p>
 	{#if description}
-		<p class="description">{description}</p>
+		<p class="m-0">{description}</p>
 	{/if}
 	{#if action}
-		<div class="action">{@render action()}</div>
+		<div>{@render action()}</div>
 	{/if}
 </div>
-
-<style>
-	.empty-state {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--space-2);
-		padding: var(--space-8) var(--space-4);
-		text-align: center;
-		color: var(--text-muted);
-	}
-	.title {
-		font-weight: 600;
-		color: var(--text);
-		margin: 0;
-	}
-	.description {
-		margin: 0;
-	}
-</style>

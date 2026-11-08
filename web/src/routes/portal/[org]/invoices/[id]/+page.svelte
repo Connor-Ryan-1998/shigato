@@ -109,30 +109,32 @@
 		{/snippet}
 	</PageHeader>
 
-	<div class="dates">
+	<div class="mb-4 flex gap-4 text-sm text-base-content/70">
 		{#if inv.issue_date}<span>Issued <DateText iso={inv.issue_date} /></span>{/if}
 		{#if inv.due_date}<span>Due <DateText iso={inv.due_date} /></span>{/if}
 	</div>
 
-	<dl class="totals">
-		<div><dt>Total</dt><dd><Money cents={inv.total} /></dd></div>
-		<div><dt>Paid</dt><dd><Money cents={inv.amount_paid} /></dd></div>
-		<div><dt>Outstanding</dt><dd><Money cents={inv.outstanding} /></dd></div>
+	<dl class="mb-6 flex max-w-xs flex-col gap-1">
+		<div class="flex justify-between"><dt>Total</dt><dd><Money cents={inv.total} /></dd></div>
+		<div class="flex justify-between"><dt>Paid</dt><dd><Money cents={inv.amount_paid} /></dd></div>
+		<div class="flex justify-between"><dt>Outstanding</dt><dd><Money cents={inv.outstanding} /></dd></div>
 	</dl>
 
-	<section class="reference" aria-label="Payment reference">
-		<p class="reference-label">Payment reference</p>
-		<div class="copy-row">
-			<span class="reference-value">{inv.payment_reference}</span>
+	<section class="card mb-6 max-w-md bg-base-100 shadow-sm" aria-label="Payment reference">
+		<div class="card-body">
+		<p class="font-semibold text-base-content/70">Payment reference</p>
+		<div class="mb-2 flex items-center justify-between gap-3">
+			<span class="text-lg font-semibold tabular-nums">{inv.payment_reference}</span>
 			<Button variant="secondary" onclick={() => copy(inv.payment_reference, 'reference')}>
 				{copiedField === 'reference' ? 'Copied' : 'Copy'}
 			</Button>
+		</div>
 		</div>
 	</section>
 
 	{#if inv.provider_url}
 		<p>
-			<a class="pay-by-card" href={inv.provider_url} target="_blank" rel="noopener noreferrer">
+			<a class="btn btn-primary" href={inv.provider_url} target="_blank" rel="noopener noreferrer">
 				Pay by card
 			</a>
 		</p>
@@ -140,9 +142,9 @@
 
 	{#if inv.bank_bsb || inv.bank_account}
 		<section aria-labelledby="bank-transfer-heading">
-			<h2 id="bank-transfer-heading">Bank transfer</h2>
+			<h2 id="bank-transfer-heading" class="mt-6 mb-2 text-lg font-semibold">Bank transfer</h2>
 			{#if inv.bank_bsb}
-				<div class="copy-row">
+				<div class="mb-2 flex items-center justify-between gap-3">
 					<span>BSB {inv.bank_bsb}</span>
 					<Button variant="secondary" onclick={() => copy(inv.bank_bsb ?? '', 'bsb')}>
 						{copiedField === 'bsb' ? 'Copied' : 'Copy'}
@@ -150,7 +152,7 @@
 				</div>
 			{/if}
 			{#if inv.bank_account}
-				<div class="copy-row">
+				<div class="mb-2 flex items-center justify-between gap-3">
 					<span>Account {inv.bank_account}</span>
 					<Button variant="secondary" onclick={() => copy(inv.bank_account ?? '', 'account')}>
 						{copiedField === 'account' ? 'Copied' : 'Copy'}
@@ -162,8 +164,8 @@
 
 	{#if inv.payid}
 		<section aria-labelledby="payid-heading">
-			<h2 id="payid-heading">PayID</h2>
-			<div class="copy-row">
+			<h2 id="payid-heading" class="mt-6 mb-2 text-lg font-semibold">PayID</h2>
+			<div class="mb-2 flex items-center justify-between gap-3">
 				<span>{inv.payid}</span>
 				<Button variant="secondary" onclick={() => copy(inv.payid ?? '', 'payid')}>
 					{copiedField === 'payid' ? 'Copied' : 'Copy'}
@@ -172,9 +174,9 @@
 		</section>
 	{/if}
 
-	<h2>Payments</h2>
+	<h2 class="mt-6 mb-2 text-lg font-semibold">Payments</h2>
 	{#if inv.payments.length === 0}
-		<p class="no-payments">No payments recorded.</p>
+		<p class="text-base-content/70">No payments recorded.</p>
 	{:else}
 		<DataTable
 			columns={[
@@ -187,69 +189,3 @@
 		/>
 	{/if}
 {/if}
-
-<style>
-	.dates {
-		display: flex;
-		gap: var(--space-4);
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-		margin-bottom: var(--space-4);
-	}
-	.totals {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-		max-width: 20rem;
-		margin-bottom: var(--space-6);
-	}
-	.totals div {
-		display: flex;
-		justify-content: space-between;
-	}
-	.totals dt,
-	.totals dd {
-		margin: 0;
-	}
-	.reference {
-		margin-bottom: var(--space-6);
-		padding: var(--space-4);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		max-width: 28rem;
-	}
-	.reference-label {
-		margin: 0 0 var(--space-2);
-		font-weight: 600;
-		color: var(--text-muted);
-	}
-	.copy-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		margin-bottom: var(--space-2);
-	}
-	.reference-value {
-		font-size: var(--text-lg);
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-	}
-	.pay-by-card {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--space-2) var(--space-4);
-		border-radius: var(--radius-md);
-		background: var(--accent);
-		color: var(--accent-contrast);
-		font-weight: 600;
-		text-decoration: none;
-	}
-	.no-payments {
-		color: var(--text-muted);
-	}
-	h2 {
-		margin-top: var(--space-6);
-	}
-</style>

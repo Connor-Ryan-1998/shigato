@@ -103,43 +103,29 @@
 {:else}
 <p>Bill a client's unbilled time entries in a date range as one invoice.</p>
 
-<form onsubmit={run}>
-	<fieldset disabled={running}>
-	<legend>Billing period</legend>
+<form onsubmit={run} class="mt-4 grid max-w-sm gap-4">
+	<fieldset disabled={running} class="fieldset grid gap-3 rounded-box border border-base-300 bg-base-100 p-4">
+	<legend class="fieldset-legend">Billing period</legend>
 	<Field label="Client" id="run-client">
 		<Select id="run-client" bind:value={contactId} {options} />
 	</Field>
-	<Field label="From" id="run-from"><input id="run-from" type="date" bind:value={from} required /></Field>
-	<Field label="To" id="run-to"><input id="run-to" type="date" bind:value={to} required /></Field>
+	<Field label="From" id="run-from"><input class="input w-full" id="run-from" type="date" bind:value={from} required /></Field>
+	<Field label="To" id="run-to"><input class="input w-full" id="run-to" type="date" bind:value={to} required /></Field>
 	<Field label="Due in days" id="run-due">
-		<input id="run-due" type="number" min="0" max="90" step="1" bind:value={dueInDays} required />
+		<input class="input w-full" id="run-due" type="number" min="0" max="90" step="1" bind:value={dueInDays} required />
 	</Field>
-	<label class="check"><input type="checkbox" bind:checked={issue} /> Issue immediately</label>
+	<label class="label"><input class="checkbox" type="checkbox" bind:checked={issue} /> Issue immediately</label>
 	</fieldset>
 	<Button type="submit" disabled={running || contactId === ''}>
 		{running ? 'Running…' : 'Create invoice'}
 	</Button>
 </form>
 {#if invoiceID}
-	<p role="status">Time entries are already billed to an existing invoice. Open it to review or retry issuing; do not create another billing run for these entries.</p>
-	<a href={`/${org}/invoices/${invoiceID}`}>Open existing invoice</a>
+	<p role="status" class="alert alert-warning alert-soft mt-4">Time entries are already billed to an existing invoice. Open it to review or retry issuing; do not create another billing run for these entries.</p>
+	<a class="link link-primary" href={`/${org}/invoices/${invoiceID}`}>Open existing invoice</a>
 {/if}
 {/if}
 
 {#if error}
-	<p role="alert">{error}</p>
+	<p role="alert" class="alert alert-error alert-soft mt-4">{error}</p>
 {/if}
-
-<style>
-	form {
-		display: grid;
-		gap: var(--space-4, 1rem);
-		max-width: 24rem;
-	}
-	fieldset { display: grid; gap: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
-	.check {
-		display: flex;
-		gap: var(--space-2, 0.5rem);
-		align-items: center;
-	}
-</style>

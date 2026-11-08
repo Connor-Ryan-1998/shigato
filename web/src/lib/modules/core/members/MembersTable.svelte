@@ -51,7 +51,7 @@
 
 {#snippet roleCell(m: Member)}
 	{#if isStaffRole(m.role)}
-		<label class="visually-hidden" for={`member-role-${m.user_id}`}>Role for {m.name}</label>
+		<label class="sr-only" for={`member-role-${m.user_id}`}>Role for {m.name}</label>
 		<Select
 			id={`member-role-${m.user_id}`}
 			value={m.role}
@@ -84,17 +84,3 @@
 	rows={members}
 	rowKey={(m) => m.user_id}
 />
-
-<style>
-	.visually-hidden {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		padding: 0;
-		margin: -1px;
-		overflow: hidden;
-		clip: rect(0, 0, 0, 0);
-		white-space: nowrap;
-		border: 0;
-	}
-</style>

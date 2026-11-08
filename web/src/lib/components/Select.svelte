@@ -16,6 +16,7 @@
 
 <select
 	{id}
+	class="select"
 	bind:value
 	{disabled}
 	onchange={() => onchange?.(value)}
@@ -24,14 +25,3 @@
 		<option value={opt.value}>{opt.label}</option>
 	{/each}
 </select>
-
-<style>
-	select {
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border);
-		background: var(--surface);
-		color: var(--text);
-		font: inherit;
-	}
-</style>

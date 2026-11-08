@@ -139,7 +139,7 @@
 </script>
 
 <PageHeader title={`Lease ${page.params.id}`} />
-<p><a href={`/${org}/properties`}>Back to properties</a></p>
+<p class="mb-4"><a class="link" href={`/${org}/properties`}>Back to properties</a></p>
 
 {#if !canRead}
 	<p role="alert">You do not have permission to view this lease.</p>
@@ -148,13 +148,13 @@
 {/if}
 
 {#if canRead && loadedURL === url && affectedInvoices.length > 0}
-	<section role="status" aria-labelledby="invoice-warning-title" class="invoice-warning">
-		<h2 id="invoice-warning-title">Invoice review required</h2>
+	<section role="status" aria-labelledby="invoice-warning-title" class="alert alert-warning alert-soft mb-4 flex-col items-start">
+		<h2 id="invoice-warning-title" class="font-semibold">Invoice review required</h2>
 		<p>Saved change overlaps existing invoice periods. Existing invoices were not recalculated; review them before making any manual correction.</p>
-		<ul>
+		<ul class="list-disc pl-5">
 			{#each affectedInvoices as invoice (`${invoice.invoice_id}:${invoice.start}`)}
 				<li>
-					<a href={`/${org}/invoices/${invoice.invoice_id}`}>
+					<a class="link" href={`/${org}/invoices/${invoice.invoice_id}`}>
 						{invoice.status === 'draft' ? `Draft invoice ${invoice.invoice_id}` : invoice.invoice_number != null ? `Invoice #${invoice.invoice_number}` : `Invoice ${invoice.invoice_id}`}
 					</a>
 					· {invoice.status} · <span>{invoice.start} to {invoice.end}</span>
@@ -165,7 +165,7 @@
 {/if}
 
 {#if canRead && loadedURL === url && lease}
-	<dl>
+	<dl class="mb-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 [&_dt]:font-semibold [&_dt]:text-base-content/70">
 		<dt>Term</dt>
 		<dd>
 			{lease.start_date} to {lease.termination_date ?? lease.end_date ?? 'ongoing'}{lease.termination_date
@@ -182,18 +182,18 @@
 		</dd>
 	</dl>
 	{#each lease.warnings ?? [] as w (w)}
-		<p class="warn" role="status">{w}</p>
+		<p class="alert alert-warning alert-soft mb-2" role="status">{w}</p>
 	{/each}
 
-	<h2>Rent</h2>
-	<ul>
+	<h2 class="mt-6 mb-3 text-lg font-semibold">Rent</h2>
+	<ul class="list-disc pl-5">
 		{#each lease.rent_changes as rc (rc.id)}
 			<li>{money(rc.amount)} from {rc.effective_date}</li>
 		{/each}
 	</ul>
 	{#if lease.charges.length > 0}
-		<h2>Charges</h2>
-		<ul>
+		<h2 class="mt-6 mb-3 text-lg font-semibold">Charges</h2>
+		<ul class="list-disc pl-5">
 			{#each lease.charges as c (c.id)}
 				<li>{c.description}: {money(c.amount)} from {c.start_date}{c.end_date ? ` to ${c.end_date}` : ''}</li>
 			{/each}
@@ -202,13 +202,14 @@
 {/if}
 
 {#if canRead && loadedURL === url && ledger}
-	<h2>Ledger</h2>
-	<p>
+	<h2 class="mt-6 mb-3 text-lg font-semibold">Ledger</h2>
+	<p class="mb-3 text-base-content/70">
 		Arrears {money(ledger.arrears)} · Invoiced, not due {money(ledger.invoiced_not_due)} · Unissued {money(
 			ledger.unissued
 		)}{ledger.opening_arrears ? ` · Opening arrears ${money(ledger.opening_arrears)}` : ''}
 	</p>
-	<table>
+	<div class="overflow-x-auto">
+	<table class="table">
 		<thead>
 			<tr><th>Period</th><th>Due</th><th>Paid</th><th>Invoice</th></tr>
 		</thead>
@@ -220,7 +221,7 @@
 					<td>{money(p.paid)}</td>
 					<td>
 						{#if p.invoice_id}
-							<a href={`/${org}/invoices/${p.invoice_id}`}>{p.invoice_status}</a>
+							<a class="link link-primary" href={`/${org}/invoices/${p.invoice_id}`}>{p.invoice_status}</a>
 						{:else}
 							Not invoiced
 						{/if}
@@ -231,19 +232,20 @@
 			{/each}
 		</tbody>
 	</table>
+	</div>
 {/if}
 
 {#if lease && loadedURL === url && canWrite && !lease.termination_date}
-	<h2>Actions</h2>
+	<h2 class="mt-6 mb-3 text-lg font-semibold">Actions</h2>
 	<form
 		onsubmit={(e) =>
 			act(e, 'rent-changes', { effective_date: rcDate, amount: cents(rcAmount) }, 'Rent change saved.')}
 	>
-		<fieldset class="row" disabled={busy}>
-		<legend>Rent change</legend>
-		<Field label="New rent from" id="rc-date"><input id="rc-date" type="date" bind:value={rcDate} required /></Field>
+		<fieldset class="fieldset mb-4 rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+		<legend class="fieldset-legend">Rent change</legend>
+		<Field label="New rent from" id="rc-date"><input class="input" id="rc-date" type="date" bind:value={rcDate} required /></Field>
 		<Field label="Rent ($)" id="rc-amount">
-			<input id="rc-amount" type="number" min="0" step="0.01" bind:value={rcAmount} required />
+			<input class="input" id="rc-amount" type="number" min="0" step="0.01" bind:value={rcAmount} required />
 		</Field>
 		<Button type="submit">Change rent</Button>
 		</fieldset>
@@ -257,19 +259,19 @@
 				'Charge added.'
 			)}
 	>
-		<fieldset class="row" disabled={busy}>
-		<legend>Lease charge</legend>
-		<Field label="Charge" id="ch-desc"><input id="ch-desc" bind:value={chDesc} required /></Field>
+		<fieldset class="fieldset mb-4 rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+		<legend class="fieldset-legend">Lease charge</legend>
+		<Field label="Charge" id="ch-desc"><input class="input" id="ch-desc" bind:value={chDesc} required /></Field>
 		<Field label="Amount per period ($)" id="ch-amount">
-			<input id="ch-amount" type="number" min="0" step="0.01" bind:value={chAmount} required />
+			<input class="input" id="ch-amount" type="number" min="0" step="0.01" bind:value={chAmount} required />
 		</Field>
-		<Field label="From" id="ch-start"><input id="ch-start" type="date" bind:value={chStart} required /></Field>
-		<Field label="To (optional)" id="ch-end"><input id="ch-end" type="date" bind:value={chEnd} /></Field>
+		<Field label="From" id="ch-start"><input class="input" id="ch-start" type="date" bind:value={chStart} required /></Field>
+		<Field label="To (optional)" id="ch-end"><input class="input" id="ch-end" type="date" bind:value={chEnd} /></Field>
 		<Button type="submit">Add charge</Button>
 		</fieldset>
 	</form>
 	{#if lease.bond_amount > 0}
-		<div class="row">
+		<div class="mb-4 flex flex-wrap items-end gap-4">
 			<Button disabled={busy} variant="secondary" onclick={() => act(null, 'bond-invoice', {}, 'Bond invoice created.')}>
 				Create bond invoice
 			</Button>
@@ -277,11 +279,11 @@
 		<form
 			onsubmit={(e) => act(e, 'bond-lodgement', { rta_ref: bondRef, lodged_on: bondDate }, 'Bond lodged.')}
 		>
-			<fieldset class="row" disabled={busy}>
-			<legend>Bond lodgement</legend>
-			<Field label="RTA reference" id="bond-ref"><input id="bond-ref" bind:value={bondRef} required /></Field>
+			<fieldset class="fieldset mb-4 rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+			<legend class="fieldset-legend">Bond lodgement</legend>
+			<Field label="RTA reference" id="bond-ref"><input class="input" id="bond-ref" bind:value={bondRef} required /></Field>
 			<Field label="Lodged on" id="bond-date">
-				<input id="bond-date" type="date" bind:value={bondDate} required />
+				<input class="input" id="bond-date" type="date" bind:value={bondDate} required />
 			</Field>
 			<Button type="submit">Record lodgement</Button>
 			</fieldset>
@@ -296,10 +298,10 @@
 			act(e, 'terminate', { termination_date: termDate }, 'Lease terminated.');
 		}}
 	>
-		<fieldset class="row" disabled={busy}>
-		<legend>Lease termination</legend>
+		<fieldset class="fieldset mb-4 rounded-box border border-base-300 bg-base-100 p-4 flex flex-wrap items-end gap-4" disabled={busy}>
+		<legend class="fieldset-legend">Lease termination</legend>
 		<Field label="Terminate on" id="term-date">
-			<input id="term-date" type="date" bind:value={termDate} required />
+			<input class="input" id="term-date" type="date" bind:value={termDate} required />
 		</Field>
 		<Button type="submit" variant="danger">Terminate lease</Button>
 		</fieldset>
@@ -312,36 +314,3 @@
 {#if error}
 	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
 {/if}
-
-<style>
-	fieldset, .invoice-warning { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); }
-	.invoice-warning { border-color: var(--warning, #8a5a00); }
-	dl {
-		display: grid;
-		grid-template-columns: max-content 1fr;
-		gap: var(--space-2, 0.5rem) var(--space-4, 1rem);
-	}
-	dd {
-		margin: 0;
-	}
-	.warn {
-		color: var(--warning, #8a5a00);
-	}
-	.row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4, 1rem);
-		align-items: flex-end;
-		margin-bottom: var(--space-4, 1rem);
-	}
-	table {
-		width: 100%;
-		border-collapse: collapse;
-	}
-	th,
-	td {
-		text-align: left;
-		padding: var(--space-2, 0.5rem);
-		border-bottom: 1px solid var(--border, #ddd);
-	}
-</style>

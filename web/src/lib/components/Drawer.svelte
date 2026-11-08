@@ -52,34 +52,11 @@
 	onclose={handleClose}
 	onclick={handleBackdropClick}
 	aria-label={label}
-	class="drawer {side}"
+	class={[
+		'fixed m-0 h-full max-h-full overflow-y-auto bg-base-100 p-4 text-base-content backdrop:bg-black/50',
+		side === 'left' ? 'inset-y-0 left-0 right-auto border-r border-base-300' : 'inset-y-0 right-0 left-auto border-l border-base-300'
+	]}
 	style:width="min({width}, 90vw)"
 >
 	{@render children()}
 </dialog>
-
-<style>
-	.drawer {
-		position: fixed;
-		inset: 0 0 0 auto;
-		margin: 0;
-		height: 100%;
-		max-height: 100%;
-		overflow-y: auto;
-		border: none;
-		background: var(--surface);
-		color: var(--text);
-		padding: var(--space-4);
-	}
-	.drawer.left {
-		inset: 0 auto 0 0;
-		border-right: 1px solid var(--border);
-	}
-	.drawer.right {
-		inset: 0 0 0 auto;
-		border-left: 1px solid var(--border);
-	}
-	.drawer::backdrop {
-		background: rgb(0 0 0 / 0.5);
-	}
-</style>
