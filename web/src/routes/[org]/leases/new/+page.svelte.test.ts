@@ -1,16 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import { session } from '../../../lib/session.svelte';
+import { session } from '../../../../lib/session.svelte';
 
 const page = $state({ params: { org: 'acme' } });
 vi.mock('$app/state', () => ({ get page() { return page; } }));
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({
+vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
+vi.mock('../../../../lib/api', () => ({
 	api: apiMock,
 	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 }));
-import { ApiError } from '../../../lib/api';
+import { ApiError } from '../../../../lib/api';
 import Page from './+page.svelte';
 
 const contacts = [{ id: 7, name: 'Tina', kind: 'tenant' }, { id: 8, name: 'Tom', kind: 'tenant' }, { id: 9, name: 'Client', kind: 'client' }];
@@ -101,7 +102,7 @@ describe('existing lease onboarding', () => {
 	it('readers have no onboarding form', async () => {
 		session.setMe({ user: { id: 1, email: 'book@example.com', name: 'Book' }, orgs: [{ slug: 'acme', name: 'Acme', role: 'bookkeeper', perms: ['property_read'] }] });
 		render(Page);
-		await screen.findByText('Cottage');
+		await screen.findByRole('alert');
 		expect(screen.queryByRole('button', { name: 'Create lease' })).toBeNull();
 	});
 });

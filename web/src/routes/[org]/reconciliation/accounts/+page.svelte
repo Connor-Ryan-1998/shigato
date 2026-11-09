@@ -160,7 +160,7 @@
 	}
 </script>
 
-<PageHeader title="Bank accounts">
+<PageHeader title="Bank accounts" back={{ href: `/${page.params.org}/reconciliation`, label: 'Back to reconciliation' }}>
 	{#snippet actions()}
 		<Button onclick={openAddDialog}>Add account</Button>
 	{/snippet}
@@ -187,8 +187,9 @@
 	</ul>
 {/if}
 
-<Dialog bind:open={addOpen} title="Add bank account">
-	<div class="mb-4 flex flex-col gap-3">
+<Dialog bind:open={addOpen} title="Add bank account" busy={addBusy}>
+	{#snippet children({ close })}
+	<fieldset disabled={addBusy} class="mb-4 flex flex-col gap-3">
 		<Field label="Name" id="account-name">
 			<input class="input w-full" id="account-name" bind:value={newName} />
 		</Field>
@@ -232,14 +233,15 @@
 				</Field>
 			{/if}
 		{/if}
-	</div>
+	</fieldset>
 	{#if addError}
 		<p class="alert alert-error alert-soft mb-4" role="alert">{addError}</p>
 	{/if}
 	<div class="modal-action">
-		<Button variant="secondary" disabled={addBusy} onclick={() => (addOpen = false)}>Cancel</Button>
+		<Button variant="secondary" disabled={addBusy} onclick={close}>Cancel</Button>
 		<Button disabled={addBusy} onclick={createAccount}>Create</Button>
 	</div>
+	{/snippet}
 </Dialog>
 
 {#if importAccount}

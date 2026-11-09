@@ -6,7 +6,7 @@ vi.mock('$app/state', () => ({
 }));
 
 vi.mock('$app/navigation', () => ({
-	goto: vi.fn()
+	goto: vi.fn(), beforeNavigate: vi.fn()
 }));
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));

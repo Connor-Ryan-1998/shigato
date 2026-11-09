@@ -3,6 +3,9 @@
 A small self-hosted app for property management, timesheets and invoicing,
 shipped as one Go binary plus Postgres. See `docs/design.md` for the design.
 
+See [Interface standards](docs/ui-standards.md) before extending the UI. It covers
+shared components, data interactions, layouts, accessibility, and portal boundaries.
+
 ## Requirements
 
 Docker plus [go-task](https://taskfile.dev), with Go on the host. Node 24 is
@@ -222,7 +225,43 @@ SHIGOTO_SMTP_HOST=localhost SHIGOTO_SMTP_PORT=1025 \
 bin/shigoto serve                     # start the server (default)
 bin/shigoto admin create-owner \
   --org-slug <slug> --org-name <name> --email <email>  # password read from stdin
+bin/shigoto admin populate-sbx        # replace owned local sandbox data
 ```
+
+### Populate local testing data
+
+Build/start the local stack, then populate the existing development database:
+
+```bash
+docker compose up -d --build
+docker compose exec -T app /shigoto admin populate-sbx
+```
+
+**Development only. Rerunning replaces all records and tester edits inside the
+command's sandbox organisations, and rotates the generated staff passwords.**
+Unrelated development organisations and accounts remain unchanged. Population
+refuses existing slug/email collisions and external dependencies instead of
+adopting or deleting unrelated data. A failed population rolls back the reset.
+Do not point this command at an operator/production database.
+
+The command creates `sbx-property` and `sbx-consulting`, with properties, active
+and ended leases, rent changes/charges and ledgers, projects/tasks, billed and
+unbilled time, expenses, bank imports and matched/unmatched lines. More than 60
+invoices cover drafts, upcoming/overdue balances, partial/full payments and voids.
+Dates are relative to the population day in `SHIGOTO_TIMEZONE`.
+
+After success, the command prints local URLs and fresh owner/staff/bookkeeper
+passwords. The owner can switch between both organisations. Portal accounts have
+**no password**: open the normal login page, request a magic link for one of the
+printed tenant/client emails, and open its message at
+<http://localhost:8025>. Use a separate browser profile or private window to test
+different roles. Empty tenant/client accounts exercise empty portal states;
+other tenants exercise same-organisation and cross-organisation isolation.
+
+Population sends no mail and calls no payment providers. Keep local SMTP pointed
+at Mailpit and do not configure live payment credentials for either sandbox
+organisation. Receipt uploads made during testing lose their database references
+on reset; uploaded bytes are not deleted from disk by this command.
 
 ## Money and GST rounding
 

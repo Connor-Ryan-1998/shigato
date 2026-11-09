@@ -21,6 +21,9 @@ const contact = {
 };
 
 beforeEach(() => {
+	HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+	HTMLDialogElement.prototype.close = function () { this.open = false; };
+	vi.spyOn(window, 'confirm').mockReturnValue(true);
 	page.params.org = 'acme';
 	session.setMe({ user: { id: 1, email: 'owner@example.com', name: 'Owner' }, orgs: [
 		{ slug: 'acme', name: 'Acme', role: 'owner', perms: ['invoices_read', 'contacts_write'] },
@@ -33,6 +36,11 @@ beforeEach(() => {
 });
 
 async function name(value = 'New contact') {
+	if (!screen.queryByLabelText('Name', { exact: true })) {
+		const button = await screen.findByRole('button', { name: 'New contact' });
+		await vi.waitFor(() => expect(button).toHaveProperty('disabled', false));
+		await fireEvent.click(button);
+	}
 	await fireEvent.input(await screen.findByLabelText('Name', { exact: true }), { target: { value } });
 }
 function form() { return screen.getByRole('button', { name: 'Create contact' }).closest('form')!; }
@@ -57,15 +65,15 @@ describe('contacts', () => {
 		expect(await screen.findByRole('cell', { name: 'Corrected' })).toBeTruthy();
 		expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/contacts/7', { name: 'Corrected', email: '', phone: '', company_name: '', abn: '' });
 		expect(screen.getByText('Contact updated.')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Create contact' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'New contact' })).toBeTruthy();
 	});
 
-	it('cancels editing without saving and restores blank creation form', async () => {
+	it('cancels editing without saving and closes the editor', async () => {
 		render(Page);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Edit Tina Tenant' }));
 		await name('Discard');
-		await fireEvent.click(screen.getByRole('button', { name: 'Cancel editing' }));
-		expect((screen.getByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('');
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		expect(screen.queryByLabelText('Name', { exact: true })).toBeNull();
 		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
 		expect(screen.getByRole('cell', { name: 'Tina Tenant' })).toBeTruthy();
 	});
@@ -81,7 +89,7 @@ describe('contacts', () => {
 		await fireEvent.submit(editForm);
 		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(1);
 		expect(screen.getByLabelText('Name', { exact: true }).matches(':disabled')).toBe(true);
-		expect(screen.getByRole('button', { name: 'Cancel editing' })).toHaveProperty('disabled', true);
+		expect(screen.getByRole('button', { name: 'Cancel' })).toHaveProperty('disabled', true);
 		reject(new ApiError(422, 'name is required'));
 		await screen.findByText('name is required');
 		expect((screen.getByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('Retained');
@@ -103,7 +111,7 @@ describe('contacts', () => {
 		flushSync();
 		expect(screen.queryByText('Contact updated.')).toBeNull();
 		expect(screen.getByRole('cell', { name: 'Other contact' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Create contact' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'New contact' })).toBeTruthy();
 	});
 
 	it('cannot submit or start old-org edit before effects run', async () => {
@@ -117,7 +125,7 @@ describe('contacts', () => {
 		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
 		session.setOrg('other');
 		flushSync();
-		expect((await screen.findByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('');
+		expect(screen.queryByLabelText('Name', { exact: true })).toBeNull();
 	});
 	it('lists all contact details', async () => {
 		render(Page);
@@ -130,6 +138,7 @@ describe('contacts', () => {
 	it('filters through API without changing creation kind', async () => {
 		render(Page);
 		await screen.findByText('Tina Tenant');
+		await name();
 		await fireEvent.change(screen.getByLabelText('Contact kind'), { target: { value: 'client' } });
 		await fireEvent.change(screen.getByLabelText('Filter by kind'), { target: { value: 'supplier' } });
 		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('GET', '/api/v1/orgs/acme/contacts?kind=supplier'));
@@ -153,7 +162,7 @@ describe('contacts', () => {
 		expect(apiMock).toHaveBeenCalledWith('POST', '/api/v1/orgs/acme/contacts', {
 			kind, name: 'New contact', email: 'new@example.com', phone: '0400000000', company_name: 'New Co', abn: '51824753556'
 		});
-		expect((screen.getByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('');
+		expect(screen.queryByLabelText('Name', { exact: true })).toBeNull();
 	});
 
 	it('retains draft on 422', async () => {
@@ -260,7 +269,7 @@ describe('contacts', () => {
 		expect(apiMock.mock.calls.filter(([method]) => method === 'POST')).toHaveLength(0);
 		session.setOrg('other');
 		flushSync();
-		expect((await screen.findByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('');
+		expect(screen.queryByLabelText('Name', { exact: true })).toBeNull();
 	});
 
 	it('reports failed GET separately from empty state and supports retry', async () => {

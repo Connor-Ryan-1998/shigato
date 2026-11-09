@@ -3,6 +3,12 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import LineEditor from './LineEditor.svelte';
 
 describe('LineEditor', () => {
+	it('locks fields and add/remove controls while saving', () => {
+		const props = { onSave: vi.fn(), busy: true };
+		render(LineEditor, props);
+		expect(screen.getByLabelText('Description').matches(':disabled')).toBe(true);
+		expect(screen.getByRole('button', { name: 'Add line' }).matches(':disabled')).toBe(true);
+	});
 	it('starts with one row and lets you add and remove lines', async () => {
 		render(LineEditor, { props: { onSave: vi.fn() } });
 

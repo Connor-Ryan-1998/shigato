@@ -7,6 +7,8 @@
 	import Field from '../../../../lib/components/Field.svelte';
 	import Button from '../../../../lib/components/Button.svelte';
 	import Toast from '../../../../lib/components/Toast.svelte';
+	import Dialog from '../../../../lib/components/Dialog.svelte';
+	import LoadState from '../../../../lib/components/LoadState.svelte';
 
 	type Lease = {
 		id: number;
@@ -58,6 +60,12 @@
 	let busy = $state(false);
 	let loadSeq = 0;
 	let actionSeq = 0;
+	let actionOpen = $state(false);
+	let action = $state('Change rent');
+	function openAction(title: string) {
+		if (busy || !canWrite || loadedURL !== url) return;
+		action = title; error = ''; rcDate = today; rcAmount = ''; chDesc = ''; chAmount = ''; chStart = today; chEnd = ''; termDate = today; bondRef = ''; bondDate = today; actionOpen = true;
+	}
 
 	const today = todayLocal();
 	let rcDate = $state(today);
@@ -102,6 +110,7 @@
 		notice = '';
 		error = '';
 		busy = false;
+		actionOpen = false;
 		rcDate = today;
 		rcAmount = '';
 		chDesc = '';
@@ -129,6 +138,7 @@
 			if (seq !== actionSeq || target !== url || !canWrite) return;
 			notice = [done, ...(res?.warnings ?? [])].filter(Boolean).join(' ');
 			affectedInvoices = res?.affected_invoices ?? [];
+			actionOpen = false;
 			await load(target);
 		} catch (err) {
 			if (seq === actionSeq && target === url && canWrite) fail(err);
@@ -138,13 +148,12 @@
 	}
 </script>
 
-<PageHeader title={`Lease ${page.params.id}`} />
-<p class="mb-4"><a class="link" href={`/${org}/properties`}>Back to properties</a></p>
+<PageHeader title={`Lease ${page.params.id}`} back={{ href: `/${org}/properties`, label: 'Back to properties' }} />
 
 {#if !canRead}
 	<p role="alert">You do not have permission to view this lease.</p>
-{:else if loadedURL !== url && !error}
-	<p role="status">Loading lease…</p>
+{:else if loadedURL !== url}
+	<LoadState loading={true} {error} loadingLabel="Loading lease…" onretry={() => { error = ''; load(url); }}><span></span></LoadState>
 {/if}
 
 {#if canRead && loadedURL === url && affectedInvoices.length > 0}
@@ -237,6 +246,17 @@
 
 {#if lease && loadedURL === url && canWrite && !lease.termination_date}
 	<h2 class="mt-6 mb-3 text-lg font-semibold">Actions</h2>
+	<div class="mb-4 flex flex-wrap gap-2">
+		{#each ['Change rent', 'Add charge', ...(lease.bond_amount > 0 ? ['Record lodgement'] : []), 'Terminate lease'] as title}
+			<Button variant={title === 'Terminate lease' ? 'danger' : 'secondary'} disabled={busy} onclick={() => openAction(title)}>{title}</Button>
+		{/each}
+		{#if lease.bond_amount > 0}<Button variant="secondary" disabled={busy} onclick={() => act(null, 'bond-invoice', {}, 'Bond invoice created.')}>Create bond invoice</Button>{/if}
+	</div>
+	<Dialog bind:open={actionOpen} title={action} {busy}>
+	{#snippet children({ close })}
+	{#if actionOpen}
+	{#if error}<p role="alert" class="alert alert-error alert-soft mb-4">{error}</p>{/if}
+	{#if action === 'Change rent'}
 	<form
 		onsubmit={(e) =>
 			act(e, 'rent-changes', { effective_date: rcDate, amount: cents(rcAmount) }, 'Rent change saved.')}
@@ -250,6 +270,7 @@
 		<Button type="submit">Change rent</Button>
 		</fieldset>
 	</form>
+	{:else if action === 'Add charge'}
 	<form
 		onsubmit={(e) =>
 			act(
@@ -270,12 +291,7 @@
 		<Button type="submit">Add charge</Button>
 		</fieldset>
 	</form>
-	{#if lease.bond_amount > 0}
-		<div class="mb-4 flex flex-wrap items-end gap-4">
-			<Button disabled={busy} variant="secondary" onclick={() => act(null, 'bond-invoice', {}, 'Bond invoice created.')}>
-				Create bond invoice
-			</Button>
-		</div>
+	{:else if action === 'Record lodgement'}
 		<form
 			onsubmit={(e) => act(e, 'bond-lodgement', { rta_ref: bondRef, lodged_on: bondDate }, 'Bond lodged.')}
 		>
@@ -288,7 +304,7 @@
 			<Button type="submit">Record lodgement</Button>
 			</fieldset>
 		</form>
-	{/if}
+	{:else if action === 'Terminate lease'}
 	<form
 		onsubmit={(e) => {
 			if (!confirm(`Terminate this lease on ${termDate}?`)) {
@@ -306,11 +322,16 @@
 		<Button type="submit" variant="danger">Terminate lease</Button>
 		</fieldset>
 	</form>
+	{/if}
+	<div class="flex justify-end"><Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button></div>
+	{/if}
+	{/snippet}
+	</Dialog>
 {/if}
 
 {#if notice}
 	<Toast message={notice} onDismiss={() => (notice = '')} />
 {/if}
-{#if error}
+{#if error && !actionOpen && loadedURL === url}
 	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
 {/if}

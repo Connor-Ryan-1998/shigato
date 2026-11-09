@@ -4,6 +4,8 @@ import { fireEvent, render, screen } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
 const page = $state({ params: { org: 'acme' } });
+const { beforeNavigateMock } = vi.hoisted(() => ({ beforeNavigateMock: vi.fn() }));
+vi.mock('$app/navigation', () => ({ beforeNavigate: beforeNavigateMock }));
 vi.mock('$app/state', () => ({ get page() { return page; } }));
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
 vi.mock('../../../lib/api', () => ({
@@ -39,6 +41,29 @@ async function loaded() {
 function form() { return screen.getByRole('button', { name: 'Save settings' }).closest('form')!; }
 
 describe('organisation settings', () => {
+	it('cancels drafts back to the last saved values without a write', async () => {
+		vi.spyOn(window, 'confirm').mockReturnValue(true);
+		render(Page);
+		await loaded();
+		await fireEvent.input(screen.getByLabelText('Organisation name'), { target: { value: 'Unsaved' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		expect(screen.getByLabelText('Organisation name')).toHaveProperty('value', 'Acme');
+		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
+	});
+	it('protects dirty navigation but does not block session loss', async () => {
+		vi.spyOn(window, 'confirm').mockReturnValue(false);
+		render(Page);
+		await loaded();
+		await fireEvent.input(screen.getByLabelText('Organisation name'), { target: { value: 'Unsaved' } });
+		const navigate = beforeNavigateMock.mock.calls.at(-1)![0];
+		const cancel = vi.fn();
+		navigate({ to: { url: new URL('http://localhost/acme/contacts') }, cancel });
+		expect(cancel).toHaveBeenCalledOnce();
+		session.clear();
+		cancel.mockClear();
+		navigate({ to: { url: new URL('http://localhost/login') }, cancel });
+		expect(cancel).not.toHaveBeenCalled();
+	});
 	it('updates only matching cached org name from normalized server response', async () => {
 		apiMock.mockImplementation((method: string, _path: string, body: object) =>
 			Promise.resolve(method === 'GET' ? { ...settings } : { ...body, name: 'Normalized name' }));

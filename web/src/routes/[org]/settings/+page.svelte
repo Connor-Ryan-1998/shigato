@@ -6,6 +6,8 @@
 	import Field from '../../../lib/components/Field.svelte';
 	import Select from '../../../lib/components/Select.svelte';
 	import Button from '../../../lib/components/Button.svelte';
+	import FormActions from '../../../lib/components/FormActions.svelte';
+	import { useUnsavedChanges } from '../../../lib/forms/unsaved.svelte';
 
 	type Settings = {
 		name: string;
@@ -30,6 +32,14 @@
 	let error = $state('');
 	let success = $state('');
 	let requestSeq = 0;
+	let snapshot = $state('');
+	const dirty = $derived(settings !== null && loadedOrg === org && JSON.stringify(settings) !== snapshot);
+	const { allowLeave } = useUnsavedChanges(() => dirty, () => saving);
+	function cancel() {
+		if (!snapshot || !allowLeave()) return;
+		settings = JSON.parse(snapshot);
+		error = ''; success = '';
+	}
 
 	async function load(slug: string) {
 		const seq = ++requestSeq;
@@ -43,6 +53,7 @@
 			const result = await api<Settings>('GET', `/api/v1/orgs/${slug}/settings`);
 			if (seq !== requestSeq || slug !== org || !canManage) return;
 			settings = result;
+			snapshot = JSON.stringify(result);
 			loadedOrg = slug;
 		} catch (e) {
 			if (seq !== requestSeq || slug !== org || !canManage) return;
@@ -70,6 +81,7 @@
 			const result = await api<Settings>('PUT', `/api/v1/orgs/${slug}/settings`, { ...settings });
 			if (seq !== requestSeq || slug !== org || !canManage) return;
 			settings = result;
+			snapshot = JSON.stringify(result);
 			success = 'Settings saved.';
 			if (session.me) {
 				session.setMe({ ...session.me, orgs: session.me.orgs.map((o) => o.slug === slug ? { ...o, name: result.name } : o) });
@@ -126,7 +138,7 @@
 				<label class="label"><input class="checkbox" type="checkbox" bind:checked={settings.auto_send_rent} /> Send rent invoices automatically</label>
 				<p class="text-base-content/70">Automatic sending uses the configured payment provider.</p>
 			</fieldset>
-			<Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</Button>
+			<FormActions busy={saving} submitLabel="Save settings" oncancel={cancel} />
 		</form>
 	{:else}
 		<Button onclick={() => org && load(org)}>Retry</Button>

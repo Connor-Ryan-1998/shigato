@@ -222,7 +222,7 @@
 	}
 </script>
 
-<Drawer bind:open label="Bank line details" side="right" width="28rem">
+<Drawer bind:open label="Bank line details" side="right" width="28rem" busy={actionBusy}>
 	{#if line}
 		<div class="flex flex-col gap-4">
 			<h2 class="m-0 text-lg font-bold">

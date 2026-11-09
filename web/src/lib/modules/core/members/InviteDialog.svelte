@@ -71,7 +71,8 @@
 	}
 </script>
 
-<Dialog bind:open title="Invite a staff member" {onclose}>
+<Dialog bind:open title="Invite a staff member" {onclose} {busy} dirty={link ? false : undefined}>
+	{#snippet children({ close })}
 	{#if link}
 		{#if emailed}
 			<p>Invite sent to <strong>{invitedEmail}</strong>.</p>
@@ -86,20 +87,21 @@
 			<Button onclick={() => (open = false)}>Done</Button>
 		</div>
 	{:else}
-		<div class="mb-4 flex flex-col gap-3">
+		<fieldset disabled={busy} class="mb-4 flex flex-col gap-3">
 			<Field label="Email" id="invite-email">
 				<input class="input w-full" id="invite-email" type="email" bind:value={email} autocomplete="off" />
 			</Field>
 			<Field label="Role" id="invite-role">
 				<Select id="invite-role" bind:value={role} options={ROLE_OPTIONS} />
 			</Field>
-		</div>
+		</fieldset>
 		{#if error}
 			<p class="alert alert-error alert-soft mb-4" role="alert">{error}</p>
 		{/if}
 		<div class="flex justify-end gap-3">
-			<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+			<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 			<Button onclick={submit} disabled={!valid || busy}>Send invite</Button>
 		</div>
 	{/if}
+	{/snippet}
 </Dialog>

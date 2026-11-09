@@ -5,7 +5,7 @@ import { session } from '../../../../lib/session.svelte';
 const page = $state({ params: { org: 'acme', id: '5' }, url: new URL('http://x/acme/projects/5') });
 vi.mock('$app/state', () => ({ get page() { return page; } }));
 const { apiMock, gotoMock } = vi.hoisted(() => ({ apiMock: vi.fn(), gotoMock: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto: gotoMock }));
+vi.mock('$app/navigation', () => ({ goto: gotoMock, beforeNavigate: vi.fn() }));
 vi.mock('../../../../lib/api', () => ({
 	api: apiMock,
 	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }

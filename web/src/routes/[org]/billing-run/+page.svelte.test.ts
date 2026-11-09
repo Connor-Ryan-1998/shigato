@@ -6,7 +6,7 @@ import { session } from '../../../lib/session.svelte';
 const page = $state({ params: { org: 'acme' } });
 vi.mock('$app/state', () => ({ get page() { return page; } }));
 const { gotoMock } = vi.hoisted(() => ({ gotoMock: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto: gotoMock }));
+vi.mock('$app/navigation', () => ({ goto: gotoMock, beforeNavigate: vi.fn() }));
 import Page from './+page.svelte';
 
 function json(status: number, data: unknown) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -24,6 +24,16 @@ async function form() {
 	return screen.getByRole('button', { name: 'Create invoice' }).closest('form')!;
 }
 describe('billing-run recovery', () => {
+	it('does not create another invoice if navigation fails after a successful run', async () => {
+		vi.mocked(fetch).mockImplementation((_url, init) => Promise.resolve(init?.method === 'GET' ? json(200, [{ id: 2, name: 'Client Co', kind: 'client' }]) : json(200, { invoice: { id: 77 }, entry_count: 1, total_minutes: 60 })));
+		gotoMock.mockRejectedValue(new Error('Navigation failed'));
+		render(Page);
+		const runForm = await form();
+		await fireEvent.submit(runForm);
+		await screen.findByRole('link', { name: 'Open existing invoice' });
+		await fireEvent.submit(runForm);
+		expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+	});
 	it('links retained invoice and warns entries are already billed', async () => {
 		render(Page);
 		await fireEvent.submit(await form());

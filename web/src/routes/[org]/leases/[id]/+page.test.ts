@@ -46,6 +46,8 @@ const LEDGER = {
 
 describe("lease page", () => {
   beforeEach(() => {
+    HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+    HTMLDialogElement.prototype.close = function () { this.open = false; };
     apiMock.mockReset();
     apiMock.mockImplementation((m: string, p: string) =>
       m === "GET"
@@ -60,10 +62,11 @@ describe("lease page", () => {
     expect(screen.getByText("paid").getAttribute("href")).toBe(
       "/acme/invoices/9",
     );
+    await fireEvent.click(screen.getByRole('button', { name: 'Change rent' }));
     await fireEvent.input(screen.getByLabelText("Rent ($)"), {
       target: { value: "520" },
     });
-    await fireEvent.click(screen.getByText("Change rent"));
+    await fireEvent.submit(screen.getByLabelText('Rent ($)').closest('form')!);
     expect(await screen.findByText("Rent change saved. heads up")).toBeTruthy();
     expect(apiMock).toHaveBeenCalledWith(
       "POST",

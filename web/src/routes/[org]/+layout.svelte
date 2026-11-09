@@ -36,6 +36,7 @@
 	const nav = $derived(
 		session.currentOrg ? visibleNav(manifests, session.modules, session.currentOrg.perms) : []
 	);
+	const activeHref = $derived(nav.flatMap((group) => group.items).map((item) => `/${page.params.org}/${item.href}`.replace(/\/$/, '')).filter((href) => page.url.pathname === href || page.url.pathname.startsWith(`${href}/`)).sort((a, b) => b.length - a.length)[0]);
 
 	async function logout() {
 		try {
@@ -66,7 +67,7 @@
 						<ul>
 							{#each group.items as item (item.href)}
 								<li>
-									<a href={`/${page.params.org}/${item.href}`} onclick={() => (drawerOpen = false)}
+									<a href={`/${page.params.org}/${item.href}`} aria-current={activeHref === `/${page.params.org}/${item.href}`.replace(/\/$/, '') ? 'page' : undefined} class:menu-active={activeHref === `/${page.params.org}/${item.href}`.replace(/\/$/, '')} onclick={() => (drawerOpen = false)}
 										>{item.label}</a
 									>
 								</li>

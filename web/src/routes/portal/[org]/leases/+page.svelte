@@ -51,6 +51,7 @@
 	$effect(() => {
 		page.params.org;
 		load();
+		return () => { requestSeq++; };
 	});
 </script>
 

@@ -15,16 +15,28 @@
 		id: string;
 		hint?: string;
 		error?: string;
-		children: Snippet;
+		children: Snippet<[{ describedBy: string | undefined; invalid: boolean }]>;
 	} = $props();
+	let container: HTMLDivElement;
+	$effect(() => {
+		const control = [...(container?.querySelectorAll<HTMLElement>('input, select, textarea') ?? [])].find((element) => element.id === id);
+		if (!control) return;
+		const descriptions = (control.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((value) => value && value !== `${id}-hint` && value !== `${id}-error`);
+		if (error) descriptions.push(`${id}-error`);
+		else if (hint) descriptions.push(`${id}-hint`);
+		if (descriptions.length) control.setAttribute('aria-describedby', descriptions.join(' '));
+		else control.removeAttribute('aria-describedby');
+		if (error) control.setAttribute('aria-invalid', 'true');
+		else control.removeAttribute('aria-invalid');
+	});
 </script>
 
-<div class="fieldset py-0">
+<div bind:this={container} class="fieldset py-0">
 	<label for={id} class="fieldset-legend pb-0">{label}</label>
-	{@render children()}
+	{@render children({ describedBy: error ? `${id}-error` : hint ? `${id}-hint` : undefined, invalid: !!error })}
 	{#if error}
-		<p class="m-0 text-sm text-error" role="alert">{error}</p>
+		<p id={`${id}-error`} class="m-0 text-sm text-error" role="alert">{error}</p>
 	{:else if hint}
-		<p class="m-0 text-sm text-base-content/70">{hint}</p>
+		<p id={`${id}-hint`} class="m-0 text-sm text-base-content/70">{hint}</p>
 	{/if}
 </div>

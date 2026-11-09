@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import ReloginDialog from './ReloginDialog.svelte';
+import { session } from '../session.svelte';
 
 // jsdom doesn't implement <dialog>'s showModal/close - Dialog.svelte calls
 // them directly, so stub them out rather than exercising the real modal
@@ -22,6 +23,25 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 describe('ReloginDialog', () => {
+	it('tears down the expired session before leaving for SSO', async () => {
+		session.setMe({ user: { id: 1, name: 'Owner', email: 'owner@example.com' }, orgs: [] });
+		render(ReloginDialog, { open: true, email: 'owner@example.com', sso: true, onSuccess: vi.fn(), onCancel: vi.fn() });
+		const link = screen.getByRole('link', { name: 'Sign in with SSO' });
+		link.addEventListener('click', (event) => event.preventDefault());
+		await fireEvent.click(link);
+		expect(session.me).toBeNull();
+	});
+	it('blocks Escape while sign-in is pending', async () => {
+		vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+		render(ReloginDialog, { open: true, email: 'staffer@example.com', onSuccess: vi.fn(), onCancel: vi.fn() });
+		await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+		const event = new Event('cancel', { cancelable: true });
+		screen.getByRole('dialog').dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+		expect(screen.getByRole('dialog').getAttribute('aria-busy')).toBe('true');
+		vi.unstubAllGlobals();
+	});
 	it('pre-fills the email and posts it with the entered password', async () => {
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, {})));
 		const onSuccess = vi.fn();

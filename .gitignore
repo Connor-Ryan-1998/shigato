@@ -1,6 +1,8 @@
 /bin/
 /data/
 .env
+/docker-compose.override.yml
+/.local/
 .superpowers/
 
 # internal/webui/dist is `task web:build`'s output. Only .gitkeep is

@@ -6,6 +6,7 @@ data
 docs
 *.md
 .env
+.local/
 web/node_modules
 web/.svelte-kit
 web/build

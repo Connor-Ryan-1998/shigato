@@ -43,24 +43,11 @@ describe("properties page", () => {
     apiMock.mockImplementation(route);
   });
 
-  it("lists properties with their leases and creates a lease", async () => {
+  it("lists properties with their leases and links to lease creation", async () => {
     render(Page);
     expect(await screen.findByText("Lease from 2026-01-01")).toBeTruthy();
     expect(screen.getByText(/Tina Tenant · \$500\.00 weekly/)).toBeTruthy();
-    await fireEvent.input(screen.getByLabelText("Rent ($)"), {
-      target: { value: "450" },
-    });
-    await fireEvent.click(screen.getByText("Create lease"));
-    await vi.waitFor(() =>
-      expect(apiMock).toHaveBeenCalledWith(
-        "POST",
-        "/api/v1/orgs/acme/leases",
-        expect.objectContaining({
-          property_id: 1,
-          tenants: [{ contact_id: 7, primary: true }],
-          rent_amount: 45000,
-        }),
-      ),
-    );
+    expect(screen.getByRole('link', { name: 'New lease' }).getAttribute('href')).toBe('/acme/leases/new');
+    expect(screen.queryByLabelText('Rent ($)')).toBeNull();
   });
 });

@@ -210,6 +210,11 @@ test('tenant signs in by magic link and sees only their own invoice', async ({ p
 
 	await page.goto(magicLink);
 	await expect(page).toHaveURL(`${base}/portal/org-a/invoices`);
+	await expect(page.getByRole('link', { name: 'Skip to content', exact: true })).toHaveAttribute('href', '#main-content');
+	await expect(page.getByRole('link', { name: 'Invoices', exact: true })).toHaveAttribute('aria-current', 'page');
+	await expect(page.getByRole('navigation', { name: 'Primary', exact: true })).toHaveCount(0);
+	await page.setViewportSize({ width: 375, height: 812 });
+	await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
 	// The issued invoice, with its payment reference, is visible.
 	await expect(page.getByText(reference)).toBeVisible();

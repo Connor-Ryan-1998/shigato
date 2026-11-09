@@ -1,5 +1,7 @@
 <script lang="ts">
-	import type { Snippet } from 'svelte';
+	import { tick, type Snippet } from 'svelte';
+	import { canDismiss, formValues } from '../forms/dismiss';
+	import { useUnsavedChanges } from '../forms/unsaved.svelte';
 
 	// Same native <dialog> trick as Dialog.svelte, styled as an off-canvas
 	// panel instead of a centred card: showModal() still gives focus trap
@@ -9,6 +11,8 @@
 		label,
 		side = 'left',
 		width = '16rem',
+		busy = false,
+		dirty,
 		children
 	}: {
 		open?: boolean;
@@ -18,15 +22,24 @@
 		// drawer), which conventionally opens from the trailing edge.
 		side?: 'left' | 'right';
 		width?: string;
-		children: Snippet;
+		busy?: boolean;
+		dirty?: boolean;
+		children: Snippet<[{ close: () => void }]>;
 	} = $props();
 
 	let dialogEl: HTMLDialogElement | undefined;
+	let baseline = '';
+	let changed = $state(false);
+	let opener: HTMLElement | null = null;
+	useUnsavedChanges(() => open && (dirty ?? changed), () => open && busy);
 
 	$effect(() => {
 		if (!dialogEl) return;
 		if (open && !dialogEl.open) {
+			opener = document.activeElement as HTMLElement;
+			changed = false;
 			dialogEl.showModal();
+			tick().then(() => { if (dialogEl?.open) baseline = formValues(dialogEl); });
 		} else if (!open && dialogEl.open) {
 			dialogEl.close();
 		}
@@ -34,6 +47,18 @@
 
 	function handleClose() {
 		open = false;
+		changed = false;
+		if (opener?.isConnected) opener.focus();
+	}
+	function close() {
+		if (canDismiss(busy, dirty ?? changed)) open = false;
+	}
+	function cancel(event: Event) {
+		event.preventDefault();
+		close();
+	}
+	function track() {
+		if (dialogEl) changed = formValues(dialogEl) !== baseline;
 	}
 
 	// A native <dialog>'s backdrop isn't a real DOM node, so a click there
@@ -42,7 +67,7 @@
 	// box (the drawer panel), which is what this checks.
 	function handleBackdropClick(e: MouseEvent) {
 		if (e.target === dialogEl) {
-			open = false;
+			close();
 		}
 	}
 </script>
@@ -50,6 +75,10 @@
 <dialog
 	bind:this={dialogEl}
 	onclose={handleClose}
+	oncancel={cancel}
+	oninput={track}
+	onchange={track}
+	aria-busy={busy || undefined}
 	onclick={handleBackdropClick}
 	aria-label={label}
 	class={[
@@ -58,5 +87,5 @@
 	]}
 	style:width="min({width}, 90vw)"
 >
-	{@render children()}
+	{@render children({ close })}
 </dialog>

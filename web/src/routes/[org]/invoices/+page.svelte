@@ -5,6 +5,7 @@
 	import PageHeader from '../../../lib/components/PageHeader.svelte';
 	import Button from '../../../lib/components/Button.svelte';
 	import EmptyState from '../../../lib/components/EmptyState.svelte';
+	import Pagination from '../../../lib/components/Pagination.svelte';
 	import InvoiceTable, {
 		type InvoiceListItem
 	} from '../../../lib/modules/core/invoices/InvoiceTable.svelte';
@@ -125,19 +126,5 @@
 	<EmptyState title="No invoices in this view" />
 {:else}
 	<InvoiceTable org={page.params.org ?? ''} {invoices} />
-	<div class="mt-4 flex flex-wrap items-center justify-between gap-3">
-		<p class="text-sm text-base-content/70">{offset + 1}–{Math.min(offset + invoices.length, total)} of {total}</p>
-		<div class="flex gap-2">
-			<Button variant="secondary" disabled={offset === 0} onclick={() => gotoOffset(Math.max(0, offset - PAGE_SIZE))}>
-				Previous
-			</Button>
-			<Button
-				variant="secondary"
-				disabled={offset + PAGE_SIZE >= total}
-				onclick={() => gotoOffset(offset + PAGE_SIZE)}
-			>
-				Next
-			</Button>
-		</div>
-	</div>
+	<Pagination {offset} pageSize={PAGE_SIZE} {total} count={invoices.length} onchange={gotoOffset} />
 {/if}

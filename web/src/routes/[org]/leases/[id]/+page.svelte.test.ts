@@ -30,6 +30,8 @@ function route(method: string, path: string): Promise<unknown> {
 	return Promise.resolve({ warnings: ['Existing rent increase warning', 'Existing invoices were not recalculated'], affected_invoices: affected });
 }
 beforeEach(() => {
+	HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+	HTMLDialogElement.prototype.close = function () { this.open = false; };
 	page.params = { org: 'acme', id: '4' };
 	session.setMe({ user: { id: 1, name: 'Owner', email: 'owner@example.com' }, orgs: ['acme', 'other'].map((slug) => ({ slug, name: slug, role: 'owner', perms: ['property_read', 'property_write'] })) });
 	session.setOrg('acme');
@@ -38,10 +40,18 @@ beforeEach(() => {
 	vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 async function actionForm(button = 'Change rent') {
-	return (await screen.findByRole('button', { name: button })).closest('form')!;
+	await fireEvent.click(await screen.findByRole('button', { name: button }));
+	return within(screen.getByRole('dialog')).getByRole('button', { name: button }).closest('form')!;
 }
 
 describe('billed-period lease warnings', () => {
+	it('opens actions explicitly rather than showing embedded editors', async () => {
+		render(Page);
+		await screen.findByRole('heading', { name: 'Ledger' });
+		expect(screen.queryByLabelText('Rent ($)')).toBeNull();
+		await actionForm();
+		expect(screen.getByRole('dialog', { name: 'Change rent' })).toBeTruthy();
+	});
 	it.each(['Change rent', 'Add charge', 'Terminate lease'])('keeps affected invoice links visible after %s save and refresh', async (button) => {
 		render(Page);
 		await fireEvent.submit(await actionForm(button));

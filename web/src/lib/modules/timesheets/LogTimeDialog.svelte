@@ -16,6 +16,7 @@
 		projects,
 		entry = null,
 		projectId = null,
+		allowed = true,
 		onsaved
 	}: {
 		open?: boolean;
@@ -26,6 +27,7 @@
 		entry?: Entry | null;
 		// Preselects (and locks) the project, e.g. on its detail page.
 		projectId?: number | null;
+		allowed?: boolean;
 		onsaved: () => void;
 	} = $props();
 
@@ -38,6 +40,8 @@
 	let error = $state('');
 	let busy = $state(false);
 	let taskSeq = 0;
+	let actionSeq = 0;
+	$effect(() => { org; open; allowed; return () => { actionSeq++; taskSeq++; }; });
 
 	const projectOptions = $derived(
 		projects.filter((p) => p.active || p.id === entry?.project_id)
@@ -81,6 +85,9 @@
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
+		if (busy || !open || !allowed) return;
+		const seq = actionSeq;
+		const slug = org;
 		const minutes = parseDuration(duration);
 		if (minutes === null) {
 			error = 'Time must be H:MM or minutes, between 0:01 and 24:00.';
@@ -96,17 +103,19 @@
 		try {
 			if (entry) await api('PUT', `/api/v1/orgs/${org}/time-entries/${entry.id}`, body);
 			else await api('POST', `/api/v1/orgs/${org}/time-entries`, body);
+			if (seq !== actionSeq || slug !== org || !open || !allowed) return;
 			open = false;
 			onsaved();
 		} catch (err) {
-			error = err instanceof ApiError ? err.message : 'Something went wrong.';
+			if (seq === actionSeq && slug === org && open && allowed) error = err instanceof ApiError ? err.message : 'Something went wrong.';
 		} finally {
-			busy = false;
+			if (seq === actionSeq) busy = false;
 		}
 	}
 </script>
 
-<Dialog bind:open title={entry ? 'Edit time entry' : 'Log time'}>
+<Dialog bind:open title={entry ? 'Edit time entry' : 'Log time'} busy={busy || !allowed}>
+	{#snippet children({ close })}
 	{#if open}
 		<form class="flex flex-col gap-3" onsubmit={submit}>
 			<Field label="Project" id="log-project">
@@ -152,9 +161,10 @@
 				<p class="alert alert-error alert-soft" role="alert">{error}</p>
 			{/if}
 			<div class="modal-action">
-				<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+				<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 				<Button type="submit" disabled={busy}>{entry ? 'Save entry' : 'Log time'}</Button>
 			</div>
 		</form>
 	{/if}
+	{/snippet}
 </Dialog>

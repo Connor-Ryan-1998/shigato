@@ -10,6 +10,7 @@
 	import Dialog from './Dialog.svelte';
 	import Field from './Field.svelte';
 	import Button from './Button.svelte';
+	import { session } from '../session.svelte';
 
 	let {
 		open = $bindable(false),
@@ -53,6 +54,7 @@
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
+		if (submitting) return;
 		error = '';
 		submitting = true;
 		try {
@@ -87,7 +89,7 @@
 	}
 </script>
 
-<Dialog bind:open title="Session expired" onclose={onCancel}>
+<Dialog bind:open title="Session expired" onclose={onCancel} busy={submitting} dirty={false}>
 	<!-- Only rendered while open: a closed native <dialog> is hidden from the
 	     page visually, but its contents still exist in the DOM, so an
 	     always-rendered "Email" field here would collide with the page's own
@@ -119,7 +121,7 @@
 			</div>
 		</form>
 		{#if sso}
-			<p class="m-0 text-center"><a class="link link-primary" href={ssoStartUrl()}>Sign in with SSO</a></p>
+			<p class="m-0 text-center"><a class="link link-primary" href={ssoStartUrl()} aria-disabled={submitting || undefined} onclick={(event) => { if (submitting) event.preventDefault(); else session.clear(); }}>Sign in with SSO</a></p>
 		{/if}
 	{/if}
 </Dialog>

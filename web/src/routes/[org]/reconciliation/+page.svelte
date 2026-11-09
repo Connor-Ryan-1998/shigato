@@ -5,6 +5,8 @@
 	import { api, ApiError } from '../../../lib/api';
 	import { session } from '../../../lib/session.svelte';
 	import PageHeader from '../../../lib/components/PageHeader.svelte';
+	import FilterBar from '../../../lib/components/FilterBar.svelte';
+	import Pagination from '../../../lib/components/Pagination.svelte';
 	import Button from '../../../lib/components/Button.svelte';
 	import Field from '../../../lib/components/Field.svelte';
 	import Select from '../../../lib/components/Select.svelte';
@@ -228,7 +230,7 @@
 	{/each}
 </nav>
 
-<div class="mb-4 flex flex-wrap gap-4 *:min-w-0 *:flex-[1_1_10rem] [&_select]:w-full [&_select]:min-w-0">
+<FilterBar>
 	<Field label="Account" id="account-filter">
 		<Select
 			id="account-filter"
@@ -258,7 +260,7 @@
 			onchange={(e) => updateParam('to', (e.currentTarget as HTMLInputElement).value)}
 		/>
 	</Field>
-</div>
+</FilterBar>
 
 {#if loadStatus === 'loading'}
 	<p aria-live="polite">Loading bank lines…</p>
@@ -278,17 +280,7 @@
 		<EmptyState title="No bank lines in this view" />
 	{:else}
 		<BankLineTable {lines} onSelect={selectLine} />
-		<div class="mt-4 flex flex-wrap items-center justify-between gap-3">
-			<p class="text-sm text-base-content/70">{offset + 1}–{Math.min(offset + lines.length, total)} of {total}</p>
-			<div class="flex gap-2">
-				<Button variant="secondary" disabled={offset === 0} onclick={() => gotoOffset(Math.max(0, offset - PAGE_SIZE))}>
-					Previous
-				</Button>
-				<Button variant="secondary" disabled={offset + PAGE_SIZE >= total} onclick={() => gotoOffset(offset + PAGE_SIZE)}>
-					Next
-				</Button>
-			</div>
-		</div>
+		<Pagination {offset} pageSize={PAGE_SIZE} {total} count={lines.length} onchange={gotoOffset} />
 	{/if}
 {/if}
 

@@ -45,6 +45,7 @@ describe('magic sign-in page', () => {
 		render(Page);
 
 		expect(await screen.findByText('This link has expired — request a new one')).toBeTruthy();
+		expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeTruthy();
 		expect(goto).not.toHaveBeenCalled();
 		// Scrubbed immediately on mount, before the verify call even
 		// resolves - a used-up, now-useless token still shouldn't linger in

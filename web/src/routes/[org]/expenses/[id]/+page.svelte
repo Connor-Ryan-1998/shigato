@@ -70,8 +70,7 @@
 	}
 </script>
 
-<PageHeader title={`Expense ${id}`} />
-<p class="mb-4"><a class="link" href={`/${org}/expenses`}>Back to expenses</a></p>
+<PageHeader title={`Expense ${id}`} back={{ href: `/${org}/expenses`, label: 'Back to expenses' }} />
 {#snippet categoryCell(line: ExpenseLine)}{label(categories, line.category_id, 'Category')}{/snippet}
 {#snippet amountCell(line: ExpenseLine)}{money(line.amount)}{/snippet}
 {#snippet gstCell(line: ExpenseLine)}{money(line.gst_amount)}{/snippet}

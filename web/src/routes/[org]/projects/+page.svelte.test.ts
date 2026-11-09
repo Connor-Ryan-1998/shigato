@@ -4,7 +4,7 @@ import { session } from '../../../lib/session.svelte';
 
 const page = $state({ params: { org: 'acme' } });
 vi.mock('$app/state', () => ({ get page() { return page; } }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
 vi.mock('../../../lib/api', () => ({
 	api: apiMock,

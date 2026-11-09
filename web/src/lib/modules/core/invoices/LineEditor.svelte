@@ -32,7 +32,7 @@
 		gstCode: string;
 	};
 
-	let { onSave }: { onSave: (lines: ManualLine[]) => void } = $props();
+	let { onSave, busy = false, onchange }: { onSave: (lines: ManualLine[]) => void; busy?: boolean; onchange?: () => void } = $props();
 
 	const uid = $props.id();
 	let nextId = 0;
@@ -69,15 +69,19 @@
 	const valid = $derived(rows.length > 0 && rows.every(rowValid));
 
 	function addRow() {
+		if (busy) return;
 		rows.push(emptyRow());
+		onchange?.();
 	}
 
 	function removeRow(id: number) {
+		if (busy) return;
 		rows = rows.filter((r) => r.id !== id);
+		onchange?.();
 	}
 
 	function save() {
-		if (!valid) return;
+		if (busy || !valid) return;
 		const lines: ManualLine[] = rows.map((r) => ({
 			description: r.description,
 			quantity_milli: parseQuantityMilli(r.quantity)!,
@@ -88,7 +92,7 @@
 	}
 </script>
 
-<div class="flex flex-col gap-4">
+<fieldset disabled={busy} class="flex min-w-0 flex-col gap-4" oninput={() => onchange?.()} onchange={() => onchange?.()}>
 	{#each rows as row, i (row.id)}
 		<div
 			class="grid grid-cols-1 items-end gap-3 border-b border-base-300 pb-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] [&_select]:w-full [&_select]:min-w-0"
@@ -131,6 +135,6 @@
 
 	<div class="flex gap-3">
 		<Button variant="secondary" onclick={addRow}>Add line</Button>
-		<Button onclick={save} disabled={!valid}>Save</Button>
+		<Button onclick={save} disabled={!valid} {busy}>Save</Button>
 	</div>
-</div>
+</fieldset>

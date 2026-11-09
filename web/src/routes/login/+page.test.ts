@@ -18,6 +18,17 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 describe('login page', () => {
+	it('does not submit the password form twice while a request is pending', async () => {
+		page.url = new URL('http://localhost/login');
+		const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/auth/login') ? new Promise<Response>(() => {}) : Promise.resolve(jsonResponse(200, { modules: [], sso: false })));
+		vi.stubGlobal('fetch', fetchMock);
+		render(Login);
+		const form = screen.getByRole('button', { name: 'Sign in' }).closest('form')!;
+		await fireEvent.submit(form);
+		await fireEvent.submit(form);
+		expect(fetchMock.mock.calls.filter(([path]) => String(path).includes('/auth/login'))).toHaveLength(1);
+		expect(screen.getByLabelText('Password').matches(':disabled')).toBe(true);
+	});
 	beforeEach(() => {
 		session.clear();
 	});

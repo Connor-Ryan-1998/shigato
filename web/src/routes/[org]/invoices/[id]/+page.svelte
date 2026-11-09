@@ -212,8 +212,10 @@
 {#snippet paymentAmountCell(payment: Payment)}<Money cents={payment.amount} />{/snippet}
 
 {#if loadStatus === 'loading'}
+	<PageHeader title="Invoice" back={{ href: `/${page.params.org}/invoices`, label: 'Back to invoices' }} />
 	<p aria-live="polite">Loading invoice…</p>
 {:else if loadStatus === 'error'}
+	<PageHeader title="Invoice" back={{ href: `/${page.params.org}/invoices`, label: 'Back to invoices' }} />
 	<EmptyState title="Couldn't load the invoice" description={errorMessage}>
 		{#snippet action()}
 			<Button onclick={() => load()}>Retry</Button>
@@ -221,7 +223,7 @@
 	</EmptyState>
 {:else if invoice}
 	{@const inv = invoice}
-	<PageHeader title={inv.number !== null ? `Invoice #${inv.number}` : 'Draft invoice'}>
+	<PageHeader title={inv.number !== null ? `Invoice #${inv.number}` : 'Draft invoice'} back={{ href: `/${page.params.org}/invoices`, label: 'Back to invoices' }}>
 		{#snippet actions()}
 			<StatusBadge status={inv.status} tone={STATUS_TONE[inv.status] ?? 'info'} />
 		{/snippet}

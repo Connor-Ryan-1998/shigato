@@ -77,6 +77,7 @@
 	$effect(() => {
 		page.params.id;
 		load();
+		return () => { requestSeq++; };
 	});
 
 	async function copy(value: string, field: string) {
@@ -94,8 +95,10 @@
 {#snippet paymentAmountCell(payment: Payment)}<Money cents={payment.amount} />{/snippet}
 
 {#if loadStatus === 'loading'}
+	<PageHeader title="Invoice" back={{ href: `/portal/${page.params.org}/invoices`, label: 'Back to invoices' }} />
 	<p aria-live="polite">Loading invoice…</p>
 {:else if loadStatus === 'error'}
+	<PageHeader title="Invoice" back={{ href: `/portal/${page.params.org}/invoices`, label: 'Back to invoices' }} />
 	<EmptyState title="Couldn't load the invoice" description={errorMessage}>
 		{#snippet action()}
 			<Button onclick={load}>Retry</Button>
@@ -103,7 +106,7 @@
 	</EmptyState>
 {:else if invoice}
 	{@const inv = invoice}
-	<PageHeader title={inv.number !== null ? `Invoice #${inv.number}` : 'Invoice'}>
+<PageHeader title={inv.number !== null ? `Invoice #${inv.number}` : 'Invoice'} back={{ href: `/portal/${page.params.org}/invoices`, label: 'Back to invoices' }}>
 		{#snippet actions()}
 			<StatusBadge status={inv.status} tone={STATUS_TONE[inv.status] ?? 'info'} />
 		{/snippet}
@@ -182,7 +185,7 @@
 			columns={[
 				{ key: 'paid_on', label: 'Date', cell: paidOnCell },
 				{ key: 'method', label: 'Method', cell: methodCell },
-				{ key: 'amount', label: 'Amount', cell: paymentAmountCell }
+				{ key: 'amount', label: 'Amount', cell: paymentAmountCell, align: 'right' }
 			]}
 			rows={inv.payments}
 			rowKey={(payment) => payment.id}

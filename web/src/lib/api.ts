@@ -3,6 +3,8 @@
 // {"error": "..."} body every failed request gets, and sends 401s through a
 // single injectable hook instead of leaving every call site to notice it.
 
+import { session } from './session.svelte';
+
 export class ApiError extends Error {
 	status: number;
 	invoiceID?: number;
@@ -40,6 +42,8 @@ export function registerReloginPrompt(fn: ReloginPrompt | null): void {
 function redirectToLogin(): void {
 	if (typeof window === 'undefined') return;
 	const next = window.location.pathname + window.location.search;
+	// Authentication teardown bypasses both SPA and browser dirty-draft guards.
+	session.clear();
 	window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
 

@@ -20,6 +20,18 @@ HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) { thi
 HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) { this.open = false; };
 
 describe('ProjectDialog', () => {
+	it('does not write twice while a save is pending', async () => {
+		apiMock.mockReset();
+		apiMock.mockReturnValue(new Promise(() => {}));
+		render(ProjectDialog, { open: true, org: 'acme', contacts, project, onsaved: vi.fn() });
+		const form = screen.getByRole('button', { name: 'Save project' }).closest('form')!;
+		await fireEvent.submit(form);
+		await fireEvent.submit(form);
+		expect(apiMock.mock.calls).toHaveLength(1);
+		const event = new Event('cancel', { cancelable: true });
+		screen.getByRole('dialog').dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+	});
 	it('sends a full replace on edit', async () => {
 		apiMock.mockResolvedValue(project);
 		const onsaved = vi.fn();

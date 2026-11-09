@@ -5,6 +5,9 @@
 	import { todayLocal } from '../../../lib/format';
 	import { session } from '../../../lib/session.svelte';
 	import Toast from '../../../lib/components/Toast.svelte';
+	import PageHeader from '../../../lib/components/PageHeader.svelte';
+	import FilterBar from '../../../lib/components/FilterBar.svelte';
+	import LoadState from '../../../lib/components/LoadState.svelte';
 	import EntriesTable from '../../../lib/modules/timesheets/EntriesTable.svelte';
 	import LogTimeDialog from '../../../lib/modules/timesheets/LogTimeDialog.svelte';
 	import {
@@ -141,12 +144,13 @@
 	}
 </script>
 
-<header class="mb-4 flex flex-wrap items-center justify-between gap-4">
+<PageHeader title={STATUS_TITLES[status]}>
+	{#snippet heading()}
 	<div class="dropdown">
-		<div tabindex="0" role="button" class="flex cursor-pointer items-center gap-2 text-2xl font-bold">
-			<h1 class="m-0">{STATUS_TITLES[status]}</h1>
+		<h1 class="m-0"><button type="button" class="flex cursor-pointer items-center gap-2 text-2xl font-bold">
+			{STATUS_TITLES[status]}
 			<span aria-hidden="true" class="text-primary">▾</span>
-		</div>
+		</button></h1>
 		<ul class="menu dropdown-content z-10 w-64 rounded-box bg-base-100 p-2 shadow" aria-label="Timesheet status">
 			{#each Object.entries(STATUS_TITLES) as [value, title] (value)}
 				<li>
@@ -162,15 +166,18 @@
 			{/each}
 		</ul>
 	</div>
+	{/snippet}
+	{#snippet actions()}
 	{#if canWrite}
 		<button type="button" class="btn btn-primary" onclick={openNew}>+ New Log Entry</button>
 	{/if}
-</header>
+	{/snippet}
+</PageHeader>
 
 {#if !canRead}
 	<p role="alert">You do not have permission to view timesheets.</p>
 {:else}
-	<div class="mb-4 flex flex-wrap items-end gap-3 rounded-box border border-base-300 bg-base-100 p-3">
+	<FilterBar>
 		<span class="self-center text-sm font-semibold text-base-content/70 uppercase">View by</span>
 		<label class="select select-sm w-auto">
 			<span class="label">Period</span>
@@ -201,13 +208,9 @@
 				{#each userOptions as [value, label] (value)}<option {value}>{label}</option>{/each}
 			</select>
 		</label>
-	</div>
+	</FilterBar>
 
-	{#if !ready && !error}
-		<p role="status" class="flex items-center gap-2">
-			<span class="loading loading-spinner loading-sm" aria-hidden="true"></span>Loading entries…
-		</p>
-	{:else if ready}
+	<LoadState loading={!ready} {error} loadingLabel="Loading entries…" onretry={load}>
 		<EntriesTable
 			entries={shown}
 			{org}
@@ -216,9 +219,9 @@
 			ondelete={remove}
 			{busy}
 		/>
-	{/if}
+	</LoadState>
 
-	<LogTimeDialog bind:open={dialogOpen} {org} {projects} entry={editing} onsaved={load} />
+	{#if canWrite}<LogTimeDialog bind:open={dialogOpen} {org} {projects} allowed={canWrite} entry={editing} onsaved={load} />{/if}
 {/if}
 
 {#if error}

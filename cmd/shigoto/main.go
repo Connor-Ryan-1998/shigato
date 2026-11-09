@@ -60,6 +60,8 @@ func admin(args []string) error {
 	switch sub {
 	case "create-owner":
 		return adminCreateOwner(args[1:])
+	case "populate-sbx":
+		return adminPopulateSandbox(args[1:])
 	default:
 		return fmt.Errorf("unknown admin command %q", sub)
 	}

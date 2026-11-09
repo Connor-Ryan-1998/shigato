@@ -92,7 +92,7 @@
 </script>
 
 {#if loading}
-	<p class="flex items-center justify-center gap-2 p-8"><span class="loading loading-spinner" aria-hidden="true"></span>Loading…</p>
+	<p role="status" class="flex items-center justify-center gap-2 p-8"><span class="loading loading-spinner" aria-hidden="true"></span>Loading…</p>
 {:else if error}
 	<div class="flex flex-col items-center gap-4 px-4 py-8 text-center">
 		<p role="alert">{error}</p>

@@ -8,6 +8,7 @@
 	import Field from '../../../lib/components/Field.svelte';
 	import Select from '../../../lib/components/Select.svelte';
 	import Button from '../../../lib/components/Button.svelte';
+	import { useUnsavedChanges } from '../../../lib/forms/unsaved.svelte';
 
 	type Contact = { id: number; name: string; kind: string };
 	type RunResult = { invoice: { id: number }; entry_count: number; total_minutes: number };
@@ -24,6 +25,8 @@
 	let loadedOrg = $state('');
 	let invoiceID = $state<number | undefined>();
 	let requestSeq = 0;
+	let dirty = $state(false);
+	const { allowLeave } = useUnsavedChanges(() => dirty, () => running);
 
 	const org = $derived(page.params.org);
 	const canRun = $derived(session.currentOrg?.slug === org && (session.currentOrg?.perms.includes('invoices_write') ?? false));
@@ -41,6 +44,7 @@
 		invoiceID = undefined;
 		error = '';
 		running = false;
+		dirty = false;
 		from = `${todayLocal().slice(0, 7)}-01`;
 		to = todayLocal();
 		dueInDays = '14';
@@ -64,7 +68,7 @@
 
 	async function run(e: SubmitEvent) {
 		e.preventDefault();
-		if (!canRun || loadedOrg !== org || running || !contactId) return;
+		if (!canRun || loadedOrg !== org || running || !contactId || invoiceID) return;
 		if (!from || !to || from > to) { error = 'From must not be after To.'; return; }
 		const days = Number(dueInDays);
 		if (!Number.isInteger(days) || days < 0 || days > 90) { error = 'Due in days must be between 0 and 90.'; return; }
@@ -82,18 +86,21 @@
 				issue
 			});
 			if (seq !== requestSeq || slug !== org || !canRun) return;
+			invoiceID = res.invoice.id;
+			dirty = false;
+			running = false;
 			await goto(`/${slug}/invoices/${res.invoice.id}`);
 		} catch (err) {
 			if (seq !== requestSeq || slug !== org || !canRun) return;
 			error = message(err);
-			if (err instanceof ApiError) invoiceID = err.invoiceID;
+			if (err instanceof ApiError) { invoiceID = err.invoiceID; if (invoiceID) dirty = false; }
 		} finally {
 			if (seq === requestSeq) running = false;
 		}
 	}
 </script>
 
-<PageHeader title="Billing run" />
+<PageHeader title="Billing run" back={{ href: `/${org}/invoices`, label: 'Back to invoices' }} />
 
 {#if !canRun}
 	<p role="alert">You do not have permission to create invoices.</p>
@@ -103,7 +110,7 @@
 {:else}
 <p>Bill a client's unbilled time entries in a date range as one invoice.</p>
 
-<form onsubmit={run} class="mt-4 grid max-w-sm gap-4">
+<form onsubmit={run} class="mt-4 grid max-w-sm gap-4" oninput={() => dirty = true} onchange={() => dirty = true}>
 	<fieldset disabled={running} class="fieldset grid gap-3 rounded-box border border-base-300 bg-base-100 p-4">
 	<legend class="fieldset-legend">Billing period</legend>
 	<Field label="Client" id="run-client">
@@ -116,9 +123,10 @@
 	</Field>
 	<label class="label"><input class="checkbox" type="checkbox" bind:checked={issue} /> Issue immediately</label>
 	</fieldset>
-	<Button type="submit" disabled={running || contactId === ''}>
+	<Button type="submit" disabled={running || contactId === '' || !!invoiceID}>
 		{running ? 'Running…' : 'Create invoice'}
 	</Button>
+	<Button variant="secondary" disabled={running} onclick={() => { if (allowLeave()) { dirty = false; goto(`/${org}/invoices`); } }}>Cancel</Button>
 </form>
 {#if invoiceID}
 	<p role="status" class="alert alert-warning alert-soft mt-4">Time entries are already billed to an existing invoice. Open it to review or retry issuing; do not create another billing run for these entries.</p>

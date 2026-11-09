@@ -7,6 +7,8 @@
 	import { session } from '../../../../lib/session.svelte';
 	import Button from '../../../../lib/components/Button.svelte';
 	import Dialog from '../../../../lib/components/Dialog.svelte';
+	import PageHeader from '../../../../lib/components/PageHeader.svelte';
+	import FilterBar from '../../../../lib/components/FilterBar.svelte';
 	import Field from '../../../../lib/components/Field.svelte';
 	import StatusBadge from '../../../../lib/components/StatusBadge.svelte';
 	import Toast from '../../../../lib/components/Toast.svelte';
@@ -248,9 +250,9 @@
 {:else if !project || loaded !== key}
 	{#if !error}<p role="status">Loading project…</p>{/if}
 {:else}
-	<header class="mb-4 flex flex-wrap items-center gap-3">
-		<a class="btn btn-square btn-ghost btn-sm" href={`/${org}/projects`} aria-label="Back to projects">‹</a>
-		<h1 class="m-0 text-2xl font-bold">{project.name}</h1>
+	<PageHeader title={project.name} back={{ href: `/${org}/projects`, label: 'Back to projects' }}>
+		{#snippet actions()}
+		{#if project}
 		<StatusBadge status={STATUS_LABELS[project.status]} tone={STATUS_TONES[project.status]} />
 		<div class="ml-auto flex gap-2">
 			{#if isAdmin}<Button variant="secondary" onclick={() => (editingProject = true)}>Edit</Button>{/if}
@@ -258,7 +260,9 @@
 				<Button onclick={() => { editingEntry = null; logOpen = true; }}>Log Time</Button>
 			{/if}
 		</div>
-	</header>
+		{/if}
+		{/snippet}
+	</PageHeader>
 
 	<div role="tablist" class="tabs tabs-border mb-4">
 		<button type="button" role="tab" class={['tab', tab === 'overview' && 'tab-active']} aria-selected={tab === 'overview'} onclick={() => selectTab('overview')}>Overview</button>
@@ -344,7 +348,7 @@
 			</div>
 		</section>
 	{:else}
-		<div class="mb-4 flex flex-wrap items-center gap-3">
+		<FilterBar>
 			<span class="text-sm font-semibold uppercase text-base-content/70">View by</span>
 			<label class="select select-sm w-auto">
 				<span class="label">Status</span>
@@ -360,7 +364,7 @@
 					{#each Object.entries(PERIOD_LABELS) as [value, label] (value)}<option {value}>{label}</option>{/each}
 				</select>
 			</label>
-		</div>
+		</FilterBar>
 		{#if tsLoaded !== tsKey}
 			{#if !error}<p role="status">Loading entries…</p>{/if}
 		{:else}
@@ -376,9 +380,10 @@
 		{/if}
 	{/if}
 
-	<ProjectDialog bind:open={editingProject} {org} {contacts} {project} onsaved={refresh} />
-	<LogTimeDialog bind:open={logOpen} {org} projects={[project]} entry={editingEntry} projectId={project.id} onsaved={refresh} />
-	<Dialog bind:open={taskOpen} title={taskDraft.id === null ? 'Add task' : 'Edit task'}>
+	{#if isAdmin}<ProjectDialog bind:open={editingProject} {org} {contacts} {project} allowed={isAdmin} onsaved={refresh} />{/if}
+	{#if canWrite}<LogTimeDialog bind:open={logOpen} {org} allowed={canWrite} projects={[project]} entry={editingEntry} projectId={project.id} onsaved={refresh} />{/if}
+	<Dialog bind:open={taskOpen} title={taskDraft.id === null ? 'Add task' : 'Edit task'} {busy}>
+		{#snippet children({ close })}
 		{#if taskOpen}
 			<form class="flex flex-col gap-3" onsubmit={saveTask}>
 				<Field label="Task name" id="task-name">
@@ -389,11 +394,12 @@
 				</Field>
 				{#if taskError}<p class="alert alert-error alert-soft" role="alert">{taskError}</p>{/if}
 				<div class="modal-action">
-					<Button variant="secondary" disabled={busy} onclick={() => (taskOpen = false)}>Cancel</Button>
+					<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 					<Button type="submit" disabled={busy}>{taskDraft.id === null ? 'Add task' : 'Save task'}</Button>
 				</div>
 			</form>
 		{/if}
+		{/snippet}
 	</Dialog>
 {/if}
 

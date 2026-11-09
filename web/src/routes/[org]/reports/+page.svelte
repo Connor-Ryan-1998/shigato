@@ -3,6 +3,7 @@
 	import { api, ApiError } from '../../../lib/api';
 	import { money, todayLocal } from '../../../lib/format';
 	import PageHeader from '../../../lib/components/PageHeader.svelte';
+	import FilterBar from '../../../lib/components/FilterBar.svelte';
 	import Field from '../../../lib/components/Field.svelte';
 	import Button from '../../../lib/components/Button.svelte';
 
@@ -126,7 +127,7 @@
 
 <section class="mb-8" aria-labelledby="pnl-heading">
 	<h2 id="pnl-heading" class="mb-3 text-lg font-semibold">Profit and loss</h2>
-	<div class="flex flex-wrap gap-4">
+	<FilterBar label="Profit and loss filters">
 		<Field label="From" id="pnl-from"><input class="input" id="pnl-from" type="date" bind:value={from} /></Field>
 		<Field label="To" id="pnl-to"><input class="input" id="pnl-to" type="date" bind:value={to} /></Field>
 		<Field label="Group by" id="pnl-group">
@@ -136,7 +137,7 @@
 				<option value="project">Project</option>
 			</select>
 		</Field>
-	</div>
+	</FilterBar>
 	<p class="my-3 flex gap-4">
 		<a href={`${base}/pnl.csv?${pnlParams}`} class="link link-primary" download>P&amp;L CSV</a>
 		<a href={`${base}/transactions.csv?${txParams}`} class="link link-primary" download>Transactions CSV</a>
@@ -163,13 +164,13 @@
 			</table>
 		{/each}
 	{:else}
-		<p>Loading…</p>
+		<p role="status">Loading…</p>
 	{/if}
 </section>
 
 <section class="mb-8" aria-labelledby="bas-heading">
 	<h2 id="bas-heading" class="mb-3 text-lg font-semibold">BAS summary</h2>
-	<div class="flex flex-wrap gap-4">
+	<FilterBar label="BAS filters">
 		<Field label="Financial year ending" id="bas-year">
 			<input class="input" id="bas-year" type="number" min="2000" max="2100" bind:value={basYear} />
 		</Field>
@@ -181,7 +182,7 @@
 				<option value={4}>Q4 (Apr–Jun)</option>
 			</select>
 		</Field>
-	</div>
+	</FilterBar>
 	<p class="my-3 flex gap-4"><a href={`${base}/bas.csv?${basParams}`} class="link link-primary" download>BAS CSV</a></p>
 	{#if basError}
 		<p class="alert alert-error alert-soft" role="alert">{basError}</p>

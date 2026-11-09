@@ -63,7 +63,8 @@
 	}
 </script>
 
-<Dialog bind:open title="Invite to portal" {onclose}>
+<Dialog bind:open title="Invite to portal" {onclose} {busy} dirty={result ? false : undefined}>
+	{#snippet children({ close })}
 	{#if result}
 		{#if result.emailed}
 			<p>Invite sent.</p>
@@ -85,17 +86,18 @@
 			<Button variant="secondary" onclick={() => (open = false)}>Close</Button>
 		</div>
 	{:else}
-		<div class="mb-4 flex flex-col gap-3">
+		<fieldset disabled={busy} class="mb-4 flex flex-col gap-3">
 			<Field label="Contact" id="portal-invite-contact">
 				<Select id="portal-invite-contact" bind:value={contactId} {options} />
 			</Field>
-		</div>
+		</fieldset>
 		{#if error}
 			<p class="alert alert-error alert-soft mb-4" role="alert">{error}</p>
 		{/if}
 		<div class="flex justify-end gap-3">
-			<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+			<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 			<Button onclick={submit} disabled={contactId === '' || busy}>Invite</Button>
 		</div>
 	{/if}
+	{/snippet}
 </Dialog>

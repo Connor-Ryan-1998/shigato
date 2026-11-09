@@ -25,6 +25,13 @@ function meWithOrgs(orgs: { slug: string; name: string; role: string; portal?: b
 }
 
 describe('portal layout', () => {
+	it('offers skip navigation and identifies the current portal section without staff links', () => {
+		session.setMe(meWithOrgs([{ slug: 'acme', name: 'Acme', role: 'tenant', portal: true }]));
+		render(Layout, { children: childSnippet() });
+		expect(screen.getByRole('link', { name: 'Skip to content' }).getAttribute('href')).toBe('#main-content');
+		expect(screen.getByRole('link', { name: 'Invoices' }).getAttribute('aria-current')).toBe('page');
+		expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+	});
 	afterEach(() => {
 		session.clear();
 	});

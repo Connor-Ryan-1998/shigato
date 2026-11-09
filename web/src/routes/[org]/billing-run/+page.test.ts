@@ -11,7 +11,7 @@ const { apiMock, gotoMock } = vi.hoisted(() => ({
   apiMock: vi.fn(),
   gotoMock: vi.fn(),
 }));
-vi.mock("$app/navigation", () => ({ goto: gotoMock }));
+vi.mock("$app/navigation", () => ({ goto: gotoMock, beforeNavigate: vi.fn() }));
 vi.mock("../../../lib/session.svelte", () => ({ session: { currentOrg: { slug: "acme", perms: ["invoices_write"] } } }));
 vi.mock("../../../lib/api", () => ({
   api: apiMock,

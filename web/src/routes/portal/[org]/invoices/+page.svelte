@@ -58,6 +58,7 @@
 	$effect(() => {
 		page.params.org;
 		load();
+		return () => { requestSeq++; };
 	});
 </script>
 
@@ -94,8 +95,8 @@
 			{ key: 'number', label: 'Invoice', cell: numberCell },
 			{ key: 'status', label: 'Status', cell: statusCell },
 			{ key: 'due_date', label: 'Due', cell: dueCell },
-			{ key: 'total', label: 'Total', cell: totalCell },
-			{ key: 'outstanding', label: 'Outstanding', cell: outstandingCell },
+			{ key: 'total', label: 'Total', cell: totalCell, align: 'right' },
+			{ key: 'outstanding', label: 'Outstanding', cell: outstandingCell, align: 'right' },
 			{ key: 'payment_reference', label: 'Reference', cell: referenceCell }
 		]}
 		rows={invoices}

@@ -55,7 +55,8 @@
 	}
 </script>
 
-<Dialog bind:open title={`Import CSV — ${accountName}`}>
+<Dialog bind:open title={`Import CSV — ${accountName}`} {busy} dirty={result ? false : !!file}>
+	{#snippet children({ close })}
 	{#if result}
 		<p class="mb-4">
 			Imported {result.rows_new} new of {result.rows_total} rows.
@@ -77,8 +78,9 @@
 			<p class="alert alert-error alert-soft my-3 whitespace-pre-wrap" role="alert">{error}</p>
 		{/if}
 		<div class="flex justify-end gap-3">
-			<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+			<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 			<Button disabled={busy || !file} onclick={submit}>Import</Button>
 		</div>
 	{/if}
+	{/snippet}
 </Dialog>

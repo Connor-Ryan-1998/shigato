@@ -13,7 +13,7 @@ vi.mock('$app/state', () => ({
 		return page;
 	}
 }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
 
 import Layout from './+layout.svelte';
 

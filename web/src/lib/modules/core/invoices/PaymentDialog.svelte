@@ -63,13 +63,14 @@
 	const valid = $derived(amountCents !== null && amountCents > 0 && paidOn !== '');
 
 	function submit() {
-		if (amountCents === null) return;
+		if (busy || !valid || amountCents === null) return;
 		onSubmit({ amount: amountCents, paid_on: paidOn, method });
 	}
 </script>
 
-<Dialog bind:open title="Record payment">
-	<div class="mb-4 flex flex-col gap-3">
+<Dialog bind:open title="Record payment" {busy}>
+	{#snippet children({ close })}
+	<fieldset disabled={busy} class="mb-4 flex flex-col gap-3">
 		<Field label="Amount ($)" id="payment-amount" error={amountError}>
 			<input class="input w-full" id="payment-amount" inputmode="decimal" bind:value={amount} />
 		</Field>
@@ -79,12 +80,13 @@
 		<Field label="Method" id="payment-method">
 			<Select id="payment-method" bind:value={method} options={METHOD_OPTIONS} />
 		</Field>
-	</div>
+	</fieldset>
 	{#if error}
 		<p class="alert alert-error alert-soft mb-4" role="alert">{error}</p>
 	{/if}
 	<div class="flex justify-end gap-3">
-		<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+		<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 		<Button onclick={submit} disabled={!valid || busy}>Record payment</Button>
 	</div>
+	{/snippet}
 </Dialog>

@@ -22,12 +22,14 @@
 		org,
 		contacts,
 		project = null,
+		allowed = true,
 		onsaved
 	}: {
 		open?: boolean;
 		org: string;
 		contacts: Contact[];
 		project?: Project | null;
+		allowed?: boolean;
 		onsaved: (p: Project) => void;
 	} = $props();
 
@@ -42,6 +44,8 @@
 	let description = $state('');
 	let error = $state('');
 	let busy = $state(false);
+	let actionSeq = 0;
+	$effect(() => { org; open; allowed; return () => { actionSeq++; }; });
 
 	const clients = $derived(contacts.filter((c) => c.kind === 'client'));
 
@@ -64,6 +68,9 @@
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
+		if (busy || !open || !allowed) return;
+		const slug = org;
+		const seq = actionSeq;
 		const cents = parseCents(rate);
 		if (cents === null || cents <= 0) {
 			error = 'Base rate must be greater than zero.';
@@ -90,17 +97,19 @@
 			const saved = project
 				? await api<Project>('PUT', `/api/v1/orgs/${org}/projects/${project.id}`, body)
 				: await api<Project>('POST', `/api/v1/orgs/${org}/projects`, body);
+			if (seq !== actionSeq || slug !== org || !open || !allowed) return;
 			open = false;
 			onsaved(saved);
 		} catch (err) {
-			error = err instanceof ApiError ? err.message : 'Something went wrong.';
+			if (seq === actionSeq && slug === org && open && allowed) error = err instanceof ApiError ? err.message : 'Something went wrong.';
 		} finally {
-			busy = false;
+			if (seq === actionSeq) busy = false;
 		}
 	}
 </script>
 
-<Dialog bind:open title={project ? 'Edit project' : 'New project'}>
+<Dialog bind:open title={project ? 'Edit project' : 'New project'} busy={busy || !allowed}>
+	{#snippet children({ close })}
 	{#if open}
 		<form class="flex flex-col gap-3" onsubmit={submit}>
 			<Field label="Project name" id="project-name">
@@ -152,9 +161,10 @@
 				<p class="alert alert-error alert-soft" role="alert">{error}</p>
 			{/if}
 			<div class="modal-action">
-				<Button variant="secondary" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
+				<Button variant="secondary" disabled={busy} onclick={close}>Cancel</Button>
 				<Button type="submit" disabled={busy || client === ''}>{project ? 'Save project' : 'Create project'}</Button>
 			</div>
 		</form>
 	{/if}
+	{/snippet}
 </Dialog>

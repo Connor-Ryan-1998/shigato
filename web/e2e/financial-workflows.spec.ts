@@ -52,7 +52,8 @@ test('contact details can be edited, cleared and reloaded without replacing iden
 	await expect(page.getByLabel('Email', { exact: true })).toHaveValue('corrected@example.com');
 	await expect(page.getByLabel('Phone', { exact: true })).toHaveValue('');
 	await page.getByLabel('Name', { exact: true }).fill('Discard this edit');
-	await page.getByRole('button', { name: 'Cancel editing', exact: true }).click();
+	page.once('dialog', (dialog) => dialog.accept());
+	await page.getByRole('button', { name: 'Cancel', exact: true }).click();
 	await expect(page.getByRole('cell', { name: corrected, exact: true })).toBeVisible();
 	const stored = (await api<(Contact & { name: string; email?: string; phone?: string; company_name?: string; abn?: string })[]>(page.request, 'GET', '/contacts')).find((c) => c.id === contact.id)!;
 	expect(stored).toMatchObject({ id: contact.id, kind: 'supplier', name: corrected, email: 'corrected@example.com' });
@@ -69,6 +70,7 @@ test('standalone expense splits and receipt persist without a bank import', asyn
 	const property = await api<{ id: number }>(page.request, 'POST', '/properties', { name: `Expense cottage ${suffix}`, residential: true });
 	await page.getByRole('link', { name: 'Expenses', exact: true }).click();
 	await expect(page).toHaveURL(`${base}/finance/expenses`);
+	await page.getByRole('link', { name: 'New expense', exact: true }).click();
 	await page.getByLabel('Spent on', { exact: true }).fill(today);
 	await page.getByLabel('Description', { exact: true }).fill(description);
 	await page.getByLabel('Supplier', { exact: true }).selectOption(String(supplier.id));
@@ -91,6 +93,7 @@ test('standalone expense splits and receipt persist without a bank import', asyn
 	expect(stored.bank_line_id).toBeUndefined();
 	expect(stored.receipt_file_id).toBeGreaterThan(0);
 	expect(stored.lines).toMatchObject([{ category_id: category.id, amount: 1234, gst_code: 'INP', gst_amount: 0, property_id: property.id }, { category_id: category.id, amount: 566, gst_code: 'FRE', gst_amount: 0 }]);
+	await page.getByRole('link', { name: 'Back to expenses', exact: true }).click();
 	await page.getByLabel('From', { exact: true }).fill(today);
 	await page.getByLabel('To', { exact: true }).fill(today);
 	await expect(page.getByRole('link', { name: description, exact: true })).toBeVisible();
@@ -100,7 +103,7 @@ test('standalone expense splits and receipt persist without a bank import', asyn
 	await expect(page.getByText('From must not be after To.', { exact: true })).toBeVisible();
 	await page.getByLabel('To', { exact: true }).fill(next.toISOString().slice(0, 10));
 	await expect(page.getByText('No expenses found.', { exact: true })).toBeVisible();
-	await savedLink.click();
+	await page.goto(`${base}${savedPath}`);
 	await expect(page).toHaveURL(`${base}${savedPath}`);
 	await expect(page.getByRole('heading', { name: description, exact: true })).toBeVisible();
 	await page.reload();
@@ -195,6 +198,92 @@ test('invoice survives session expiry and is issued exactly once', async ({ page
 	expect(listed.total).toBe(before.total + 1);
 });
 
+test('shared dialogs protect edits, recover from errors, and restore keyboard focus', async ({ page }) => {
+	await page.goto(`${base}/finance/contacts`);
+	const launch = page.getByRole('button', { name: 'New contact', exact: true });
+	await launch.click();
+	const editor = page.getByRole('dialog', { name: 'New contact', exact: true });
+	await expect(editor.getByLabel('Contact kind', { exact: true })).toBeFocused();
+	await editor.getByRole('button', { name: 'Create contact', exact: true }).focus();
+	await page.keyboard.press('Tab');
+	// Chromium can visit browser chrome between the last and first modal control.
+	const focus = await page.evaluate(() => ({ modal: !!document.activeElement?.closest('dialog'), browser: document.activeElement === document.body }));
+	expect(focus.modal || focus.browser).toBe(true);
+	if (focus.browser) await page.keyboard.press('Tab');
+	await expect(editor.getByLabel('Contact kind', { exact: true })).toBeFocused();
+	await editor.getByLabel('Name', { exact: true }).fill('Protected draft');
+	page.once('dialog', (dialog) => dialog.dismiss());
+	await page.keyboard.press('Escape');
+	await expect(editor).toBeVisible();
+	await expect(editor.getByLabel('Name', { exact: true })).toHaveValue('Protected draft');
+	await page.route('**/api/v1/orgs/finance/contacts', async (route) => {
+		if (route.request().method() === 'POST') await route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: 'Simulated contact rejection' }) });
+		else await route.continue();
+	});
+	await editor.getByRole('button', { name: 'Create contact', exact: true }).click();
+	await expect(editor.getByRole('alert')).toHaveText('Simulated contact rejection');
+	await expect(editor.getByLabel('Name', { exact: true })).toHaveValue('Protected draft');
+	page.once('dialog', (dialog) => dialog.accept());
+	await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
+	await expect(editor).not.toBeVisible();
+	await expect(launch).toBeFocused();
+});
+
+test('cancelling expired-session sign-in leaves a pending draft without another prompt', async ({ page }) => {
+	await page.goto(`${base}/finance/invoices/new`);
+	await page.getByLabel('Description', { exact: true }).fill('Expired draft');
+	await page.getByLabel('Quantity', { exact: true }).fill('1');
+	await page.getByLabel('Unit price ($)', { exact: true }).fill('10');
+	const cookie = (await page.context().cookies()).find((c) => c.name === 'shigoto_session')!;
+	const hash = createHash('sha256').update(cookie.value).digest('hex');
+	psql(`UPDATE sessions SET expires_at=now()-interval '1 minute' WHERE token_hash=decode('${hash}','hex')`);
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	const prompts: string[] = [];
+	page.on('dialog', async (dialog) => { prompts.push(dialog.type()); await dialog.dismiss(); });
+	await page.getByRole('dialog', { name: 'Session expired' }).getByRole('button', { name: 'Cancel', exact: true }).click();
+	await expect(page).toHaveURL(new RegExp(`${base}/login(?:\\?|$)`));
+	expect(prompts).toEqual([]);
+});
+
+test('page editors protect navigation and settings reset to saved values', async ({ page }) => {
+	await page.goto(`${base}/finance/settings`);
+	const name = page.getByLabel('Organisation name', { exact: true });
+	const original = await name.inputValue();
+	await name.fill('Unsaved organisation');
+	const discard = page.waitForEvent('dialog');
+	const navigate = page.getByRole('link', { name: 'Contacts', exact: true }).click();
+	await (await discard).dismiss();
+	await navigate;
+	await expect(page).toHaveURL(`${base}/finance/settings`);
+	await expect(name).toHaveValue('Unsaved organisation');
+	page.once('dialog', (dialog) => dialog.accept());
+	await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+	await expect(name).toHaveValue(original);
+	await page.getByRole('link', { name: 'Invoices', exact: true }).click();
+	await page.getByRole('button', { name: 'New invoice', exact: true }).click();
+	await page.getByLabel('Description', { exact: true }).fill('Unsaved invoice');
+	await expect(page.getByLabel('Due in days', { exact: true })).toHaveAttribute('aria-describedby', 'due-in-days-hint');
+	page.once('dialog', (dialog) => dialog.dismiss());
+	await page.goBack();
+	await expect(page).toHaveURL(`${base}/finance/invoices/new`);
+	await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Unsaved invoice');
+	page.once('dialog', (dialog) => dialog.accept());
+	await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+	await expect(page).toHaveURL(`${base}/finance/invoices`);
+});
+
+test('staff lists stay within narrow screens in both themes', async ({ page }) => {
+	await page.setViewportSize({ width: 375, height: 812 });
+	for (const colorScheme of ['light', 'dark'] as const) {
+		await page.emulateMedia({ colorScheme });
+		for (const path of ['contacts', 'properties', 'time', 'expenses', 'settings']) {
+			await page.goto(`${base}/finance/${path}`);
+			await expect(page.locator('main h1')).toHaveCount(1);
+			await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+		}
+	}
+});
+
 test('logged time bills once and locks its entry', async ({ page }) => {
 	const contacts = await api<Contact[]>(page.request, 'GET', '/contacts');
 	const client = contacts.find((c) => c.kind === 'client')!;
@@ -239,13 +328,15 @@ test('logged time bills once and locks its entry', async ({ page }) => {
 
 test('property and lease persist and expose their ledger', async ({ page }) => {
 	await page.goto(`${base}/finance/properties`);
+	await page.getByRole('button', { name: 'New property', exact: true }).click();
 	await page.getByLabel('Name', { exact: true }).fill('Finance cottage');
 	await page.getByRole('button', { name: 'Create property', exact: true }).click();
-	await expect(page.getByRole('heading', { name: 'Finance cottage' })).toBeVisible();
+	await expect(page.getByRole('cell', { name: 'Finance cottage', exact: true })).toBeVisible();
+	await page.getByRole('link', { name: 'New lease', exact: true }).click();
 	await page.getByLabel('Start', { exact: true }).fill(today);
 	await page.getByLabel('Rent ($)', { exact: true }).fill('500');
 	await page.getByRole('button', { name: 'Create lease', exact: true }).click();
-	await page.getByRole('link', { name: `Lease from ${today}`, exact: true }).click();
+	await page.getByRole('link', { name: 'View saved lease', exact: true }).click();
 	await expect(page.getByRole('heading', { name: 'Ledger', exact: true })).toBeVisible();
 	const id = page.url().split('/').at(-1);
 	const lease = await api<{ rent_changes: { amount: number }[] }>(page.request, 'GET', `/leases/${id}`);
@@ -314,6 +405,7 @@ test('new contacts persist, filter and appear in lease and project forms', async
 	for (const kind of ['tenant', 'client', 'supplier']) {
 		const name = `UI ${kind} ${suffix}`;
 		created[kind] = name;
+		await page.getByRole('button', { name: 'New contact', exact: true }).click();
 		await page.getByLabel('Contact kind', { exact: true }).selectOption(kind);
 		await page.getByLabel('Name', { exact: true }).fill(name);
 		await page.getByLabel('Email', { exact: true }).fill(`${kind}-${suffix}@example.com`);
@@ -333,11 +425,12 @@ test('new contacts persist, filter and appear in lease and project forms', async
 		expect(contacts.find((c) => c.name === name)).toMatchObject({ kind });
 	}
 	await api(page.request, 'POST', '/properties', { name: `Contact fixture ${suffix}`, residential: true });
-	await page.goto(`${base}/finance/properties`);
+	await page.goto(`${base}/finance/leases/new`);
 	const tenant = contacts.find((c) => c.name === created.tenant)!;
 	await page.getByLabel('Tenant', { exact: true }).selectOption(String(tenant.id));
 	await expect(page.getByLabel('Tenant', { exact: true })).toHaveValue(String(tenant.id));
-	await page.goto(`${base}/finance/projects`);
+	page.once('dialog', (dialog) => dialog.accept());
+	await page.getByRole('link', { name: 'Projects', exact: true }).click();
 	await page.getByRole('button', { name: 'New project' }).click();
 	const client = contacts.find((c) => c.name === created.client)!;
 	await page.getByLabel('Customer', { exact: true }).selectOption(String(client.id));
@@ -430,7 +523,7 @@ test('existing lease onboarding persists co-tenants and opening balances', async
 	const primary = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'tenant', name: `Primary ${suffix}` });
 	const co = await api<{ id: number }>(page.request, 'POST', '/contacts', { kind: 'tenant', name: `Co ${suffix}` });
 	const property = await api<{ id: number }>(page.request, 'POST', '/properties', { name: `Onboard ${suffix}`, residential: true });
-	await page.goto(`${base}/finance/properties`);
+	await page.goto(`${base}/finance/leases/new`);
 	await page.getByLabel('Property', { exact: true }).selectOption(String(property.id));
 	await page.getByLabel('Tenant', { exact: true }).selectOption(String(primary.id));
 	await page.getByLabel(`Co-tenant: Co ${suffix}`, { exact: true }).check();
@@ -521,29 +614,33 @@ test('billed-period lease changes save with invoice links and preserve financial
 	await page.goto(`${base}/finance/leases/${lease.id}`);
 	const future = new Date(`${ledger.periods.at(-1)!.end}T00:00:00Z`);
 	future.setUTCDate(future.getUTCDate() + 1);
+	await page.getByRole('button', { name: 'Change rent', exact: true }).click();
 	await page.getByLabel('New rent from', { exact: true }).fill(future.toISOString().slice(0, 10));
 	await page.getByLabel('Rent ($)', { exact: true }).fill('550');
-	await page.getByRole('button', { name: 'Change rent', exact: true }).click();
+	await page.getByRole('dialog').getByRole('button', { name: 'Change rent', exact: true }).click();
 	await expect(page.getByText('Rent change saved.', { exact: true })).toBeVisible();
 	await expect(page.getByRole('status', { name: 'Invoice review required' })).toHaveCount(0);
 	start.setUTCDate(start.getUTCDate() + 1);
+	await page.getByRole('button', { name: 'Change rent', exact: true }).click();
 	await page.getByLabel('New rent from', { exact: true }).fill(start.toISOString().slice(0, 10));
 	await page.getByLabel('Rent ($)', { exact: true }).fill('520');
-	await page.getByRole('button', { name: 'Change rent', exact: true }).click();
+	await page.getByRole('dialog').getByRole('button', { name: 'Change rent', exact: true }).click();
 	const panel = page.getByRole('status', { name: 'Invoice review required' });
 	await expect(panel).toBeVisible();
 	for (const period of ledger.periods) {
 		await expect(panel.getByRole('link').filter({ hasText: `Draft invoice ${period.invoice_id}` })).toHaveAttribute('href', `/finance/invoices/${period.invoice_id}`);
 	}
+	await page.getByRole('button', { name: 'Add charge', exact: true }).click();
 	await page.getByLabel('Charge', { exact: true }).fill('Backdated water charge');
 	await page.getByLabel('Amount per period ($)', { exact: true }).fill('10');
 	await page.getByLabel('From', { exact: true }).fill(startDate);
-	await page.getByRole('button', { name: 'Add charge', exact: true }).click();
+	await page.getByRole('dialog').getByRole('button', { name: 'Add charge', exact: true }).click();
 	await expect(page.getByText(/Charge added\./)).toBeVisible();
 	await expect(panel.getByRole('link')).toHaveCount(ledger.periods.length);
+	await page.getByRole('button', { name: 'Terminate lease', exact: true }).click();
 	await page.getByLabel('Terminate on', { exact: true }).fill(start.toISOString().slice(0, 10));
 	page.once('dialog', (dialog) => dialog.accept());
-	await page.getByRole('button', { name: 'Terminate lease', exact: true }).click();
+	await page.getByRole('dialog').getByRole('button', { name: 'Terminate lease', exact: true }).click();
 	await expect(page.getByText(/Lease terminated\./)).toBeVisible();
 	await expect(panel.getByRole('link')).toHaveCount(ledger.periods.length);
 	const saved = await api<{ rent_changes: unknown[]; charges: unknown[]; termination_date: string }>(page.request, 'GET', `/leases/${lease.id}`);

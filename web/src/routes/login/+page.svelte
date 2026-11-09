@@ -70,6 +70,7 @@
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
+		if (submitting || magicSubmitting) return;
 		error = '';
 		submitting = true;
 		try {
@@ -104,6 +105,7 @@
 	// an enumeration risk - so those show the server's own message.
 	async function submitMagic(e: SubmitEvent) {
 		e.preventDefault();
+		if (magicSubmitting || submitting) return;
 		magicError = '';
 		magicSubmitting = true;
 		try {
@@ -121,6 +123,7 @@
 	<div class="flex w-full max-w-sm flex-col gap-4">
 	<form onsubmit={submit} class="card-body card bg-base-100 shadow">
 		<h1 class="card-title text-2xl">Sign in</h1>
+		<fieldset disabled={submitting || magicSubmitting} class="grid min-w-0 gap-4">
 		<Field label="Email" id="email">
 			<input class="input w-full" id="email" type="email" bind:value={email} required autocomplete="username" />
 		</Field>
@@ -134,10 +137,11 @@
 				autocomplete="current-password"
 			/>
 		</Field>
+		</fieldset>
 		{#if error}
 			<p class="alert alert-error alert-soft" role="alert">{error}</p>
 		{/if}
-		<Button type="submit" disabled={submitting}>Sign in</Button>
+		<Button type="submit" busy={submitting} disabled={magicSubmitting}>Sign in</Button>
 		{#if sso}
 			<div class="divider my-0">or</div>
 			<a class="btn btn-outline" href={oidcStartUrl()}>Sign in with SSO</a>
@@ -149,6 +153,7 @@
 		{#if magicSent}
 			<p role="status" class="alert alert-success alert-soft">If that's a shigoto account, check your inbox for a sign-in link.</p>
 		{:else}
+			<fieldset disabled={magicSubmitting || submitting} class="grid min-w-0 gap-4">
 			<Field label="Your email" id="magic-email">
 				<input
 					class="input w-full"
@@ -159,10 +164,11 @@
 					autocomplete="username"
 				/>
 			</Field>
+			</fieldset>
 			{#if magicError}
 				<p class="alert alert-error alert-soft" role="alert">{magicError}</p>
 			{/if}
-			<Button type="submit" variant="secondary" disabled={magicSubmitting}>
+			<Button type="submit" variant="secondary" busy={magicSubmitting} disabled={submitting}>
 				Email me a sign-in link
 			</Button>
 		{/if}

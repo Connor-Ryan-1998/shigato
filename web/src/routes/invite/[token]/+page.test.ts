@@ -29,6 +29,16 @@ const baseDetails = {
 };
 
 describe('invite accept page', () => {
+	it('blocks repeat acceptance and locks the draft during submission', async () => {
+		vi.stubGlobal('fetch', vi.fn((path: RequestInfo | URL) => String(path).endsWith('/accept') ? new Promise<Response>(() => {}) : Promise.resolve(jsonResponse(200, baseDetails))));
+		render(InvitePage);
+		await screen.findByText('Join Acme');
+		const form = screen.getByRole('button', { name: 'Create account and accept' }).closest('form')!;
+		await fireEvent.submit(form);
+		await fireEvent.submit(form);
+		expect(vi.mocked(fetch).mock.calls.filter(([path]) => String(path).endsWith('/accept'))).toHaveLength(1);
+		expect(screen.getByLabelText('Password').matches(':disabled')).toBe(true);
+	});
 	beforeEach(() => {
 		session.clear();
 	});

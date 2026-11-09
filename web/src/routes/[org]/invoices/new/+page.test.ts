@@ -5,8 +5,10 @@ vi.mock('$app/state', () => ({
 	page: { params: { org: 'acme' }, url: new URL('http://localhost/acme/invoices/new') }
 }));
 
+const { gotoMock } = vi.hoisted(() => ({ gotoMock: vi.fn() }));
 vi.mock('$app/navigation', () => ({
-	goto: vi.fn()
+	goto: gotoMock,
+	beforeNavigate: vi.fn()
 }));
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
@@ -34,9 +36,23 @@ beforeEach(() => {
 		this.removeAttribute('open');
 	});
 	apiMock.mockReset();
+	gotoMock.mockReset();
 });
 
 describe('new invoice page - New contact dialog failure', () => {
+	it.each(['pending', 'rejected'])('retains a saved invoice without allowing another write when navigation is %s', async (navigation) => {
+		apiMock.mockImplementation((method: string) => Promise.resolve(method === 'GET' ? [{ id: 4, name: 'Client', kind: 'client' }] : { id: 77 }));
+		gotoMock.mockImplementation(() => navigation === 'pending' ? new Promise(() => {}) : Promise.reject(new Error('Navigation failed')));
+		render(Page);
+		await screen.findByRole('option', { name: 'Client' });
+		await fireEvent.input(screen.getByLabelText('Description'), { target: { value: 'Work' } });
+		await fireEvent.input(screen.getByLabelText('Quantity'), { target: { value: '1' } });
+		await fireEvent.input(screen.getByLabelText('Unit price ($)'), { target: { value: '100' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+		expect((await screen.findByRole('link', { name: 'View saved invoice' })).getAttribute('href')).toBe('/acme/invoices/77');
+		expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+		expect(apiMock.mock.calls.filter(([method]) => method === 'POST')).toHaveLength(1);
+	});
 	it('keeps the dialog open and shows the server error verbatim when POST /contacts fails', async () => {
 		apiMock.mockImplementation((method: string, path: string) => {
 			if (method === 'GET' && path.endsWith('/contacts')) return Promise.resolve([]);
@@ -54,13 +70,13 @@ describe('new invoice page - New contact dialog failure', () => {
 		await screen.findByLabelText('Name');
 
 		await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'Jane Client' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Create contact' }));
 
 		const errorText = await screen.findByText('name is required');
 		expect(errorText).toBeTruthy();
 
 		// The dialog must still be open - its fields are still present.
 		expect(screen.getByLabelText('Name')).toBeTruthy();
-		expect(screen.getByLabelText('Kind')).toBeTruthy();
+		expect(screen.getByLabelText('Contact kind')).toBeTruthy();
 	});
 });

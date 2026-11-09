@@ -63,6 +63,8 @@
 		projects,
 		busy = false,
 		error,
+		oncancel,
+		onchange,
 		onReceiptUpload,
 		onSubmit
 	}: {
@@ -77,6 +79,8 @@
 		projects?: SimpleOption[];
 		busy?: boolean;
 		error?: string;
+		oncancel?: () => void;
+		onchange?: () => void;
 		// Uploads the chosen file (POST /files) and resolves to its id. Left
 		// undefined in tests that never touch the file input; the parent
 		// (which owns org/api access) supplies the real implementation.
@@ -180,11 +184,15 @@
 	);
 
 	function addRow() {
+		if (busy || uploadingReceipt) return;
 		rows.push(emptyRow());
+		onchange?.();
 	}
 
 	function removeRow(id: number) {
+		if (busy || uploadingReceipt) return;
 		rows = rows.filter((r) => r.id !== id);
+		onchange?.();
 	}
 
 	function submit() {
@@ -210,6 +218,7 @@
 	}
 </script>
 
+<form onsubmit={(event) => { event.preventDefault(); submit(); }} oninput={() => onchange?.()} onchange={() => onchange?.()}>
 <fieldset class="m-0 flex min-w-0 flex-col gap-4 border-0 p-0" disabled={busy || uploadingReceipt}>
 	<legend class="mb-2 font-semibold">Expense details</legend>
 	<div class="flex flex-col gap-3">
@@ -312,6 +321,8 @@
 	{/if}
 
 	<div class="flex justify-end gap-3">
-		<Button onclick={submit} disabled={!valid || uploadingReceipt}>Save</Button>
+		{#if oncancel}<Button variant="secondary" onclick={oncancel}>Cancel</Button>{/if}
+		<Button type="submit" {busy} disabled={!valid || uploadingReceipt}>Save</Button>
 	</div>
 </fieldset>
+</form>

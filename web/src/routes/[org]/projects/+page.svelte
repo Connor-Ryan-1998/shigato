@@ -11,6 +11,8 @@
 	import EmptyState from '../../../lib/components/EmptyState.svelte';
 	import Toast from '../../../lib/components/Toast.svelte';
 	import ProjectDialog from '../../../lib/modules/timesheets/ProjectDialog.svelte';
+	import FilterBar from '../../../lib/components/FilterBar.svelte';
+	import LoadState from '../../../lib/components/LoadState.svelte';
 	import {
 		BILLING_LABELS,
 		STATUS_LABELS,
@@ -84,10 +86,9 @@
 
 {#if !canRead}
 	<p role="alert">You do not have permission to view projects.</p>
-{:else if loaded !== org}
-	{#if !error}<p role="status">Loading projects…</p>{/if}
 {:else}
-	<div class="mb-4 flex flex-wrap items-center gap-3">
+	<LoadState loading={loaded !== org} {error} loadingLabel="Loading projects…" onretry={() => load(org)}>
+	<FilterBar>
 		<label class="input w-full max-w-xs">
 			<span class="sr-only">Search projects</span>
 			<input type="search" placeholder="Search projects" bind:value={search} />
@@ -102,7 +103,7 @@
 				<option value="all">All</option>
 			</select>
 		</label>
-	</div>
+	</FilterBar>
 
 	{#if visible.length === 0}
 		<EmptyState title="No projects" description={projects.length ? 'Nothing matches this search.' : 'Create a project to start logging time.'} />
@@ -129,10 +130,7 @@
 			</table>
 		</div>
 	{/if}
+	</LoadState>
 {/if}
 
-<ProjectDialog bind:open={creating} {org} {contacts} onsaved={(p) => goto(`/${org}/projects/${p.id}`)} />
-
-{#if error}
-	<Toast message={error} tone="danger" onDismiss={() => (error = '')} />
-{/if}
+{#if isAdmin}<ProjectDialog bind:open={creating} {org} {contacts} allowed={isAdmin} onsaved={(p) => goto(`/${org}/projects/${p.id}`)} />{/if}

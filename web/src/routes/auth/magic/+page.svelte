@@ -47,6 +47,7 @@
 <div class="flex min-h-screen items-center justify-center bg-base-200 p-4">
 	<div class="card w-full max-w-sm bg-base-100 shadow">
 		<div class="card-body items-center text-center">
+		<h1 class="text-2xl font-bold">Sign in</h1>
 	{#if status === 'verifying'}
 		<p aria-live="polite">Signing you in…</p>
 	{:else}

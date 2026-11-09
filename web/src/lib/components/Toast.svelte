@@ -15,7 +15,7 @@
 		'alert alert-soft',
 		{ success: 'alert-success', warning: 'alert-warning', danger: 'alert-error', info: 'alert-info' }[tone]
 	]}
-	role="status"
+	role={tone === 'danger' ? 'alert' : 'status'}
 >
 	<span>{message}</span>
 	{#if onDismiss}
