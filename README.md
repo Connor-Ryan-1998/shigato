@@ -142,6 +142,28 @@ when `index.html` is missing.
 
 ## Configuration
 
+### Published container releases
+
+After the existing verification and audit jobs pass, CI builds linux/amd64 and
+linux/arm64 images. Non-PR `main` builds publish
+`ghcr.io/connor-ryan-1998/shigoto:sha-<full-commit>` and `:latest`; PRs only build.
+The source repository remains `Connor-Ryan-1998/shigato` (spelling intentional).
+Make the GHCR package public or provide protected read-only pull credentials on
+the deployment host. Never bypass a failing audit to publish a release.
+
+Production deployment selects a reviewed published SHA tag, not `latest`, and
+runs a dedicated private Postgres alongside the app. Do not use development
+Compose credentials, exposed ports or Mailpit in production. Persist both the
+database and `SHIGOTO_FILES_DIR`; startup applies migrations, so an older image
+alone cannot undo database changes. Owner bootstrap is a one-time manual action,
+not a deployment task. The scratch image has no shell-based healthcheck.
+
+The infrastructure repository's `ansible/roles/shigoto/README.md` describes ERP2
+deployment, protected configuration and first-owner commands. That initial role
+does **not** add Shigoto to backups or register an Authentik application. Do not
+admit real data until backup/recovery is addressed. Changing Postgres's initial
+password file does not rotate the password of an initialized database.
+
 The server is configured by environment variables, all prefixed `SHIGOTO_`:
 
 | Variable | Required | Default | Description |
