@@ -1,0 +1,97 @@
+# Allocate(payment, lines) cases. `want` is every share in line order. The
+# adapter also checks the invariant every allocation must hold: the shares'
+# incl-GST amounts sum exactly to the payment.
+- name: product overflow
+  payment: 6600000000
+  lines:
+    - {amount: 3000000000, gst: 300000000}
+    - {amount: 3000000000, gst: 300000000}
+  want:
+    - {incl: 3300000000, gst: 300000000, ex: 3000000000}
+    - {incl: 3300000000, gst: 300000000, ex: 3000000000}
+
+- name: GST product overflow
+  payment: 110000000000
+  lines:
+    - {amount: 100000000000, gst: 10000000000}
+  want:
+    - {incl: 110000000000, gst: 10000000000, ex: 100000000000}
+
+- name: rounding overflow
+  payment: 3000000000
+  lines:
+    - {amount: 2000000000}
+    - {amount: 2000000000}
+  want:
+    - {incl: 1500000000, gst: 0, ex: 1500000000}
+    - {incl: 1500000000, gst: 0, ex: 1500000000}
+
+- name: signed half cent negative goes to first line
+  payment: -1
+  lines: [{amount: 1, gst: 1}, {amount: 1, gst: 1}]
+  want:
+    - {incl: -1, gst: -1, ex: 0}
+    - {incl: 0, gst: 0, ex: 0}
+
+- name: signed half cent zero
+  payment: 0
+  lines: [{amount: 1, gst: 1}, {amount: 1, gst: 1}]
+  want:
+    - {incl: 0, gst: 0, ex: 0}
+    - {incl: 0, gst: 0, ex: 0}
+
+- name: signed half cent positive goes to first line
+  payment: 1
+  lines: [{amount: 1, gst: 1}, {amount: 1, gst: 1}]
+  want:
+    - {incl: 1, gst: 1, ex: 0}
+    - {incl: 0, gst: 0, ex: 0}
+
+- name: remainder goes to last line
+  # A $50 payment against a GST line and a FRE line.
+  payment: 5000
+  lines:
+    - {amount: 10000, gst: 1000, code: GST}
+    - {amount: 4000, gst: 0, code: FRE}
+  want:
+    - {incl: 3667, gst: 333, ex: 3334}
+    - {incl: 1333, gst: 0, ex: 1333}
+
+- name: single line takes the whole payment
+  # GST = round(700 x 100 / 1000) = 70.
+  payment: 700
+  lines: [{amount: 900, gst: 100, code: GST}]
+  want:
+    - {incl: 700, gst: 70, ex: 630}
+
+- name: zero total line gets a zero share
+  # Must not divide by zero or disturb the other line.
+  payment: 1000
+  lines:
+    - {amount: 0, gst: 0, code: N-T}
+    - {amount: 1000, gst: 0, code: FRE}
+  want:
+    - {incl: 0, gst: 0, ex: 0}
+    - {incl: 1000, gst: 0, ex: 1000}
+
+- name: three uneven lines partial payment
+  payment: 1500
+  lines:
+    - {amount: 1000, gst: 0, code: FRE}
+    - {amount: 777, gst: 78, code: GST}
+    - {amount: 333, gst: 0, code: FRE}
+  want:
+    - {incl: 686, gst: 0, ex: 686}
+    - {incl: 586, gst: 53, ex: 533}
+    - {incl: 228, gst: 0, ex: 228}
+
+- name: full payment gives exact line totals
+  payment: 15188
+  lines:
+    - {amount: 10000, gst: 1000, code: GST}
+    - {amount: 3333, gst: 0, code: FRE}
+    - {amount: 777, gst: 78, code: GST}
+  want:
+    - {incl: 11000, gst: 1000, ex: 10000}
+    - {incl: 3333, gst: 0, ex: 3333}
+    - {incl: 855, gst: 78, ex: 777}

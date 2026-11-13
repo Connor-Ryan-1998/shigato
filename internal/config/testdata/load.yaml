@@ -1,0 +1,104 @@
+# Load(getenv) cases. The adapter starts every case from a valid base env:
+#   SHIGOTO_DATABASE_URL=postgres://x
+#   SHIGOTO_BASE_URL=http://localhost:8080
+# and applies `env` on top (an empty value unsets a variable). Each case has
+# exactly one of `want` (fields to check; omitted fields are not checked) or
+# `err` (a substring the error must contain).
+- name: defaults
+  want:
+    listen: ":8080"
+    modules: [property, timesheets, reconciliation]
+    timezone: Australia/Brisbane
+    scheduler: true
+    smtp_host: ""
+    trusted_proxy: ""
+    oidc_configured: false
+
+- name: unknown module rejected
+  env: {SHIGOTO_MODULES: "property,payroll"}
+  err: payroll
+
+- name: database URL required
+  env: {SHIGOTO_DATABASE_URL: ""}
+  err: SHIGOTO_DATABASE_URL
+
+- name: base URL required
+  env: {SHIGOTO_BASE_URL: ""}
+  err: SHIGOTO_BASE_URL
+
+- name: base URL trailing slash trimmed
+  env: {SHIGOTO_BASE_URL: "https://shigoto.example/"}
+  want: {base_url: "https://shigoto.example"}
+
+- name: base URL without scheme rejected
+  env: {SHIGOTO_BASE_URL: not-a-url}
+  err: SHIGOTO_BASE_URL
+
+- name: base URL with ftp scheme rejected
+  env: {SHIGOTO_BASE_URL: "ftp://example.com"}
+  err: SHIGOTO_BASE_URL
+
+- name: base URL without host rejected
+  env: {SHIGOTO_BASE_URL: "http://"}
+  err: SHIGOTO_BASE_URL
+
+- name: base URL with a space rejected
+  env: {SHIGOTO_BASE_URL: "https:// has a space"}
+  err: SHIGOTO_BASE_URL
+
+- name: modules subset
+  env: {SHIGOTO_MODULES: timesheets}
+  want: {modules: [timesheets]}
+
+- name: empty module entries ignored
+  env: {SHIGOTO_MODULES: "property,"}
+  want: {modules: [property]}
+
+- name: invalid timezone rejected
+  env: {SHIGOTO_TIMEZONE: Not/AZone}
+  err: Not/AZone
+
+- name: scheduler off
+  env: {SHIGOTO_SCHEDULER: "off"}
+  want: {scheduler: false}
+
+- name: invalid scheduler value rejected
+  env: {SHIGOTO_SCHEDULER: maybe}
+  err: SHIGOTO_SCHEDULER
+
+- name: SMTP TLS defaults to starttls
+  env: {SHIGOTO_SMTP_HOST: smtp.example.com, SHIGOTO_SMTP_FROM: noreply@example.com}
+  want: {smtp_tls: starttls}
+
+- name: SMTP TLS none rejected for a real host
+  env: {SHIGOTO_SMTP_HOST: smtp.example.com, SHIGOTO_SMTP_FROM: noreply@example.com, SHIGOTO_SMTP_TLS: none}
+  err: SHIGOTO_SMTP_TLS
+
+- name: SMTP TLS none allowed for mailpit
+  env: {SHIGOTO_SMTP_HOST: mailpit, SHIGOTO_SMTP_FROM: noreply@example.com, SHIGOTO_SMTP_TLS: none}
+  want: {smtp_tls: none}
+
+- name: SMTP host without from address rejected
+  env: {SHIGOTO_SMTP_HOST: smtp.example.com}
+  err: SHIGOTO_SMTP_FROM
+
+- name: trusted proxy CIDR parsed
+  env: {SHIGOTO_TRUSTED_PROXY: 10.0.0.0/8}
+  want: {trusted_proxy: 10.0.0.0/8}
+
+- name: invalid trusted proxy rejected
+  env: {SHIGOTO_TRUSTED_PROXY: not-a-cidr}
+  err: SHIGOTO_TRUSTED_PROXY
+
+- name: partial OIDC config rejected
+  env: {SHIGOTO_OIDC_ISSUER: "https://idp.example.com", SHIGOTO_OIDC_CLIENT_ID: shigoto}
+  err: SHIGOTO_OIDC_CLIENT_SECRET
+
+- name: OIDC default scopes
+  env:
+    SHIGOTO_OIDC_ISSUER: "https://idp.example.com"
+    SHIGOTO_OIDC_CLIENT_ID: shigoto
+    SHIGOTO_OIDC_CLIENT_SECRET: secret
+  want:
+    oidc_configured: true
+    oidc_scopes: [openid, email, profile]

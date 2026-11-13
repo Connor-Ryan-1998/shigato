@@ -58,3 +58,25 @@ func TestLoadRejectsUnknownKey(t *testing.T) {
 		t.Fatalf("Load returned %v after Fatalf, want nil", cases)
 	}
 }
+
+func TestLoadRejectsDuplicateOrMissingName(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"duplicate", "- {name: a, in: 1}\n- {name: a, in: 2}\n", `duplicate case name "a"`},
+		{"missing", "- {name: a, in: 1}\n- {in: 2}\n", "case 2 has no name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "names.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake := &recordingTB{TB: t}
+			cases := table.Load[sampleCase](fake, path)
+			if !fake.fatal || !strings.Contains(fake.message, path) || !strings.Contains(fake.message, tc.want) {
+				t.Fatalf("Fatalf called=%v message %q; want path %q and %q", fake.fatal, fake.message, path, tc.want)
+			}
+			if cases != nil {
+				t.Fatalf("Load returned %v after Fatalf, want nil", cases)
+			}
+		})
+	}
+}

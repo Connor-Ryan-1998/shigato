@@ -1,0 +1,164 @@
+# PeriodsToInvoice(terms, as_of, lead) cases. Each `want` lists every
+# returned period in order; `charges` on a wanted period is compared exactly
+# (omitted means the period carries no charges).
+- name: weekly two periods within lead
+  terms:
+    start: "2026-11-02"
+    frequency: weekly
+    changes: [{effective: "2026-11-02", amount: 50000}]
+  as_of: "2026-11-02"
+  lead: 7
+  want:
+    - {start: "2026-11-02", end: "2026-11-08", rent: 50000}
+    - {start: "2026-11-09", end: "2026-11-15", rent: 50000}
+
+- name: fortnightly skips periods up to paid-to
+  terms:
+    start: "2026-11-02"
+    frequency: fortnightly
+    paid_to: "2026-11-15"
+    changes: [{effective: "2026-11-02", amount: 100000}]
+  as_of: "2026-11-10"
+  lead: 7
+  want:
+    - {start: "2026-11-16", end: "2026-11-29", rent: 100000}
+
+- name: weekly truncated by lease end prorates last period
+  # 3 days x 50000/7 = 21428.57 -> 21429 (half away from zero).
+  terms:
+    start: "2026-11-02"
+    end: "2026-11-11"
+    frequency: weekly
+    changes: [{effective: "2026-11-02", amount: 50000}]
+  as_of: "2026-11-30"
+  want:
+    - {start: "2026-11-02", end: "2026-11-08", rent: 50000}
+    - {start: "2026-11-09", end: "2026-11-11", rent: 21429}
+
+- name: weekly rent change mid-period splits rent
+  # 3x50000/7 = 21428.57 -> 21429, 4x56000/7 = 32000 exact. Sum 53429.
+  terms:
+    start: "2026-11-02"
+    frequency: weekly
+    paid_to: "2026-11-08"
+    changes:
+      - {effective: "2026-11-02", amount: 50000}
+      - {effective: "2026-11-12", amount: 56000}
+  as_of: "2026-11-09"
+  want:
+    - {start: "2026-11-09", end: "2026-11-15", rent: 53429}
+
+- name: monthly change at next period start is not prorated
+  terms:
+    start: "2026-01-31"
+    frequency: monthly
+    changes:
+      - {effective: "2026-01-31", amount: 200000}
+      - {effective: "2026-02-28", amount: 220000}
+  as_of: "2026-02-28"
+  want:
+    - {start: "2026-01-31", end: "2026-02-27", rent: 200000}
+    - {start: "2026-02-28", end: "2026-03-30", rent: 220000}
+
+- name: change before paid-to does not affect returned periods
+  terms:
+    start: "2026-11-02"
+    frequency: weekly
+    paid_to: "2026-11-22"
+    changes:
+      - {effective: "2026-11-02", amount: 50000}
+      - {effective: "2026-11-09", amount: 56000}
+  as_of: "2026-11-23"
+  want:
+    - {start: "2026-11-23", end: "2026-11-29", rent: 56000}
+
+- name: paid-to three weeks back returns missed periods plus current
+  # 3 periods already paid: 11-02, 11-09, 11-16. As of 12-14 with lead 0
+  # lands on the 4th unpaid period: 3 missed plus current.
+  terms:
+    start: "2026-11-02"
+    frequency: weekly
+    paid_to: "2026-11-22"
+    changes: [{effective: "2026-11-02", amount: 50000}]
+  as_of: "2026-12-14"
+  want:
+    - {start: "2026-11-23", end: "2026-11-29", rent: 50000}
+    - {start: "2026-11-30", end: "2026-12-06", rent: 50000}
+    - {start: "2026-12-07", end: "2026-12-13", rent: 50000}
+    - {start: "2026-12-14", end: "2026-12-20", rent: 50000}
+
+- name: charge active from its start period only
+  terms:
+    start: "2026-11-02"
+    frequency: weekly
+    changes: [{effective: "2026-11-02", amount: 50000}]
+    charges: [{description: Water, amount: 2000, start: "2026-11-09"}]
+  as_of: "2026-11-09"
+  want:
+    - {start: "2026-11-02", end: "2026-11-08", rent: 50000}
+    - start: "2026-11-09"
+      end: "2026-11-15"
+      rent: 50000
+      charges: [{description: Water, amount: 2000}]
+
+- name: end on period last day yields nothing after end
+  terms:
+    start: "2026-11-02"
+    end: "2026-11-08"
+    frequency: weekly
+    changes: [{effective: "2026-11-02", amount: 50000}]
+  as_of: "2026-11-30"
+  want:
+    - {start: "2026-11-02", end: "2026-11-08", rent: 50000}
+
+- name: end on next period start yields a one-day period
+  # 1 day x 50000/7 = 7142.86 -> 7143.
+  terms:
+    start: "2026-11-02"
+    end: "2026-11-09"
+    frequency: weekly
+    changes: [{effective: "2026-11-02", amount: 50000}]
+  as_of: "2026-11-30"
+  want:
+    - {start: "2026-11-02", end: "2026-11-08", rent: 50000}
+    - {start: "2026-11-09", end: "2026-11-09", rent: 7143}
+
+- name: change on period last day prorates one day
+  # 6 days x 50000/7 = 42857.14 -> 42857, 1 day x 56000/7 = 8000 exact.
+  terms:
+    start: "2026-11-02"
+    frequency: weekly
+    changes:
+      - {effective: "2026-11-02", amount: 50000}
+      - {effective: "2026-11-08", amount: 56000}
+  as_of: "2026-11-02"
+  want:
+    - {start: "2026-11-02", end: "2026-11-08", rent: 50857}
+
+- name: truncated period with split rent and prorated charge
+  # 2 days x 50000/7 = 14285.7 -> 14286, 2 days x 56000/7 = 16000 exact.
+  # Charge: 4 days x 2000/7 = 1142.86 -> 1143.
+  terms:
+    start: "2026-11-02"
+    end: "2026-11-05"
+    frequency: weekly
+    changes:
+      - {effective: "2026-11-02", amount: 50000}
+      - {effective: "2026-11-04", amount: 56000}
+    charges: [{description: Water, amount: 2000, start: "2026-11-02"}]
+  as_of: "2026-11-02"
+  want:
+    - start: "2026-11-02"
+      end: "2026-11-05"
+      rent: 30286
+      charges: [{description: Water, amount: 1143}]
+
+- name: monthly end equal to natural end
+  terms:
+    start: "2026-03-31"
+    end: "2026-04-29"
+    frequency: monthly
+    changes: [{effective: "2026-03-31", amount: 200000}]
+  as_of: "2026-03-31"
+  want:
+    - {start: "2026-03-31", end: "2026-04-29", rent: 200000}
