@@ -3,7 +3,6 @@
 package timesheets_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,87 +10,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"shigoto/internal/auth"
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
-	"shigoto/internal/payments"
+	"shigoto/internal/testkit"
 	"shigoto/internal/timesheets"
 )
-
-// noBillingProvider reports every org has no payment provider configured,
-// so billing.Service.Issue's best-effort send is a no-op.
-func noBillingProvider(string) (payments.Provider, error) {
-	return nil, payments.ErrNoProvider
-}
-
-// testBillingService builds a billing.Service for RunBilling tests: no
-// payment provider, UTC.
-func testBillingService(pool *pgxpool.Pool) *billing.Service {
-	return &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noBillingProvider, Location: time.UTC}
-}
-
-// setOrgGSTRegistered sets an org's gst_registered flag directly.
-func setOrgGSTRegistered(t *testing.T, pool *pgxpool.Pool, orgID int64, registered bool) {
-	t.Helper()
-	if _, err := pool.Exec(context.Background(), "UPDATE orgs SET gst_registered = $1 WHERE id = $2", registered, orgID); err != nil {
-		t.Fatalf("setting org gst_registered: %v", err)
-	}
-}
-
-// setOrgPayOptions gives an org two payment options (bank transfer and
-// PayID), satisfying billing.Service.Issue's QLD pay-options rule.
-func setOrgPayOptions(t *testing.T, pool *pgxpool.Pool, orgID int64) {
-	t.Helper()
-	if _, err := pool.Exec(context.Background(),
-		"UPDATE orgs SET bank_bsb = $1, bank_account = $2, payid = $3 WHERE id = $4",
-		"062-000", "12345678", "owner@example.com", orgID,
-	); err != nil {
-		t.Fatalf("setting org pay options: %v", err)
-	}
-}
-
-// testEntry logs a time entry against taskID on workDate, under userID.
-func testEntry(t *testing.T, pool *pgxpool.Pool, orgID, userID, taskID int64, workDate time.Time, minutes int) timesheets.Entry {
-	t.Helper()
-	e, err := timesheets.CreateEntry(context.Background(), pool, orgID, userID, timesheets.Entry{
-		TaskID: taskID, WorkDate: workDate, Minutes: minutes,
-	}, workDate)
-	if err != nil {
-		t.Fatalf("CreateEntry: %v", err)
-	}
-	return e
-}
 
 // TestRunBillingSkipsFixedProjects covers fixed-price projects: their time
 // is tracked but never billed by a billing run.
 func TestRunBillingSkipsFixedProjects(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "fixed@example.com")
-	client := testContact(t, pool, org.ID, "client", "Client A")
-	b := testBillingService(pool)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	userID := e.User("fixed@example.com").ID
+	client := e.Contact(org, testkit.Name("Client A")).ID
+	b := e.BillingService()
 
-	fixed, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
-		ClientContactID: client, Name: "Fixed", HourlyRate: 12000, GSTCode: core.GST, BillingMethod: timesheets.BillingFixed,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(fixed): %v", err)
-	}
-	tm := testProject2(t, pool, org.ID, client, "Hourly")
-	fixedTask, err := timesheets.CreateTask(ctx, pool, org.ID, fixed.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask(fixed): %v", err)
-	}
-	tmTask, err := timesheets.CreateTask(ctx, pool, org.ID, tm.ID, timesheets.Task{Name: "Support"})
-	if err != nil {
-		t.Fatalf("CreateTask(tm): %v", err)
-	}
+	fixed := e.Project(org, client, testkit.ProjectName("Fixed"), testkit.ProjectRate(12000), testkit.FixedPrice())
+	tm := e.Project(org, client, testkit.ProjectName("Hourly"))
+	fixedTask := e.Task(org, fixed.ID, testkit.TaskName("Build"))
+	tmTask := e.Task(org, tm.ID, testkit.TaskName("Support"))
 	day := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
-	fixedEntry := testEntry(t, pool, org.ID, userID, fixedTask.ID, day, 120)
+	fixedEntry := e.Entry(org, userID, timesheets.Entry{TaskID: fixedTask.ID, WorkDate: day, Minutes: 120}, day)
 	in := timesheets.RunInput{ClientContactID: client, From: day, To: day, DueInDays: 14}
 
 	// Only fixed time: nothing to bill.
@@ -99,7 +40,7 @@ func TestRunBillingSkipsFixedProjects(t *testing.T) {
 		t.Fatalf("fixed-only run: err = %v, want ErrInvalidInput (no unbilled time)", err)
 	}
 
-	testEntry(t, pool, org.ID, userID, tmTask.ID, day, 60)
+	e.Entry(org, userID, timesheets.Entry{TaskID: tmTask.ID, WorkDate: day, Minutes: 60}, day)
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in)
 	if err != nil {
 		t.Fatalf("RunBilling: %v", err)
@@ -117,55 +58,31 @@ func TestRunBillingSkipsFixedProjects(t *testing.T) {
 }
 
 func TestRunBillingGroupsByTask(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setOrgGSTRegistered(t, pool, org.ID, true)
-	userID := testUser(t, pool, "entries-groups@example.com")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
+	userID := e.User("entries-groups@example.com").ID
 
-	clientA := testContact(t, pool, org.ID, "client", "Client A")
-	clientB := testContact(t, pool, org.ID, "client", "Client B")
+	clientA := e.Contact(org, testkit.Name("Client A")).ID
+	clientB := e.Contact(org, testkit.Name("Client B")).ID
 
-	p1, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
-		ClientContactID: clientA, Name: "P1", HourlyRate: 12000, GSTCode: core.GST,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(P1): %v", err)
-	}
-	p2, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
-		ClientContactID: clientA, Name: "P2", HourlyRate: 9500, GSTCode: core.GST,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(P2): %v", err)
-	}
-	t1, err := timesheets.CreateTask(ctx, pool, org.ID, p1.ID, timesheets.Task{Name: "T1"})
-	if err != nil {
-		t.Fatalf("CreateTask(T1): %v", err)
-	}
-	t2, err := timesheets.CreateTask(ctx, pool, org.ID, p2.ID, timesheets.Task{Name: "T2"})
-	if err != nil {
-		t.Fatalf("CreateTask(T2): %v", err)
-	}
-	pB, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
-		ClientContactID: clientB, Name: "PB", HourlyRate: 10000, GSTCode: core.GST,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(PB): %v", err)
-	}
-	tB, err := timesheets.CreateTask(ctx, pool, org.ID, pB.ID, timesheets.Task{Name: "TB"})
-	if err != nil {
-		t.Fatalf("CreateTask(TB): %v", err)
-	}
+	p1 := e.Project(org, clientA, testkit.ProjectName("P1"), testkit.ProjectRate(12000))
+	p2 := e.Project(org, clientA, testkit.ProjectName("P2"), testkit.ProjectRate(9500))
+	t1 := e.Task(org, p1.ID, testkit.TaskName("T1"))
+	t2 := e.Task(org, p2.ID, testkit.TaskName("T2"))
+	pB := e.Project(org, clientB, testkit.ProjectName("PB"), testkit.ProjectRate(10000))
+	tB := e.Task(org, pB.ID, testkit.TaskName("TB"))
 
-	nov15 := mustDate(t, "2026-11-15")
-	testEntry(t, pool, org.ID, userID, t1.ID, nov15, 30)
-	testEntry(t, pool, org.ID, userID, t1.ID, nov15, 20)
-	testEntry(t, pool, org.ID, userID, t2.ID, nov15, 60)
-	bEntry := testEntry(t, pool, org.ID, userID, tB.ID, nov15, 45)
+	nov15 := testkit.Date("2026-11-15")
+	e.Entry(org, userID, timesheets.Entry{TaskID: t1.ID, WorkDate: nov15, Minutes: 30}, nov15)
+	e.Entry(org, userID, timesheets.Entry{TaskID: t1.ID, WorkDate: nov15, Minutes: 20}, nov15)
+	e.Entry(org, userID, timesheets.Entry{TaskID: t2.ID, WorkDate: nov15, Minutes: 60}, nov15)
+	bEntry := e.Entry(org, userID, timesheets.Entry{TaskID: tB.ID, WorkDate: nov15, Minutes: 45}, nov15)
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
-		ClientContactID: clientA, From: mustDate(t, "2026-11-01"), To: mustDate(t, "2026-11-30"), DueInDays: 14,
+		ClientContactID: clientA, From: testkit.Date("2026-11-01"), To: testkit.Date("2026-11-30"), DueInDays: 14,
 	})
 	if err != nil {
 		t.Fatalf("RunBilling: %v", err)
@@ -199,25 +116,22 @@ func TestRunBillingGroupsByTask(t *testing.T) {
 }
 
 func TestRunBillingRangeInclusive(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "entries-range@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	ctx := e.Ctx
+	org := e.Org("acme")
+	userID := e.User("entries-range@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	testEntry(t, pool, org.ID, userID, task.ID, from.AddDate(0, 0, -1), 10) // before range
-	testEntry(t, pool, org.ID, userID, task.ID, from, 20)                   // on from
-	testEntry(t, pool, org.ID, userID, task.ID, to, 30)                     // on to
-	testEntry(t, pool, org.ID, userID, task.ID, to.AddDate(0, 0, 1), 40)    // after range
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from.AddDate(0, 0, -1), Minutes: 10}, from.AddDate(0, 0, -1)) // before range
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 20}, from)                                     // on from
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: to, Minutes: 30}, to)                                         // on to
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: to.AddDate(0, 0, 1), Minutes: 40}, to.AddDate(0, 0, 1))       // after range
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
@@ -233,23 +147,20 @@ func TestRunBillingRangeInclusive(t *testing.T) {
 }
 
 func TestRunBillingConcurrent(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "entries-concurrent@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	userID := e.User("entries-concurrent@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	testEntry(t, pool, org.ID, userID, task.ID, from, 30)
-	testEntry(t, pool, org.ID, userID, task.ID, from.AddDate(0, 0, 1), 20)
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 30}, from)
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from.AddDate(0, 0, 1), Minutes: 20}, from.AddDate(0, 0, 1))
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	in := timesheets.RunInput{ClientContactID: client, From: from, To: to, DueInDays: 14}
 
 	var wg sync.WaitGroup
@@ -290,7 +201,7 @@ func TestRunBillingConcurrent(t *testing.T) {
 	}
 
 	// A new entry billed by a second run only picks up the new entry.
-	newEntry := testEntry(t, pool, org.ID, userID, task.ID, from, 15)
+	newEntry := e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 15}, from)
 	result2, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in)
 	if err != nil {
 		t.Fatalf("second RunBilling: %v", err)
@@ -310,14 +221,14 @@ func TestRunBillingConcurrent(t *testing.T) {
 }
 
 func TestRunBillingNothingUnbilled422(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	client := testContact(t, pool, org.ID, "client", "A Client")
+	e := testkit.New(t)
+	ctx := e.Ctx
+	org := e.Org("acme")
+	client := e.Contact(org, testkit.Name("A Client")).ID
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	_, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
-		ClientContactID: client, From: mustDate(t, "2026-11-01"), To: mustDate(t, "2026-11-30"), DueInDays: 14,
+		ClientContactID: client, From: testkit.Date("2026-11-01"), To: testkit.Date("2026-11-30"), DueInDays: 14,
 	})
 	if !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("RunBilling with nothing unbilled: err = %v, want ErrInvalidInput", err)
@@ -325,23 +236,20 @@ func TestRunBillingNothingUnbilled422(t *testing.T) {
 }
 
 func TestVoidUnlocksEntries(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setOrgPayOptions(t, pool, org.ID)
-	userID := testUser(t, pool, "entries-void@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.PayOptions())
+	userID := e.User("entries-void@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	entry := testEntry(t, pool, org.ID, userID, task.ID, from, 60)
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	entry := e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 60}, from)
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	// Void only accepts an 'open' invoice, so issue it first.
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
@@ -387,22 +295,19 @@ func TestVoidUnlocksEntries(t *testing.T) {
 // 'open') unlocks its time entries the same way voiding an open invoice
 // does, and a later run bills them again.
 func TestVoidUnlocksEntriesFromDraft(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "entries-void-draft@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	userID := e.User("entries-void-draft@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	testEntry(t, pool, org.ID, userID, task.ID, from, 60)
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 60}, from)
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
@@ -449,23 +354,20 @@ func TestVoidUnlocksEntriesFromDraft(t *testing.T) {
 // actor set via billing.WithActor and a diff with client_contact_id,
 // from, to and the billed entry ids.
 func TestRunBillingAudits(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "entries-audit@example.com")
-	ownerID := testUser(t, pool, "owner-audit@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	userID := e.User("entries-audit@example.com").ID
+	ownerID := e.User("owner-audit@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	entry := testEntry(t, pool, org.ID, userID, task.ID, from, 60)
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	entry := e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 60}, from)
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	actorCtx := billing.WithActor(ctx, ownerID)
 	result, err := timesheets.RunBilling(actorCtx, b, org.ID, "acme", timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
@@ -504,23 +406,20 @@ func TestRunBillingAudits(t *testing.T) {
 }
 
 func TestRunBillingIssueFlag(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setOrgPayOptions(t, pool, org.ID)
-	userID := testUser(t, pool, "entries-issue@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	ctx := e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.PayOptions())
+	userID := e.User("entries-issue@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	testEntry(t, pool, org.ID, userID, task.ID, from, 60)
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 60}, from)
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
 	})
@@ -561,27 +460,19 @@ func TestRunBillingIssueFlag(t *testing.T) {
 // alone; see docs/superpowers/plans/2026-11-05-01-followups.md's "Plan 3
 // leftovers" section.
 func TestRunBillingZeroTotal422(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	userID := testUser(t, pool, "entries-zero-total@example.com")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj, err := timesheets.CreateProject(ctx, pool, org.ID, timesheets.Project{
-		ClientContactID: client, Name: "Pro bono", HourlyRate: 1, GSTCode: core.GST,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	task, err := timesheets.CreateTask(ctx, pool, org.ID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	userID := e.User("entries-zero-total@example.com").ID
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client, testkit.ProjectName("Pro bono"), testkit.ProjectRate(1))
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
-	from := mustDate(t, "2026-11-01")
-	to := mustDate(t, "2026-11-30")
-	testEntry(t, pool, org.ID, userID, task.ID, from, 1)
+	from := testkit.Date("2026-11-01")
+	to := testkit.Date("2026-11-30")
+	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 1}, from)
 
-	b := testBillingService(pool)
+	b := e.BillingService()
 	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
 	})
@@ -612,39 +503,33 @@ func TestRunBillingZeroTotal422(t *testing.T) {
 // --- HTTP route tests ---
 
 func TestBillingRunRouteResponseShape(t *testing.T) {
-	pool, handler, token, orgID := timesheetsTestSetup(t)
-	ctx := context.Background()
-	client := testContact(t, pool, orgID, "client", "A Client")
-	proj := testProject(t, pool, orgID, client)
-	task, err := timesheets.CreateTask(ctx, pool, orgID, proj.ID, timesheets.Task{Name: "Build"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
-	var ownerID int64
-	if err := pool.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", "owner@example.com").Scan(&ownerID); err != nil {
-		t.Fatalf("looking up owner id: %v", err)
-	}
-	if _, err := timesheets.CreateEntry(ctx, pool, orgID, ownerID, timesheets.Entry{
-		TaskID: task.ID, WorkDate: mustParseDate(t, "2026-11-01"), Minutes: 60,
-	}, mustParseDate(t, "2026-11-05")); err != nil {
-		t.Fatalf("CreateEntry: %v", err)
-	}
+	e := testkit.New(t)
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	client := e.Contact(org, testkit.Name("A Client")).ID
+	proj := e.Project(org, client)
+	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
+	e.Entry(org, owner.ID, timesheets.Entry{
+		TaskID: task.ID, WorkDate: testkit.Date("2026-11-01"), Minutes: 60,
+	}, testkit.Date("2026-11-05"))
 
 	body := map[string]any{
 		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14,
 	}
-	rr := postJSON(handler, token, "/api/v1/orgs/acme/billing-runs", body)
+	rr := s.Do(http.MethodPost, "/api/v1/orgs/acme/billing-runs", body)
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 201, body=%s", rr.Code, rr.Body)
 	}
 
 	var resp map[string]json.RawMessage
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decoding response: %v, body=%s", err, rr.Body.String())
+	if err := json.Unmarshal(rr.Body, &resp); err != nil {
+		t.Fatalf("decoding response: %v, body=%s", err, rr.Body)
 	}
 	for _, key := range []string{"invoice", "entry_count", "total_minutes"} {
 		if _, ok := resp[key]; !ok {
-			t.Fatalf("response missing top-level key %q: body=%s", key, rr.Body.String())
+			t.Fatalf("response missing top-level key %q: body=%s", key, rr.Body)
 		}
 	}
 
@@ -654,12 +539,12 @@ func TestBillingRunRouteResponseShape(t *testing.T) {
 	}
 	for _, key := range []string{"id", "contact_id", "total", "subtotal", "gst_total", "pay_options", "lines"} {
 		if _, ok := invoice[key]; !ok {
-			t.Fatalf("invoice missing snake_case key %q: body=%s", key, rr.Body.String())
+			t.Fatalf("invoice missing snake_case key %q: body=%s", key, rr.Body)
 		}
 	}
 	for _, key := range []string{"OrgID", "org_id", "ProviderRef", "provider_ref", "ProviderURL", "provider_url", "DueOn", "due_on", "DueInDays", "due_in_days"} {
 		if _, ok := invoice[key]; ok {
-			t.Fatalf("invoice leaks internal key %q: body=%s", key, rr.Body.String())
+			t.Fatalf("invoice leaks internal key %q: body=%s", key, rr.Body)
 		}
 	}
 
@@ -671,6 +556,6 @@ func TestBillingRunRouteResponseShape(t *testing.T) {
 		t.Fatalf("len(invoice.lines) = %d, want 1", len(lines))
 	}
 	if _, ok := lines[0]["unit_amount"]; !ok {
-		t.Fatalf("lines[0] missing unit_amount: body=%s", rr.Body.String())
+		t.Fatalf("lines[0] missing unit_amount: body=%s", rr.Body)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -17,54 +16,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"shigoto/internal/billing"
+	"shigoto/internal/auth"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
 	"shigoto/internal/module"
-	"shigoto/internal/payments"
 	"shigoto/internal/recon"
+	"shigoto/internal/testkit"
 )
-
-func createContact(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
-	t.Helper()
-	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: "client", Name: "Test Contact"})
-	if err != nil {
-		t.Fatalf("CreateContact: %v", err)
-	}
-	return c.ID
-}
-
-// testInvoice creates and issues a one-line, GST-free invoice totalling
-// totalCents, returning it.
-func testInvoice(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, totalCents int64) core.Invoice {
-	t.Helper()
-	ctx := context.Background()
-	draft, err := core.CreateDraftInvoice(ctx, pool, orgID, core.NewInvoice{
-		ContactID: contactID,
-		Source:    "manual",
-		DueInDays: 14,
-		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateDraftInvoice: %v", err)
-	}
-
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	inv, err := core.IssueInvoice(ctx, tx, orgID, draft.ID, time.Now())
-	if err != nil {
-		t.Fatalf("IssueInvoice: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	return inv
-}
 
 var bankLineSeq int64
 
@@ -72,7 +29,7 @@ var bankLineSeq int64
 // import, which these tests don't need) and returns its id. Each call uses
 // a fresh bank account and a unique dedupe key so repeated calls in the
 // same test never collide.
-func testBankLineID(t *testing.T, pool *pgxpool.Pool, orgID int64, amount int64, postedOn time.Time, description string) int64 {
+func testBankLineID(t testing.TB, pool *pgxpool.Pool, orgID int64, amount int64, postedOn time.Time, description string) int64 {
 	t.Helper()
 	ctx := context.Background()
 	bankLineSeq++
@@ -108,26 +65,17 @@ func bankLineStatus(t *testing.T, pool *pgxpool.Pool, lineID int64) (status stri
 	return status, reason
 }
 
-func countPayments(t *testing.T, pool *pgxpool.Pool, orgID, invoiceID int64) int {
-	t.Helper()
-	var n int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM payments WHERE org_id = $1 AND invoice_id = $2`, orgID, invoiceID).Scan(&n); err != nil {
-		t.Fatalf("counting payments: %v", err)
-	}
-	return n
-}
-
 // TestMatchInvoicePaysAndUnmatchReverts covers the happy path end to end: a
 // credit line matched to an invoice of the same total pays it off, and
 // Unmatch reverses that cleanly - the invoice goes back to open and no
 // payment remains.
 func TestMatchInvoicePaysAndUnmatchReverts(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
-	inv := testInvoice(t, pool, org.ID, contactID, 50000)
-	lineID := testBankLineID(t, pool, org.ID, 50000, mustDate(t, "2026-11-02"), "Transfer INV payment")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
+	inv := e.Invoice(org, contactID, testkit.Amount(50000), testkit.Issued(time.Now()))
+	lineID := testBankLineID(t, pool, org.ID, 50000, testkit.Date("2026-11-02"), "Transfer INV payment")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -169,7 +117,7 @@ func TestMatchInvoicePaysAndUnmatchReverts(t *testing.T) {
 	if reverted.Status != "open" {
 		t.Fatalf("invoice status after unmatch = %s, want open", reverted.Status)
 	}
-	if n := countPayments(t, pool, org.ID, inv.ID); n != 0 {
+	if n := e.Count("payments", "org_id = $1 AND invoice_id = $2", org.ID, inv.ID); n != 0 {
 		t.Fatalf("payments after unmatch = %d, want 0", n)
 	}
 	if status, reason := bankLineStatus(t, pool, lineID); status != "unmatched" || reason != nil {
@@ -183,12 +131,12 @@ func TestMatchInvoicePaysAndUnmatchReverts(t *testing.T) {
 // one succeeds (the other sees the line already matched and gets
 // ErrInvalidState), and exactly one payment is recorded.
 func TestMatchInvoiceConcurrent(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
-	inv := testInvoice(t, pool, org.ID, contactID, 20000)
-	lineID := testBankLineID(t, pool, org.ID, 20000, mustDate(t, "2026-11-02"), "Transfer")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
+	inv := e.Invoice(org, contactID, testkit.Amount(20000), testkit.Issued(time.Now()))
+	lineID := testBankLineID(t, pool, org.ID, 20000, testkit.Date("2026-11-02"), "Transfer")
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
@@ -225,7 +173,7 @@ func TestMatchInvoiceConcurrent(t *testing.T) {
 	if succeeded != 1 || conflicted != 1 {
 		t.Fatalf("succeeded = %d, conflicted = %d, want 1 and 1", succeeded, conflicted)
 	}
-	if n := countPayments(t, pool, org.ID, inv.ID); n != 1 {
+	if n := e.Count("payments", "org_id = $1 AND invoice_id = $2", org.ID, inv.ID); n != 1 {
 		t.Fatalf("payments = %d, want 1", n)
 	}
 }
@@ -233,12 +181,12 @@ func TestMatchInvoiceConcurrent(t *testing.T) {
 // TestMatchInvoiceRejectsDebit422 covers that a debit line can never be
 // matched to an invoice.
 func TestMatchInvoiceRejectsDebit422(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
-	inv := testInvoice(t, pool, org.ID, contactID, 20000)
-	lineID := testBankLineID(t, pool, org.ID, -20000, mustDate(t, "2026-11-02"), "Payment out")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
+	inv := e.Invoice(org, contactID, testkit.Amount(20000), testkit.Issued(time.Now()))
+	lineID := testBankLineID(t, pool, org.ID, -20000, testkit.Date("2026-11-02"), "Payment out")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -256,11 +204,11 @@ func TestMatchInvoiceRejectsDebit422(t *testing.T) {
 // expense's total must exactly equal -line.amount: a short total is
 // rejected, the matching total succeeds and links the expense.
 func TestCreateExpenseFromLineTotalMustMatch(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
-	lineID := testBankLineID(t, pool, org.ID, -16500, mustDate(t, "2026-11-03"), "Plumber")
+	lineID := testBankLineID(t, pool, org.ID, -16500, testkit.Date("2026-11-03"), "Plumber")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -304,16 +252,16 @@ func TestCreateExpenseFromLineTotalMustMatch(t *testing.T) {
 // with the same outstanding amount, the one whose payment reference
 // appears in the line's description scores 100 and sorts first.
 func TestSuggestRanksPaymentReference(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
-	match := testInvoice(t, pool, org.ID, contactID, 30000)
-	other := testInvoice(t, pool, org.ID, contactID, 30000)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
+	match := e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now()))
+	other := e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now()))
 	_ = other
-	lineID := testBankLineID(t, pool, org.ID, 30000, mustDate(t, "2026-11-04"), "Transfer "+match.PaymentReference)
+	lineID := testBankLineID(t, pool, org.ID, 30000, testkit.Date("2026-11-04"), "Transfer "+match.PaymentReference)
 
-	b := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: func(string) (payments.Provider, error) { return nil, payments.ErrNoProvider }}
+	b := e.BillingService()
 	suggestions, err := recon.Suggest(ctx, pool, b, org.ID, "acme", lineID)
 	if err != nil {
 		t.Fatalf("Suggest: %v", err)
@@ -333,17 +281,17 @@ func TestSuggestRanksPaymentReference(t *testing.T) {
 // unambiguous credit line but skips one whose amount fits two invoices and
 // whose description names neither's payment reference.
 func TestAutoMatchOnlyUnambiguous(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
 
-	clean := testInvoice(t, pool, org.ID, contactID, 40000)
-	testBankLineID(t, pool, org.ID, 40000, mustDate(t, "2026-11-05"), "Transfer "+clean.PaymentReference)
+	clean := e.Invoice(org, contactID, testkit.Amount(40000), testkit.Issued(time.Now()))
+	testBankLineID(t, pool, org.ID, 40000, testkit.Date("2026-11-05"), "Transfer "+clean.PaymentReference)
 
-	testInvoice(t, pool, org.ID, contactID, 25000)
-	testInvoice(t, pool, org.ID, contactID, 25000)
-	testBankLineID(t, pool, org.ID, 25000, mustDate(t, "2026-11-05"), "Generic transfer, no reference")
+	e.Invoice(org, contactID, testkit.Amount(25000), testkit.Issued(time.Now()))
+	e.Invoice(org, contactID, testkit.Amount(25000), testkit.Issued(time.Now()))
+	testBankLineID(t, pool, org.ID, 25000, testkit.Date("2026-11-05"), "Generic transfer, no reference")
 
 	matched, err := recon.AutoMatch(ctx, pool, org.ID)
 	if err != nil {
@@ -365,10 +313,10 @@ func TestAutoMatchOnlyUnambiguous(t *testing.T) {
 // TestIgnoreReasonValidated covers that Ignore only accepts its five
 // defined reasons and marks the line ignored with the given reason.
 func TestIgnoreReasonValidated(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	lineID := testBankLineID(t, pool, org.ID, -5000, mustDate(t, "2026-11-06"), "Owner drawings")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	lineID := testBankLineID(t, pool, org.ID, -5000, testkit.Date("2026-11-06"), "Owner drawings")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -401,19 +349,20 @@ func TestIgnoreReasonValidated(t *testing.T) {
 // callers, so the HTTP handler is responsible for putting the actor on the
 // context before calling it.
 func TestAutoMatchRouteAuditsActor(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	ctx := context.Background()
-	contactID := createContact(t, pool, orgID)
-	inv := testInvoice(t, pool, orgID, contactID, 15000)
-	testBankLineID(t, pool, orgID, 15000, mustDate(t, "2026-11-07"), "Transfer "+inv.PaymentReference)
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	ctx := e.Ctx
+	contactID := e.Contact(org).ID
+	inv := e.Invoice(org, contactID, testkit.Amount(15000), testkit.Issued(time.Now()))
+	testBankLineID(t, pool, org.ID, 15000, testkit.Date("2026-11-07"), "Transfer "+inv.PaymentReference)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/reconcile/auto", nil)
-	req.Header.Set("X-Shigoto-CSRF", "1")
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr := s.Do(http.MethodPost, "/api/v1/orgs/acme/reconcile/auto", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body)
 	}
 
 	var actorID *int64
@@ -421,7 +370,7 @@ func TestAutoMatchRouteAuditsActor(t *testing.T) {
 		SELECT actor_user_id FROM audit_log
 		WHERE org_id = $1 AND entity = 'bank_line' AND action = 'match_invoice'
 		ORDER BY id DESC LIMIT 1`,
-		orgID,
+		org.ID,
 	).Scan(&actorID); err != nil {
 		t.Fatalf("reading audit_log: %v", err)
 	}
@@ -435,12 +384,12 @@ func TestAutoMatchRouteAuditsActor(t *testing.T) {
 // changed - since it's the one action in this package that hard-deletes
 // money-moving rows.
 func TestUnmatchAuditRecordsDeletedPayment(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
-	inv := testInvoice(t, pool, org.ID, contactID, 12000)
-	lineID := testBankLineID(t, pool, org.ID, 12000, mustDate(t, "2026-11-08"), "Transfer")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
+	inv := e.Invoice(org, contactID, testkit.Amount(12000), testkit.Issued(time.Now()))
+	lineID := testBankLineID(t, pool, org.ID, 12000, testkit.Date("2026-11-08"), "Transfer")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -501,13 +450,13 @@ func TestUnmatchAuditRecordsDeletedPayment(t *testing.T) {
 // (link, mark matched) and then that a second line can't be matched to the
 // same already-linked expense (409).
 func TestMatchExpenseAlreadyLinked(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 
 	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-09"),
+		SpentOn:     testkit.Date("2026-11-09"),
 		Description: "Plumber",
 		Lines:       []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 9900}},
 	})
@@ -515,7 +464,7 @@ func TestMatchExpenseAlreadyLinked(t *testing.T) {
 		t.Fatalf("CreateExpense: %v", err)
 	}
 
-	line1 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber payment")
+	line1 := testBankLineID(t, pool, org.ID, -9900, testkit.Date("2026-11-09"), "Plumber payment")
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -530,7 +479,7 @@ func TestMatchExpenseAlreadyLinked(t *testing.T) {
 		t.Fatalf("line1 status = %s, want matched", status)
 	}
 
-	line2 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber payment duplicate")
+	line2 := testBankLineID(t, pool, org.ID, -9900, testkit.Date("2026-11-09"), "Plumber payment duplicate")
 	tx2, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -546,33 +495,33 @@ func TestMatchExpenseAlreadyLinked(t *testing.T) {
 // explanatory 409s (expense already linked; expense is a payout fee) carry
 // their reason to the client via core.PublicError.
 func TestMatchExpensePublicConflicts(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setGSTRegistered(t, pool, org.ID, true)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn: mustDate(t, "2026-11-09"), Description: "Plumber",
+		SpentOn: testkit.Date("2026-11-09"), Description: "Plumber",
 		Lines: []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 9900}},
 	})
 	if err != nil {
 		t.Fatalf("CreateExpense: %v", err)
 	}
-	line1 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber")
+	line1 := testBankLineID(t, pool, org.ID, -9900, testkit.Date("2026-11-09"), "Plumber")
 	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		return recon.MatchExpense(ctx, tx, org.ID, line1, exp.ID)
 	}); err != nil {
 		t.Fatalf("MatchExpense: %v", err)
 	}
 
-	line2 := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber again")
+	line2 := testBankLineID(t, pool, org.ID, -9900, testkit.Date("2026-11-09"), "Plumber again")
 	err = module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		return recon.MatchExpense(ctx, tx, org.ID, line2, exp.ID)
 	})
 	wantPublicConflict(t, err, "expense is already linked to a bank line")
 
-	_, feeExpenseID := matchFeePayout(t, pool, org.ID)
-	feeLine := testBankLineID(t, pool, org.ID, -110, mustDate(t, "2026-11-03"), "Unrelated debit")
+	_, feeExpenseID := matchFeePayout(e, org)
+	feeLine := testBankLineID(t, pool, org.ID, -110, testkit.Date("2026-11-03"), "Unrelated debit")
 	err = module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		return recon.MatchExpense(ctx, tx, org.ID, feeLine, feeExpenseID)
 	})
@@ -584,20 +533,20 @@ func TestMatchExpensePublicConflicts(t *testing.T) {
 // bank description that spaces, drops or lower-cases it ("inv abcd1234",
 // "INVABCD1234"), comparing alphanumerics only.
 func TestReferenceMatchIgnoresPunctuationAndCase(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := createContact(t, pool, org.ID)
-	spaced := testInvoice(t, pool, org.ID, contactID, 30000)
-	testInvoice(t, pool, org.ID, contactID, 30000) // same amount, other reference
-	joined := testInvoice(t, pool, org.ID, contactID, 45000)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org).ID
+	spaced := e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now()))
+	e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now())) // same amount, other reference
+	joined := e.Invoice(org, contactID, testkit.Amount(45000), testkit.Issued(time.Now()))
 
-	spacedLine := testBankLineID(t, pool, org.ID, 30000, mustDate(t, "2026-11-04"),
+	spacedLine := testBankLineID(t, pool, org.ID, 30000, testkit.Date("2026-11-04"),
 		"Transfer "+strings.ToLower(strings.ReplaceAll(spaced.PaymentReference, "-", " ")))
-	testBankLineID(t, pool, org.ID, 45000, mustDate(t, "2026-11-04"),
+	testBankLineID(t, pool, org.ID, 45000, testkit.Date("2026-11-04"),
 		"Transfer "+strings.ReplaceAll(joined.PaymentReference, "-", ""))
 
-	b := testBillingService(pool, nil)
+	b := e.BillingService()
 	suggestions, err := recon.Suggest(ctx, pool, b, org.ID, "acme", spacedLine)
 	if err != nil {
 		t.Fatalf("Suggest: %v", err)
@@ -614,7 +563,7 @@ func TestReferenceMatchIgnoresPunctuationAndCase(t *testing.T) {
 		t.Fatalf("matched = %d, want 2", matched)
 	}
 	for _, id := range []int64{spaced.ID, joined.ID} {
-		if n := countPayments(t, pool, org.ID, id); n != 1 {
+		if n := e.Count("payments", "org_id = $1 AND invoice_id = $2", org.ID, id); n != 1 {
 			t.Errorf("invoice %d payments = %d, want 1", id, n)
 		}
 	}
@@ -624,12 +573,12 @@ func TestReferenceMatchIgnoresPunctuationAndCase(t *testing.T) {
 // matched to another org's invoice: it's not found, and no payment is
 // recorded against either org.
 func TestMatchInvoiceOtherOrgInvoice404(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	other := testOrg(t, pool, "other")
-	otherInv := testInvoice(t, pool, other.ID, createContact(t, pool, other.ID), 20000)
-	lineID := testBankLineID(t, pool, org.ID, 20000, mustDate(t, "2026-11-02"), "Transfer "+otherInv.PaymentReference)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	other := e.Org("other")
+	otherInv := e.Invoice(other, e.Contact(other).ID, testkit.Amount(20000), testkit.Issued(time.Now()))
+	lineID := testBankLineID(t, pool, org.ID, 20000, testkit.Date("2026-11-02"), "Transfer "+otherInv.PaymentReference)
 
 	err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		_, err := recon.MatchInvoice(ctx, tx, org.ID, lineID, otherInv.ID, "bank_transfer")
@@ -638,7 +587,7 @@ func TestMatchInvoiceOtherOrgInvoice404(t *testing.T) {
 	if !errors.Is(err, core.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	if n := countPayments(t, pool, other.ID, otherInv.ID); n != 0 {
+	if n := e.Count("payments", "org_id = $1 AND invoice_id = $2", other.ID, otherInv.ID); n != 0 {
 		t.Fatalf("payments on other org's invoice = %d, want 0", n)
 	}
 	var n int
@@ -656,18 +605,18 @@ func TestMatchInvoiceOtherOrgInvoice404(t *testing.T) {
 // TestUnmatchExpenseLineKeepsExpense covers that unmatching a line linked
 // to an expense unlinks the expense but keeps it.
 func TestUnmatchExpenseLineKeepsExpense(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn: mustDate(t, "2026-11-09"), Description: "Plumber",
+		SpentOn: testkit.Date("2026-11-09"), Description: "Plumber",
 		Lines: []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 9900}},
 	})
 	if err != nil {
 		t.Fatalf("CreateExpense: %v", err)
 	}
-	lineID := testBankLineID(t, pool, org.ID, -9900, mustDate(t, "2026-11-09"), "Plumber")
+	lineID := testBankLineID(t, pool, org.ID, -9900, testkit.Date("2026-11-09"), "Plumber")
 	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		return recon.MatchExpense(ctx, tx, org.ID, lineID, exp.ID)
 	}); err != nil {
@@ -694,10 +643,10 @@ func TestUnmatchExpenseLineKeepsExpense(t *testing.T) {
 // TestUnmatchIgnoredLineClearsReason covers that unmatching an ignored line
 // returns it to unmatched with no ignore reason.
 func TestUnmatchIgnoredLineClearsReason(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	lineID := testBankLineID(t, pool, org.ID, -5000, mustDate(t, "2026-11-06"), "Owner drawings")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	lineID := testBankLineID(t, pool, org.ID, -5000, testkit.Date("2026-11-06"), "Owner drawings")
 	if err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		return recon.Ignore(ctx, tx, org.ID, lineID, "drawings")
 	}); err != nil {

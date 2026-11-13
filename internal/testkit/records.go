@@ -54,17 +54,31 @@ func (e *Env) Contact(org core.Org, opts ...ContactOption) core.Contact {
 // --- invoices ---
 
 type invoiceConfig struct {
-	amount core.Cents
-	source string
-	issue  *time.Time
+	amount     core.Cents
+	gstCode    string
+	propertyID *int64
+	source     string
+	issue      *time.Time
 }
 
 // InvoiceOption customises Env.Invoice.
 type InvoiceOption func(*invoiceConfig)
 
-// Amount sets the total of the invoice's single GST-free line.
+// Amount sets the unit amount of the invoice's single line (its total
+// when the line is GST-free).
 func Amount(cents int64) InvoiceOption {
 	return func(c *invoiceConfig) { c.amount = core.Cents(cents) }
+}
+
+// InvoiceGST sets the GST code of the invoice's single line (GST, FRE,
+// INP, N-T...). A GST-coded line needs a GST-registered org.
+func InvoiceGST(code string) InvoiceOption {
+	return func(c *invoiceConfig) { c.gstCode = code }
+}
+
+// LineProperty tags the invoice's single line to propertyID.
+func LineProperty(propertyID int64) InvoiceOption {
+	return func(c *invoiceConfig) { c.propertyID = &propertyID }
 }
 
 // Source sets the invoice source (manual, rent, timesheet...).
@@ -75,11 +89,11 @@ func Issued(today time.Time) InvoiceOption {
 	return func(c *invoiceConfig) { c.issue = &today }
 }
 
-// Invoice creates an invoice to contactID with one N-T line. Defaults: a
-// 1000-cent manual draft due in 14 days.
+// Invoice creates an invoice to contactID with one line. Defaults: a
+// 1000-cent N-T (GST-free) manual draft due in 14 days, untagged.
 func (e *Env) Invoice(org core.Org, contactID int64, opts ...InvoiceOption) core.Invoice {
 	e.T.Helper()
-	c := invoiceConfig{amount: 1000, source: "manual"}
+	c := invoiceConfig{amount: 1000, gstCode: "N-T", source: "manual"}
 	for _, opt := range opts {
 		opt(&c)
 	}
@@ -88,11 +102,11 @@ func (e *Env) Invoice(org core.Org, contactID int64, opts ...InvoiceOption) core
 		Source:    c.source,
 		DueInDays: 14,
 		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: 1000, UnitAmount: c.amount, GSTCode: "N-T"},
+			{Description: "line", QuantityMilli: 1000, UnitAmount: c.amount, GSTCode: c.gstCode, PropertyID: c.propertyID},
 		},
 	})
 	if err != nil {
-		e.T.Fatalf("creating %d-cent %s draft invoice in %s: %v", c.amount, c.source, org.Slug, err)
+		e.T.Fatalf("creating %d-cent %s %s draft invoice in %s: %v", c.amount, c.gstCode, c.source, org.Slug, err)
 		return core.Invoice{}
 	}
 	if c.issue == nil {

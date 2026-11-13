@@ -3,9 +3,14 @@
 package testkit_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -455,5 +460,80 @@ func TestResponseCookiesParsesSetCookie(t *testing.T) {
 	}
 	if got := (testkit.Response{}).Cookies(); len(got) != 0 {
 		t.Fatalf("Cookies() of a response with no headers = %+v, want none", got)
+	}
+}
+
+func TestInvoiceGSTAndLineProperty(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
+	prop := e.Property(org).ID
+
+	inv := e.Invoice(org, e.Contact(org).ID, testkit.Amount(11000), testkit.InvoiceGST("GST"), testkit.LineProperty(prop))
+	if len(inv.Lines) != 1 || inv.Lines[0].GSTCode != core.GST || inv.Lines[0].GSTAmount != 1100 {
+		t.Fatalf("lines = %+v, want one GST line with 1100 GST", inv.Lines)
+	}
+	if got := e.Count("invoice_lines", "invoice_id = $1 AND property_id = $2", inv.ID, prop); got != 1 {
+		t.Fatalf("invoice lines tagged to property %d = %d, want 1", prop, got)
+	}
+
+	plain := e.Invoice(org, e.Contact(org).ID)
+	if plain.Lines[0].GSTCode != core.NT {
+		t.Fatalf("default GST code = %q, want N-T", plain.Lines[0].GSTCode)
+	}
+	if got := e.Count("invoice_lines", "invoice_id = $1 AND property_id IS NULL", plain.ID); got != 1 {
+		t.Fatalf("default line is tagged to a property")
+	}
+}
+
+// pngBytes is a minimal valid 1x1 PNG.
+var pngBytes = []byte{
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+	0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+	0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
+	0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
+	0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+	0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+	0x42, 0x60, 0x82,
+}
+
+// TestHandlerStoresFilesInTempDir covers the handler's default files
+// directory: an upload round-trips, and nothing is written under the
+// working directory (an empty FilesDir would store it at ./<org id>/).
+func TestHandlerStoresFilesInTempDir(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, err := w.CreateFormFile("file", "receipt.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(pngBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := s.DoWith(http.MethodPost, "/api/v1/orgs/acme/files", &body, map[string]string{"Content-Type": w.FormDataContentType()})
+	if r.Code != http.StatusCreated {
+		t.Fatalf("upload: status = %d, body = %s", r.Code, r.Body)
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	r.JSON(&created)
+
+	if r := s.Do(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/files/%d", created.ID), nil); r.Code != http.StatusOK || !bytes.Equal(r.Body, pngBytes) {
+		t.Fatalf("download: status = %d, %d bytes, want 200 and the uploaded %d bytes", r.Code, len(r.Body), len(pngBytes))
+	}
+	if _, err := os.Stat(strconv.FormatInt(org.ID, 10)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("upload stored under the working directory: stat %d: %v", org.ID, err)
 	}
 }

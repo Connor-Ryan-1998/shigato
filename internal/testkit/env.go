@@ -83,8 +83,9 @@ func AuthOptions(opts ...auth.Option) HandlerOption {
 }
 
 // Handler builds the full production HTTP handler over e's database. By
-// default every config.Known module is enabled, GetEnv returns "" and auth
-// uses insecure (non-Secure) cookies.
+// default every config.Known module is enabled, GetEnv returns "", auth
+// uses insecure (non-Secure) cookies and uploaded files are stored in a
+// temporary directory removed when the test finishes.
 func (e *Env) Handler(opts ...HandlerOption) http.Handler {
 	c := handlerConfig{
 		modules: make(map[string]bool, len(config.Known)),
@@ -99,7 +100,7 @@ func (e *Env) Handler(opts ...HandlerOption) http.Handler {
 	return httpapi.New(httpapi.Deps{
 		Pool:     e.Pool,
 		Auth:     auth.New(e.Pool, false, c.authOptions...),
-		Cfg:      config.Config{Modules: c.modules, BaseURL: "https://shigoto.example"},
+		Cfg:      config.Config{Modules: c.modules, BaseURL: "https://shigoto.example", FilesDir: e.T.TempDir()},
 		GetEnv:   c.getEnv,
 		Payments: c.payments,
 		Billing:  c.billing,

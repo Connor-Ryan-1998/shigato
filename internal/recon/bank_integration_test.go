@@ -12,41 +12,23 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
-	"shigoto/internal/config"
-	"shigoto/internal/core"
-	"shigoto/internal/db"
-	"shigoto/internal/httpapi"
 	"shigoto/internal/importers"
 	"shigoto/internal/recon"
+	"shigoto/internal/testkit"
 )
-
-// sessionCookieName mirrors the unexported constant of the same name in
-// package auth (internal/auth/session.go); there's no exported way to get
-// it from here.
-const sessionCookieName = "shigoto_session"
-
-func testOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
-	t.Helper()
-	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
-	if err != nil {
-		t.Fatalf("CreateOrg(%s): %v", slug, err)
-	}
-	return org
-}
 
 func commbankMapping() importers.CSVMapping {
 	m, _ := importers.Preset("commbank")
 	return m
 }
 
-func testBankAccount(t *testing.T, pool *pgxpool.Pool, orgID int64, name string, m importers.CSVMapping) recon.BankAccount {
+func testBankAccount(t testing.TB, pool *pgxpool.Pool, orgID int64, name string, m importers.CSVMapping) recon.BankAccount {
 	t.Helper()
 	a, err := recon.CreateBankAccount(context.Background(), pool, orgID, name, m)
 	if err != nil {
@@ -55,51 +37,9 @@ func testBankAccount(t *testing.T, pool *pgxpool.Pool, orgID int64, name string,
 	return a
 }
 
-func newReconTestHandler(t *testing.T, pool *pgxpool.Pool) http.Handler {
-	t.Helper()
-	a := auth.New(pool, false)
-	return httpapi.New(httpapi.Deps{
-		Pool:   pool,
-		Auth:   a,
-		Cfg:    config.Config{Modules: map[string]bool{"reconciliation": true}, FilesDir: t.TempDir()},
-		GetEnv: func(string) string { return "" },
-	})
-}
-
-// reconTestSetup builds an org with a logged-in owner and a handler with
-// the reconciliation module enabled, for the handler-level tests below.
-func reconTestSetup(t *testing.T) (pool *pgxpool.Pool, handler http.Handler, token string, orgID int64) {
-	t.Helper()
-	pool = db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-
-	hash, err := auth.HashPassword("correct-password")
-	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
-	}
-	var userID int64
-	if err := pool.QueryRow(context.Background(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
-		"owner@example.com", "Owner", hash,
-	).Scan(&userID); err != nil {
-		t.Fatalf("inserting user: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)",
-		userID, org.ID, string(auth.Owner),
-	); err != nil {
-		t.Fatalf("adding membership: %v", err)
-	}
-	token, err = auth.Login(context.Background(), pool, "owner@example.com", "correct-password")
-	if err != nil {
-		t.Fatalf("Login: %v", err)
-	}
-	return pool, newReconTestHandler(t, pool), token, org.ID
-}
-
 // uploadCSV POSTs csv as a multipart "file" upload to
 // /api/v1/orgs/acme/bank-accounts/{id}/imports.
-func uploadCSV(handler http.Handler, token string, accountID int64, csv []byte) *httptest.ResponseRecorder {
+func uploadCSV(s testkit.Session, accountID int64, csv []byte) testkit.Response {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	part, err := w.CreateFormFile("file", "statement.csv")
@@ -114,13 +54,7 @@ func uploadCSV(handler http.Handler, token string, accountID int64, csv []byte) 
 	}
 
 	path := fmt.Sprintf("/api/v1/orgs/acme/bank-accounts/%d/imports", accountID)
-	req := httptest.NewRequest(http.MethodPost, path, &body)
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	req.Header.Set("X-Shigoto-CSRF", "1")
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	return rr
+	return s.DoWith(http.MethodPost, path, &body, map[string]string{"Content-Type": w.FormDataContentType()})
 }
 
 const fixtureCSV = "01/03/2026,-45.50,Coffee Shop\n" +
@@ -132,38 +66,43 @@ type importResponseBody struct {
 	RowsNew   int `json:"rows_new"`
 }
 
-func decodeImportResponse(t *testing.T, rr *httptest.ResponseRecorder) importResponseBody {
+func decodeImportResponse(t *testing.T, rr testkit.Response) importResponseBody {
 	t.Helper()
 	var body importResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decoding response %s: %v", rr.Body.String(), err)
+	if err := json.Unmarshal(rr.Body, &body); err != nil {
+		t.Fatalf("decoding response %s: %v", rr.Body, err)
 	}
 	return body
 }
 
 func TestImportIdempotent(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	account := testBankAccount(t, pool, org.ID, "Everyday", commbankMapping())
 
-	rr := uploadCSV(handler, token, account.ID, []byte(fixtureCSV))
+	rr := uploadCSV(s, account.ID, []byte(fixtureCSV))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("first import: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("first import: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	first := decodeImportResponse(t, rr)
 	if first.RowsTotal != 3 || first.RowsNew != 3 {
 		t.Fatalf("first import = %+v, want {RowsTotal:3 RowsNew:3}", first)
 	}
 
-	rr = uploadCSV(handler, token, account.ID, []byte(fixtureCSV))
+	rr = uploadCSV(s, account.ID, []byte(fixtureCSV))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("second import: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("second import: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	second := decodeImportResponse(t, rr)
 	if second.RowsTotal != 3 || second.RowsNew != 0 {
 		t.Fatalf("second (repeat) import = %+v, want {RowsTotal:3 RowsNew:0}", second)
 	}
 
-	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, org.ID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -173,25 +112,30 @@ func TestImportIdempotent(t *testing.T) {
 }
 
 func TestImportOverlap(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	account := testBankAccount(t, pool, org.ID, "Everyday", commbankMapping())
 
-	rr := uploadCSV(handler, token, account.ID, []byte(fixtureCSV))
+	rr := uploadCSV(s, account.ID, []byte(fixtureCSV))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("first import: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("first import: status = %d, body = %s", rr.Code, rr.Body)
 	}
 
 	overlap := fixtureCSV + "04/03/2026,-9.00,Newsagent\n"
-	rr = uploadCSV(handler, token, account.ID, []byte(overlap))
+	rr = uploadCSV(s, account.ID, []byte(overlap))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("overlap import: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("overlap import: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	got := decodeImportResponse(t, rr)
 	if got.RowsTotal != 4 || got.RowsNew != 1 {
 		t.Fatalf("overlap import = %+v, want {RowsTotal:4 RowsNew:1}", got)
 	}
 
-	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, org.ID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -205,20 +149,25 @@ func TestImportOverlap(t *testing.T) {
 // both must be kept, since DedupeKeys distinguishes them by occurrence
 // index rather than collapsing them as duplicates.
 func TestImportKeepsSameDayDuplicates(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	account := testBankAccount(t, pool, org.ID, "Everyday", commbankMapping())
 
 	csv := "01/03/2026,-5.00,Coffee\n01/03/2026,-5.00,Coffee\n"
-	rr := uploadCSV(handler, token, account.ID, []byte(csv))
+	rr := uploadCSV(s, account.ID, []byte(csv))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("import: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("import: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	got := decodeImportResponse(t, rr)
 	if got.RowsTotal != 2 || got.RowsNew != 2 {
 		t.Fatalf("import = %+v, want {RowsTotal:2 RowsNew:2}", got)
 	}
 
-	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, org.ID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -228,24 +177,34 @@ func TestImportKeepsSameDayDuplicates(t *testing.T) {
 }
 
 func TestImportCrossOrgAccount404(t *testing.T) {
-	pool, handler, token, _ := reconTestSetup(t)
-	other := testOrg(t, pool, "other")
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	other := e.Org("other")
 	otherAccount := testBankAccount(t, pool, other.ID, "Other's Account", commbankMapping())
 
-	rr := uploadCSV(handler, token, otherAccount.ID, []byte(fixtureCSV))
+	rr := uploadCSV(s, otherAccount.ID, []byte(fixtureCSV))
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body)
 	}
 }
 
 func TestImportTooLarge413(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	account := testBankAccount(t, pool, org.ID, "Everyday", commbankMapping())
 
 	big := bytes.Repeat([]byte("01/03/2026,-1.00,Padding\n"), 300000) // well over 5 MiB
-	rr := uploadCSV(handler, token, account.ID, big)
+	rr := uploadCSV(s, account.ID, big)
 	if rr.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 413, body = %s", rr.Code, rr.Body)
 	}
 }
 
@@ -257,8 +216,12 @@ func TestImportTooLarge413(t *testing.T) {
 // row count once - every row created by exactly one of the two imports,
 // never both, never neither.
 func TestImportConcurrentSameFile(t *testing.T) {
-	pool, _, _, orgID := reconTestSetup(t)
-	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	account := testBankAccount(t, pool, org.ID, "Everyday", commbankMapping())
 
 	const n = 2
 	results := make([]recon.ImportResult, n)
@@ -268,7 +231,7 @@ func TestImportConcurrentSameFile(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = recon.Import(context.Background(), pool, orgID, account.ID, bytes.NewReader([]byte(fixtureCSV)))
+			results[i], errs[i] = recon.Import(context.Background(), pool, org.ID, account.ID, bytes.NewReader([]byte(fixtureCSV)))
 		}(i)
 	}
 	wg.Wait()
@@ -287,7 +250,7 @@ func TestImportConcurrentSameFile(t *testing.T) {
 		t.Fatalf("sum of RowsNew across concurrent imports = %d, want 3 (each row created exactly once)", sumNew)
 	}
 
-	lines, _, err := recon.ListBankLines(context.Background(), pool, orgID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(context.Background(), pool, org.ID, recon.BankLineFilter{})
 	if err != nil {
 		t.Fatalf("ListBankLines: %v", err)
 	}
@@ -299,31 +262,26 @@ func TestImportConcurrentSameFile(t *testing.T) {
 // TestImportRouteAuditsActor covers that a route-triggered import records
 // the uploading user as the bank_import audit entry's actor, not NULL.
 func TestImportRouteAuditsActor(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	account := testBankAccount(t, pool, orgID, "Everyday", commbankMapping())
-	if rr := uploadCSV(handler, token, account.ID, []byte(fixtureCSV)); rr.Code != http.StatusOK {
-		t.Fatalf("import: status = %d, body = %s", rr.Code, rr.Body.String())
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	account := testBankAccount(t, pool, org.ID, "Everyday", commbankMapping())
+	if rr := uploadCSV(s, account.ID, []byte(fixtureCSV)); rr.Code != http.StatusOK {
+		t.Fatalf("import: status = %d, body = %s", rr.Code, rr.Body)
 	}
 
 	var actorID *int64
 	if err := pool.QueryRow(context.Background(), `
 		SELECT actor_user_id FROM audit_log
 		WHERE org_id = $1 AND entity = 'bank_import' AND action = 'create'`,
-		orgID,
+		org.ID,
 	).Scan(&actorID); err != nil {
 		t.Fatalf("reading audit_log: %v", err)
 	}
-	if want := ownerUserID(t, pool); actorID == nil || *actorID != want {
+	if want := owner.ID; actorID == nil || *actorID != want {
 		t.Fatalf("audit_log actor_user_id = %v, want the uploading user's id %d", actorID, want)
 	}
-}
-
-// ownerUserID returns the id of the owner reconTestSetup logs in as.
-func ownerUserID(t *testing.T, pool *pgxpool.Pool) int64 {
-	t.Helper()
-	var id int64
-	if err := pool.QueryRow(context.Background(), `SELECT id FROM users WHERE email = 'owner@example.com'`).Scan(&id); err != nil {
-		t.Fatalf("reading owner user id: %v", err)
-	}
-	return id
 }

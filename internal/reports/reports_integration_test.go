@@ -14,7 +14,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -23,30 +22,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
-	"shigoto/internal/billing"
 	"shigoto/internal/config"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
-	"shigoto/internal/httpapi"
 	"shigoto/internal/importers"
 	"shigoto/internal/module"
 	"shigoto/internal/payments"
-	"shigoto/internal/property"
 	"shigoto/internal/recon"
 	"shigoto/internal/reports"
+	"shigoto/internal/testkit"
 )
 
-// sessionCookieName mirrors the unexported constant of the same name in
-// package auth (internal/auth/session.go); there's no exported way to get
-// it from here.
-const sessionCookieName = "shigoto_session"
-
 func TestLargePaymentReports(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "large")
-	setGSTRegistered(t, pool, org.ID, true)
-	contactID := testContact(t, pool, org.ID, "client", "Large client")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("large")
+	e.Settings(org, testkit.GSTRegistered(true))
+	contactID := e.Contact(org, testkit.Name("Large client")).ID
 	inv, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
 		ContactID: contactID, Source: "manual", DueInDays: 7,
 		Lines: []core.NewLine{
@@ -57,7 +48,7 @@ func TestLargePaymentReports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	date := mustDate(t, "2026-07-01")
+	date := testkit.Date("2026-07-01")
 	if _, err := core.IssueInvoice(ctx, pool, org.ID, inv.ID, date); err != nil {
 		t.Fatal(err)
 	}
@@ -82,49 +73,6 @@ func TestLargePaymentReports(t *testing.T) {
 	}
 }
 
-func mustDate(t *testing.T, s string) time.Time {
-	t.Helper()
-	d, err := time.ParseInLocation("2006-01-02", s, time.UTC)
-	if err != nil {
-		t.Fatalf("parsing date %q: %v", s, err)
-	}
-	return d
-}
-
-func testOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
-	t.Helper()
-	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
-	if err != nil {
-		t.Fatalf("CreateOrg(%s): %v", slug, err)
-	}
-	return org
-}
-
-func setGSTRegistered(t *testing.T, pool *pgxpool.Pool, orgID int64, registered bool) {
-	t.Helper()
-	if _, err := pool.Exec(context.Background(), "UPDATE orgs SET gst_registered = $1 WHERE id = $2", registered, orgID); err != nil {
-		t.Fatalf("setting gst_registered: %v", err)
-	}
-}
-
-func testContact(t *testing.T, pool *pgxpool.Pool, orgID int64, kind, name string) int64 {
-	t.Helper()
-	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: kind, Name: name})
-	if err != nil {
-		t.Fatalf("CreateContact: %v", err)
-	}
-	return c.ID
-}
-
-func testProperty(t *testing.T, pool *pgxpool.Pool, orgID int64, name string, residential bool) int64 {
-	t.Helper()
-	p, err := property.CreateProperty(context.Background(), pool, orgID, property.Property{Name: name, Residential: residential})
-	if err != nil {
-		t.Fatalf("CreateProperty: %v", err)
-	}
-	return p.ID
-}
-
 func testCategoryID(t *testing.T, pool *pgxpool.Pool, orgID int64, name string) int64 {
 	t.Helper()
 	cats, err := recon.ListCategories(context.Background(), pool, orgID)
@@ -138,30 +86,6 @@ func testCategoryID(t *testing.T, pool *pgxpool.Pool, orgID int64, name string) 
 	}
 	t.Fatalf("category %q not found", name)
 	return 0
-}
-
-// testInvoiceAndPay creates a draft invoice with a single line, issues it,
-// and records a payment against it. If amountPerPayment < total, callers
-// must call it again with the same returned invoiceID's remaining balance
-// to fully pay it off (used for the two-part consulting payment).
-func testInvoice(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, source string, quantityMilli, unitAmount int64, gstCode string, propertyID, projectID *int64) core.Invoice {
-	t.Helper()
-	ctx := context.Background()
-	draft, err := core.CreateDraftInvoice(ctx, pool, orgID, core.NewInvoice{
-		ContactID: contactID, Source: source, DueInDays: 7,
-		Lines: []core.NewLine{{
-			Description: "line", QuantityMilli: quantityMilli, UnitAmount: core.Cents(unitAmount), GSTCode: gstCode,
-			PropertyID: propertyID, ProjectID: projectID,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("CreateDraftInvoice: %v", err)
-	}
-	issued, err := core.IssueInvoice(ctx, pool, orgID, draft.ID, mustDate(t, "2026-07-01"))
-	if err != nil {
-		t.Fatalf("IssueInvoice: %v", err)
-	}
-	return issued
 }
 
 func testPayment(t *testing.T, pool *pgxpool.Pool, orgID, invoiceID int64, amount int64, paidOn time.Time) {
@@ -185,54 +109,14 @@ func testExpense(t *testing.T, pool *pgxpool.Pool, orgID, categoryID int64, amou
 	}
 }
 
-func newReportsTestHandler(pool *pgxpool.Pool) http.Handler {
-	a := auth.New(pool, false)
-	return httpapi.New(httpapi.Deps{
-		Pool:   pool,
-		Auth:   a,
-		Cfg:    config.Config{Modules: map[string]bool{}},
-		GetEnv: func(string) string { return "" },
-	})
-}
-
-// reportsTestSetup builds an org with a logged-in owner and a handler with
-// no toggleable modules enabled, since reports are core and must work
-// regardless.
-func reportsTestSetup(t *testing.T) (pool *pgxpool.Pool, handler http.Handler, token string, orgID int64) {
-	t.Helper()
-	pool = db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-
-	hash, err := auth.HashPassword("correct-password")
-	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
+// noModules disables every toggleable module: reports are core and must
+// work regardless.
+func noModules() testkit.HandlerOption {
+	off := map[string]bool{}
+	for _, name := range config.Known {
+		off[name] = false
 	}
-	var userID int64
-	if err := pool.QueryRow(context.Background(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
-		"owner@example.com", "Owner", hash,
-	).Scan(&userID); err != nil {
-		t.Fatalf("inserting user: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)",
-		userID, org.ID, string(auth.Owner),
-	); err != nil {
-		t.Fatalf("adding membership: %v", err)
-	}
-	token, err = auth.Login(context.Background(), pool, "owner@example.com", "correct-password")
-	if err != nil {
-		t.Fatalf("Login: %v", err)
-	}
-	return pool, newReportsTestHandler(pool), token, org.ID
-}
-
-func get(handler http.Handler, token, path string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	return rr
+	return testkit.Modules(off)
 }
 
 // basFiguresBody mirrors the API's snake_case/"1a"/"1b" BAS figure keys
@@ -274,38 +158,43 @@ type basDetailResponseBody struct {
 // each field's /bas/detail rows sum to that same figure - the tax-critical
 // guarantee that a BAS number always ties back to its rows exactly.
 func TestBASTiesToDetail(t *testing.T) {
-	pool, handler, token, orgID := reportsTestSetup(t)
-	setGSTRegistered(t, pool, orgID, true)
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler(noModules()))
+	e.Settings(org, testkit.GSTRegistered(true))
 
-	tenant := testContact(t, pool, orgID, "tenant", "Tenant")
-	client := testContact(t, pool, orgID, "client", "Client")
-	resProperty := testProperty(t, pool, orgID, "1 Rental St", true)
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
+	client := e.Contact(org, testkit.Name("Client")).ID
+	resProperty := e.Property(org, testkit.PropertyName("1 Rental St")).ID
 
 	// Rent: $500, INP (residential), paid in full.
-	rentInv := testInvoice(t, pool, orgID, tenant, "rent", 1000, 50000, "INP", &resProperty, nil)
-	testPayment(t, pool, orgID, rentInv.ID, 50000, mustDate(t, "2026-07-10"))
+	rentInv := e.Invoice(org, tenant, testkit.Source("rent"), testkit.Amount(50000), testkit.InvoiceGST("INP"), testkit.LineProperty(resProperty), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, rentInv.ID, 50000, testkit.Date("2026-07-10"))
 
 	// Consulting: 10000 ex-GST + 1000 GST = 11000, paid in two halves.
-	consultingInv := testInvoice(t, pool, orgID, client, "timesheet", 1000, 11000, "GST", nil, nil)
-	testPayment(t, pool, orgID, consultingInv.ID, 5500, mustDate(t, "2026-07-15"))
-	testPayment(t, pool, orgID, consultingInv.ID, 5500, mustDate(t, "2026-08-01"))
+	consultingInv := e.Invoice(org, client, testkit.Source("timesheet"), testkit.Amount(11000), testkit.InvoiceGST("GST"), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, consultingInv.ID, 5500, testkit.Date("2026-07-15"))
+	testPayment(t, pool, org.ID, consultingInv.ID, 5500, testkit.Date("2026-08-01"))
 
 	// Bond invoice, paid - must be excluded entirely.
-	bondInv := testInvoice(t, pool, orgID, tenant, "bond", 1000, 140000, "N-T", &resProperty, nil)
-	testPayment(t, pool, orgID, bondInv.ID, 140000, mustDate(t, "2026-07-10"))
+	bondInv := e.Invoice(org, tenant, testkit.Source("bond"), testkit.Amount(140000), testkit.InvoiceGST("N-T"), testkit.LineProperty(resProperty), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, bondInv.ID, 140000, testkit.Date("2026-07-10"))
 
 	// Expenses: Repairs $110 GST (non-capital), Equipment $2200 GST (capital).
-	repairsCat := testCategoryID(t, pool, orgID, "Repairs & maintenance")
-	equipmentCat := testCategoryID(t, pool, orgID, "Equipment")
-	testExpense(t, pool, orgID, repairsCat, 11000, mustDate(t, "2026-07-20"), nil)
-	testExpense(t, pool, orgID, equipmentCat, 220000, mustDate(t, "2026-07-25"), nil)
+	repairsCat := testCategoryID(t, pool, org.ID, "Repairs & maintenance")
+	equipmentCat := testCategoryID(t, pool, org.ID, "Equipment")
+	testExpense(t, pool, org.ID, repairsCat, 11000, testkit.Date("2026-07-20"), nil)
+	testExpense(t, pool, org.ID, equipmentCat, 220000, testkit.Date("2026-07-25"), nil)
 
-	rr := get(handler, token, "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1")
+	rr := s.Do(http.MethodGet, "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET bas: status = %d, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("GET bas: status = %d, body=%s", rr.Code, rr.Body)
 	}
 	var bas basResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &bas); err != nil {
+	if err := json.Unmarshal(rr.Body, &bas); err != nil {
 		t.Fatalf("unmarshaling bas response: %v", err)
 	}
 
@@ -324,12 +213,12 @@ func TestBASTiesToDetail(t *testing.T) {
 	}
 
 	for _, field := range []string{"G1", "G3", "G4", "G10", "G11", "1A", "1B"} {
-		rr := get(handler, token, "/api/v1/orgs/acme/reports/bas/detail?period=FY2027-Q1&field="+field)
+		rr := s.Do(http.MethodGet, "/api/v1/orgs/acme/reports/bas/detail?period=FY2027-Q1&field="+field, nil)
 		if rr.Code != http.StatusOK {
-			t.Fatalf("GET bas/detail %s: status = %d, body=%s", field, rr.Code, rr.Body.String())
+			t.Fatalf("GET bas/detail %s: status = %d, body=%s", field, rr.Code, rr.Body)
 		}
 		var detail basDetailResponseBody
-		if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		if err := json.Unmarshal(rr.Body, &detail); err != nil {
 			t.Fatalf("unmarshaling detail for %s: %v", field, err)
 		}
 
@@ -366,31 +255,36 @@ type pnlGroupResponseBody struct {
 // land in a "P1" group, and a consulting invoice with no property lands in
 // "Unassigned", each with the right net.
 func TestPnLByProperty(t *testing.T) {
-	pool, handler, token, orgID := reportsTestSetup(t)
-	setGSTRegistered(t, pool, orgID, true)
-	tenant := testContact(t, pool, orgID, "tenant", "Tenant")
-	client := testContact(t, pool, orgID, "client", "Client")
-	p1 := testProperty(t, pool, orgID, "P1", false)
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler(noModules()))
+	e.Settings(org, testkit.GSTRegistered(true))
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
+	client := e.Contact(org, testkit.Name("Client")).ID
+	p1 := e.Property(org, testkit.PropertyName("P1"), testkit.Commercial()).ID
 
-	rentInv := testInvoice(t, pool, orgID, tenant, "rent", 1000, 50000, "FRE", &p1, nil)
-	testPayment(t, pool, orgID, rentInv.ID, 50000, mustDate(t, "2026-07-10"))
+	rentInv := e.Invoice(org, tenant, testkit.Source("rent"), testkit.Amount(50000), testkit.InvoiceGST("FRE"), testkit.LineProperty(p1), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, rentInv.ID, 50000, testkit.Date("2026-07-10"))
 
 	// Repairs & maintenance defaults to GST; with the org GST-registered,
 	// an incl-GST amount of 11000 splits into gst_amount
 	// GSTInInclusive(11000, GST) = round(11000/11) = 1000, so ex-GST (what
 	// PnL sums) is 11000 - 1000 = 10000.
-	repairsCat := testCategoryID(t, pool, orgID, "Repairs & maintenance")
-	testExpense(t, pool, orgID, repairsCat, 11000, mustDate(t, "2026-07-15"), &p1)
+	repairsCat := testCategoryID(t, pool, org.ID, "Repairs & maintenance")
+	testExpense(t, pool, org.ID, repairsCat, 11000, testkit.Date("2026-07-15"), &p1)
 
-	consultingInv := testInvoice(t, pool, orgID, client, "timesheet", 1000, 10000, "FRE", nil, nil)
-	testPayment(t, pool, orgID, consultingInv.ID, 10000, mustDate(t, "2026-07-20"))
+	consultingInv := e.Invoice(org, client, testkit.Source("timesheet"), testkit.Amount(10000), testkit.InvoiceGST("FRE"), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, consultingInv.ID, 10000, testkit.Date("2026-07-20"))
 
-	rr := get(handler, token, "/api/v1/orgs/acme/reports/pnl?from=2026-07-01&to=2026-09-30&group_by=property")
+	rr := s.Do(http.MethodGet, "/api/v1/orgs/acme/reports/pnl?from=2026-07-01&to=2026-09-30&group_by=property", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET pnl: status = %d, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("GET pnl: status = %d, body=%s", rr.Code, rr.Body)
 	}
 	var groups []pnlGroupResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &groups); err != nil {
+	if err := json.Unmarshal(rr.Body, &groups); err != nil {
 		t.Fatalf("unmarshaling pnl response: %v", err)
 	}
 
@@ -430,26 +324,31 @@ func TestPnLByProperty(t *testing.T) {
 // TestTransactionsCSV checks the header row, row count, and dollar
 // formatting of the transactions.csv export.
 func TestTransactionsCSV(t *testing.T) {
-	pool, handler, token, orgID := reportsTestSetup(t)
-	tenant := testContact(t, pool, orgID, "tenant", "Tenant")
-	repairsCat := testCategoryID(t, pool, orgID, "Repairs & maintenance")
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler(noModules()))
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
+	repairsCat := testCategoryID(t, pool, org.ID, "Repairs & maintenance")
 
-	rentInv := testInvoice(t, pool, orgID, tenant, "rent", 1000, 50000, "FRE", nil, nil)
-	testPayment(t, pool, orgID, rentInv.ID, 50000, mustDate(t, "2026-07-10"))
-	testExpense(t, pool, orgID, repairsCat, 11000, mustDate(t, "2026-07-15"), nil)
+	rentInv := e.Invoice(org, tenant, testkit.Source("rent"), testkit.Amount(50000), testkit.InvoiceGST("FRE"), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, rentInv.ID, 50000, testkit.Date("2026-07-10"))
+	testExpense(t, pool, org.ID, repairsCat, 11000, testkit.Date("2026-07-15"), nil)
 
-	rr := get(handler, token, "/api/v1/orgs/acme/reports/transactions.csv?from=2026-07-01&to=2026-09-30")
+	rr := s.Do(http.MethodGet, "/api/v1/orgs/acme/reports/transactions.csv?from=2026-07-01&to=2026-09-30", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body)
 	}
-	if ct := rr.Header().Get("Content-Type"); ct != "text/csv" {
+	if ct := rr.Header.Get("Content-Type"); ct != "text/csv" {
 		t.Errorf("Content-Type = %q, want text/csv", ct)
 	}
-	if cd := rr.Header().Get("Content-Disposition"); cd == "" {
+	if cd := rr.Header.Get("Content-Disposition"); cd == "" {
 		t.Errorf("Content-Disposition is empty")
 	}
 
-	records, err := csv.NewReader(bytes.NewReader(rr.Body.Bytes())).ReadAll()
+	records, err := csv.NewReader(bytes.NewReader(rr.Body)).ReadAll()
 	if err != nil {
 		t.Fatalf("parsing csv: %v", err)
 	}
@@ -514,41 +413,46 @@ func forceVoid(t *testing.T, pool *pgxpool.Pool, invoiceID int64) {
 // must still exclude) never appear in transactions.csv or count toward
 // BAS G1/1A.
 func TestReportsExcludeDraftAndVoid(t *testing.T) {
-	pool, handler, token, orgID := reportsTestSetup(t)
-	setGSTRegistered(t, pool, orgID, true)
-	tenant := testContact(t, pool, orgID, "tenant", "Tenant")
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler(noModules()))
+	e.Settings(org, testkit.GSTRegistered(true))
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
 
 	// Issued, paid in full (22000 = 20000 ex-GST + 2000 GST), then forced
 	// void via SQL - a state VoidInvoice itself refuses (it checks for
 	// existing payments), but the reports query must still exclude by
 	// status alone.
-	voidedInv := testInvoice(t, pool, orgID, tenant, "manual", 1000, 20000, "GST", nil, nil)
-	testPayment(t, pool, orgID, voidedInv.ID, 22000, mustDate(t, "2026-07-05"))
+	voidedInv := e.Invoice(org, tenant, testkit.Source("manual"), testkit.Amount(20000), testkit.InvoiceGST("GST"), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, voidedInv.ID, 22000, testkit.Date("2026-07-05"))
 	forceVoid(t, pool, voidedInv.ID)
 
 	// A draft invoice (never issued) with a payment row inserted directly -
 	// core.RecordPayment refuses this itself, but the reports query must
 	// still exclude it by status alone.
-	draft, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
+	draft, err := core.CreateDraftInvoice(e.Ctx, pool, org.ID, core.NewInvoice{
 		ContactID: tenant, Source: "manual", DueInDays: 7,
 		Lines: []core.NewLine{{Description: "line", QuantityMilli: 1000, UnitAmount: 5000, GSTCode: "GST"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateDraftInvoice: %v", err)
 	}
-	rawInsertPayment(t, pool, orgID, draft.ID, 5500, mustDate(t, "2026-07-06"))
+	rawInsertPayment(t, pool, org.ID, draft.ID, 5500, testkit.Date("2026-07-06"))
 
 	// A real, paid invoice (FRE, so it contributes to G1 but not 1A) in the
 	// same window, giving G1/1A a known value the excluded rows would
 	// otherwise inflate.
-	paidInv := testInvoice(t, pool, orgID, tenant, "manual", 1000, 30000, "FRE", nil, nil)
-	testPayment(t, pool, orgID, paidInv.ID, 30000, mustDate(t, "2026-07-10"))
+	paidInv := e.Invoice(org, tenant, testkit.Source("manual"), testkit.Amount(30000), testkit.InvoiceGST("FRE"), testkit.Issued(testkit.Date("2026-07-01")))
+	testPayment(t, pool, org.ID, paidInv.ID, 30000, testkit.Date("2026-07-10"))
 
-	rr := get(handler, token, "/api/v1/orgs/acme/reports/transactions.csv?from=2026-07-01&to=2026-09-30")
+	rr := s.Do(http.MethodGet, "/api/v1/orgs/acme/reports/transactions.csv?from=2026-07-01&to=2026-09-30", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body)
 	}
-	records, err := csv.NewReader(bytes.NewReader(rr.Body.Bytes())).ReadAll()
+	records, err := csv.NewReader(bytes.NewReader(rr.Body)).ReadAll()
 	if err != nil {
 		t.Fatalf("parsing csv: %v", err)
 	}
@@ -556,12 +460,12 @@ func TestReportsExcludeDraftAndVoid(t *testing.T) {
 		t.Fatalf("len(records) = %d, want 2 (header + paid invoice only): %+v", len(records), records)
 	}
 
-	rr = get(handler, token, "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1")
+	rr = s.Do(http.MethodGet, "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET bas: status = %d, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("GET bas: status = %d, body=%s", rr.Code, rr.Body)
 	}
 	var bas basResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &bas); err != nil {
+	if err := json.Unmarshal(rr.Body, &bas); err != nil {
 		t.Fatalf("unmarshaling bas response: %v", err)
 	}
 	if bas.FiguresCents.G1 != 30000 {
@@ -584,7 +488,7 @@ type reportTotals struct {
 func quarterTotals(t *testing.T, pool *pgxpool.Pool, orgID int64) reportTotals {
 	t.Helper()
 	ctx := context.Background()
-	from, to := mustDate(t, "2026-07-01"), mustDate(t, "2026-09-30")
+	from, to := testkit.Date("2026-07-01"), testkit.Date("2026-09-30")
 	income, err := reports.IncomeRows(ctx, pool, orgID, from, to)
 	if err != nil {
 		t.Fatalf("IncomeRows: %v", err)
@@ -617,17 +521,17 @@ func quarterTotals(t *testing.T, pool *pgxpool.Pool, orgID int64) reportTotals {
 // still income), and the fee expense disappears - so the figures move by
 // exactly those amounts and nothing else.
 func TestReconciledMovementsCountExactlyOnce(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setGSTRegistered(t, pool, org.ID, true)
-	client := testContact(t, pool, org.ID, "client", "Client")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
+	client := e.Contact(org, testkit.Name("Client")).ID
 	repairs := testCategoryID(t, pool, org.ID, "Repairs & maintenance")
 
-	invA := testInvoice(t, pool, org.ID, client, "manual", 1000, 22000, "GST", nil, nil)
-	invB := testInvoice(t, pool, org.ID, client, "timesheet", 1000, 11000, "GST", nil, nil)
+	invA := e.Invoice(org, client, testkit.Source("manual"), testkit.Amount(22000), testkit.InvoiceGST("GST"), testkit.Issued(testkit.Date("2026-07-01")))
+	invB := e.Invoice(org, client, testkit.Source("timesheet"), testkit.Amount(11000), testkit.InvoiceGST("GST"), testkit.Issued(testkit.Date("2026-07-01")))
 	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-		InvoiceID: invB.ID, Amount: 11000, PaidOn: mustDate(t, "2026-07-12"), Method: "stripe", ProviderRef: "pi_b",
+		InvoiceID: invB.ID, Amount: 11000, PaidOn: testkit.Date("2026-07-12"), Method: "stripe", ProviderRef: "pi_b",
 	}); err != nil {
 		t.Fatalf("RecordPayment (webhook): %v", err)
 	}
@@ -663,7 +567,7 @@ func TestReconciledMovementsCountExactlyOnce(t *testing.T) {
 		_, err := recon.MatchInvoice(ctx, tx, org.ID, lineID["Transfer from client"], invA.ID, "bank_transfer")
 		return err
 	})
-	payoutOn := mustDate(t, "2026-07-15")
+	payoutOn := testkit.Date("2026-07-15")
 	fake := &payments.Fake{
 		Payouts: map[string]payments.Payout{
 			"po_b": {Ref: "po_b", Amount: 10890, ArrivalOn: payoutOn, Status: "paid"},
@@ -672,7 +576,7 @@ func TestReconciledMovementsCountExactlyOnce(t *testing.T) {
 			"po_b": {{Ref: "txn_b", Type: "charge", PaymentRef: "pi_b", Amount: 11000, Fee: 110}},
 		},
 	}
-	b := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: func(string) (payments.Provider, error) { return fake, nil }}
+	b := e.BillingService(testkit.Provider(fake))
 	if _, err := recon.MatchPayout(ctx, pool, b, org.ID, "acme", lineID["Stripe payout"], "po_b"); err != nil {
 		t.Fatalf("MatchPayout: %v", err)
 	}
@@ -685,7 +589,7 @@ func TestReconciledMovementsCountExactlyOnce(t *testing.T) {
 		})
 		return err
 	})
-	testExpense(t, pool, org.ID, repairs, 5500, mustDate(t, "2026-07-25"), nil)
+	testExpense(t, pool, org.ID, repairs, 5500, testkit.Date("2026-07-25"), nil)
 
 	want := reportTotals{
 		G1: 22000 + 11000, A1: 2000 + 1000,

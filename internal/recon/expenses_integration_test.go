@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
@@ -18,53 +17,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"shigoto/internal/auth"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
 	"shigoto/internal/module"
-	"shigoto/internal/property"
 	"shigoto/internal/recon"
-	"shigoto/internal/timesheets"
+	"shigoto/internal/testkit"
 )
-
-func mustDate(t *testing.T, s string) time.Time {
-	t.Helper()
-	d, err := time.ParseInLocation("2006-01-02", s, time.UTC)
-	if err != nil {
-		t.Fatalf("parsing date %s: %v", s, err)
-	}
-	return d
-}
-
-func setGSTRegistered(t *testing.T, pool *pgxpool.Pool, orgID int64, registered bool) {
-	t.Helper()
-	if _, err := pool.Exec(context.Background(), "UPDATE orgs SET gst_registered = $1 WHERE id = $2", registered, orgID); err != nil {
-		t.Fatalf("setting gst_registered: %v", err)
-	}
-}
-
-func testResidentialProperty(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
-	t.Helper()
-	p, err := property.CreateProperty(context.Background(), pool, orgID, property.Property{Name: "1 Test St", Residential: true})
-	if err != nil {
-		t.Fatalf("CreateProperty: %v", err)
-	}
-	return p.ID
-}
-
-func testProject(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
-	t.Helper()
-	clientID, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: "client", Name: "Test Client"})
-	if err != nil {
-		t.Fatalf("CreateContact: %v", err)
-	}
-	proj, err := timesheets.CreateProject(context.Background(), pool, orgID, timesheets.Project{
-		ClientContactID: clientID.ID, Name: "Test Project", HourlyRate: 10000, GSTCode: core.GST,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	return proj.ID
-}
 
 func categoryByName(t *testing.T, pool *pgxpool.Pool, orgID int64, name string) recon.Category {
 	t.Helper()
@@ -84,8 +42,9 @@ func categoryByName(t *testing.T, pool *pgxpool.Pool, orgID int64, name string) 
 // TestCreateOrgSeedsCategories covers the 15 default expense categories
 // core.CreateOrg seeds, including the one capital category (Equipment).
 func TestCreateOrgSeedsCategories(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
 
 	cats, err := recon.ListCategories(context.Background(), pool, org.ID)
 	if err != nil {
@@ -111,16 +70,16 @@ func TestCreateOrgSeedsCategories(t *testing.T) {
 // is GST and the other is GST-free: GST is per-line, and the lines' amounts
 // sum to the expense total.
 func TestExpenseSplitLinesGST(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setGSTRegistered(t, pool, org.ID, true)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
 
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 	water := categoryByName(t, pool, org.ID, "Water")
 
 	exp, warnings, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-01"),
+		SpentOn:     testkit.Date("2026-11-01"),
 		Description: "Plumber + water bill",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: repairs.ID, Amount: 11000},
@@ -155,16 +114,16 @@ func TestExpenseSplitLinesGST(t *testing.T) {
 func TestExpenseResidentialForcedINP(t *testing.T) {
 	const wantWarning = "residential property expenses are input-taxed; GST credit not claimed"
 
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setGSTRegistered(t, pool, org.ID, true)
-	propertyID := testResidentialProperty(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
+	propertyID := e.Property(org).ID
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 	water := categoryByName(t, pool, org.ID, "Water")
 
 	exp, warnings, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-01"),
+		SpentOn:     testkit.Date("2026-11-01"),
 		Description: "Plumber + water, both residential",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: repairs.ID, Amount: 11000, PropertyID: &propertyID},
@@ -193,13 +152,13 @@ func TestExpenseResidentialForcedINP(t *testing.T) {
 // TestExpenseUnregisteredOrgNoGST covers an org that isn't GST-registered:
 // every expense line has zero GST even for a GST-coded category.
 func TestExpenseUnregisteredOrgNoGST(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme") // gst_registered defaults to false
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme") // gst_registered defaults to false
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 
 	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-01"),
+		SpentOn:     testkit.Date("2026-11-01"),
 		Description: "Plumber",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: repairs.ID, Amount: 11000},
@@ -216,14 +175,14 @@ func TestExpenseUnregisteredOrgNoGST(t *testing.T) {
 // TestExpenseCrossOrgCategory422 covers a category belonging to another
 // org: it must be treated as not found, same as a bogus id.
 func TestExpenseCrossOrgCategory422(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	other := testOrg(t, pool, "other")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	other := e.Org("other")
 	otherCategory := categoryByName(t, pool, other.ID, "Repairs & maintenance")
 
 	_, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-01"),
+		SpentOn:     testkit.Date("2026-11-01"),
 		Description: "Plumber",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: otherCategory.ID, Amount: 11000},
@@ -241,9 +200,9 @@ func TestExpenseCrossOrgCategory422(t *testing.T) {
 // CreateExpense itself must still reject the resulting empty gst_code
 // rather than storing it.
 func TestExpenseLineNoDefaultGSTCode422(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 
 	var categoryID int64
 	if err := pool.QueryRow(ctx,
@@ -254,7 +213,7 @@ func TestExpenseLineNoDefaultGSTCode422(t *testing.T) {
 	}
 
 	_, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-01"),
+		SpentOn:     testkit.Date("2026-11-01"),
 		Description: "Something",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: categoryID, Amount: 11000},
@@ -268,13 +227,13 @@ func TestExpenseLineNoDefaultGSTCode422(t *testing.T) {
 // TestDeleteLinkedExpense409 covers DeleteExpense refusing to delete an
 // expense reconciled against a bank line.
 func TestDeleteLinkedExpense409(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 
 	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-		SpentOn:     mustDate(t, "2026-11-01"),
+		SpentOn:     testkit.Date("2026-11-01"),
 		Description: "Plumber",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: repairs.ID, Amount: 11000},
@@ -307,7 +266,7 @@ func TestDeleteLinkedExpense409(t *testing.T) {
 
 // --- file upload tests (HTTP level, via recon's routes) ---
 
-func uploadFile(handler http.Handler, token string, data []byte, filename string) *httptest.ResponseRecorder {
+func uploadFile(s testkit.Session, data []byte, filename string) testkit.Response {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	part, err := w.CreateFormFile("file", filename)
@@ -321,13 +280,7 @@ func uploadFile(handler http.Handler, token string, data []byte, filename string
 		panic(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/acme/files", &body)
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	req.Header.Set("X-Shigoto-CSRF", "1")
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	return rr
+	return s.DoWith(http.MethodPost, "/api/v1/orgs/acme/files", &body, map[string]string{"Content-Type": w.FormDataContentType()})
 }
 
 // pngBytes is a minimal valid 1x1 PNG, enough for http.DetectContentType
@@ -349,32 +302,36 @@ type fileResponseBody struct {
 }
 
 func TestFileUploadSniffAndDedupe(t *testing.T) {
-	_, handler, token, _ := reconTestSetup(t)
+	e := testkit.New(t)
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
 
-	rr := uploadFile(handler, token, pngBytes, "receipt.png")
+	rr := uploadFile(s, pngBytes, "receipt.png")
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("upload: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("upload: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	var first fileResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &first); err != nil {
+	if err := json.Unmarshal(rr.Body, &first); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
-	rr = uploadFile(handler, token, pngBytes, "receipt-again.png")
+	rr = uploadFile(s, pngBytes, "receipt-again.png")
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("second upload: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("second upload: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	var second fileResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &second); err != nil {
+	if err := json.Unmarshal(rr.Body, &second); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if second.ID != first.ID {
 		t.Fatalf("second upload id = %d, want same as first (%d)", second.ID, first.ID)
 	}
 
-	rr = uploadFile(handler, token, []byte("not an image"), "notes.txt")
+	rr = uploadFile(s, []byte("not an image"), "notes.txt")
 	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("text upload: status = %d, want 422, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("text upload: status = %d, want 422, body = %s", rr.Code, rr.Body)
 	}
 }
 
@@ -384,50 +341,53 @@ func TestFileUploadSniffAndDedupe(t *testing.T) {
 // prove the full upload-then-download round trip sanitizes it, not just
 // the unit-level sanitizeFilename cases in routes_test.go.
 func TestFileDownloadOwnFileHeaders(t *testing.T) {
-	_, handler, token, _ := reconTestSetup(t)
+	e := testkit.New(t)
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
 
-	rr := uploadFile(handler, token, pngBytes, `My "Receipt".png`)
+	rr := uploadFile(s, pngBytes, `My "Receipt".png`)
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("upload: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("upload: status = %d, body = %s", rr.Code, rr.Body)
 	}
 	var uploaded fileResponseBody
-	if err := json.Unmarshal(rr.Body.Bytes(), &uploaded); err != nil {
+	if err := json.Unmarshal(rr.Body, &uploaded); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/files/%d", uploaded.ID), nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr = httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr = s.Do(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/files/%d", uploaded.ID), nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("download: status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("download: status = %d, body = %s", rr.Code, rr.Body)
 	}
-	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+	if got := rr.Header.Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
 	want := `attachment; filename="My Receipt.png"`
-	if got := rr.Header().Get("Content-Disposition"); got != want {
+	if got := rr.Header.Get("Content-Disposition"); got != want {
 		t.Errorf("Content-Disposition = %q, want %q", got, want)
 	}
-	if rr.Body.Len() != len(pngBytes) {
-		t.Errorf("downloaded %d bytes, want %d", rr.Body.Len(), len(pngBytes))
+	if len(rr.Body) != len(pngBytes) {
+		t.Errorf("downloaded %d bytes, want %d", len(rr.Body), len(pngBytes))
 	}
 }
 
 func TestFileDownloadOtherOrg404(t *testing.T) {
-	pool, handler, token, _ := reconTestSetup(t)
-	other := testOrg(t, pool, "other")
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	other := e.Org("other")
 	otherFile, err := recon.SaveFile(context.Background(), pool, other.ID, t.TempDir(), "receipt.png", bytes.NewReader(pngBytes))
 	if err != nil {
 		t.Fatalf("SaveFile: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/files/%d", otherFile.ID), nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr := s.Do(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/files/%d", otherFile.ID), nil)
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body)
 	}
 }
 
@@ -436,11 +396,11 @@ func TestFileDownloadOtherOrg404(t *testing.T) {
 // it's a 409 telling the user to unmatch the payout, not a 500 from the
 // foreign key.
 func TestDeleteFeeExpense409(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	setGSTRegistered(t, pool, org.ID, true)
-	_, feeExpenseID := matchFeePayout(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	e.Settings(org, testkit.GSTRegistered(true))
+	_, feeExpenseID := matchFeePayout(e, org)
 
 	err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {
 		return recon.DeleteExpense(ctx, tx, org.ID, feeExpenseID)
@@ -475,18 +435,18 @@ func waitUntilBlockedBy(ctx context.Context, pool *pgxpool.Pool, pid uint32) boo
 func TestDeleteExpenseRacesMatchExpense(t *testing.T) {
 	for _, first := range []string{"match", "delete"} {
 		t.Run(first+" first", func(t *testing.T) {
-			pool := db.TestPool(t)
-			ctx := context.Background()
-			org := testOrg(t, pool, "acme")
+			e := testkit.New(t)
+			pool, ctx := e.Pool, e.Ctx
+			org := e.Org("acme")
 			repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 			exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
-				SpentOn: mustDate(t, "2026-11-01"), Description: "Plumber",
+				SpentOn: testkit.Date("2026-11-01"), Description: "Plumber",
 				Lines: []recon.NewExpenseLine{{CategoryID: repairs.ID, Amount: 11000}},
 			})
 			if err != nil {
 				t.Fatalf("CreateExpense: %v", err)
 			}
-			lineID := testBankLineID(t, pool, org.ID, -11000, mustDate(t, "2026-11-01"), "Plumber")
+			lineID := testBankLineID(t, pool, org.ID, -11000, testkit.Date("2026-11-01"), "Plumber")
 
 			match := func(tx pgx.Tx) error { return recon.MatchExpense(ctx, tx, org.ID, lineID, exp.ID) }
 			del := func(tx pgx.Tx) error { return recon.DeleteExpense(ctx, tx, org.ID, exp.ID) }
@@ -543,12 +503,17 @@ func TestDeleteExpenseRacesMatchExpense(t *testing.T) {
 // was deleted - date, description and every line - since the rows are
 // gone afterwards.
 func TestDeleteExpenseRouteAuditsContents(t *testing.T) {
-	pool, handler, token, orgID := reconTestSetup(t)
-	ctx := context.Background()
-	setGSTRegistered(t, pool, orgID, true)
-	repairs := categoryByName(t, pool, orgID, "Repairs & maintenance")
-	exp, _, err := recon.CreateExpense(ctx, pool, orgID, recon.NewExpense{
-		SpentOn: mustDate(t, "2026-11-01"), Description: "Plumber",
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	ctx := e.Ctx
+	e.Settings(org, testkit.GSTRegistered(true))
+	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
+	exp, _, err := recon.CreateExpense(ctx, pool, org.ID, recon.NewExpense{
+		SpentOn: testkit.Date("2026-11-01"), Description: "Plumber",
 		Lines: []recon.NewExpenseLine{
 			{CategoryID: repairs.ID, Amount: 11000},
 			{CategoryID: repairs.ID, Amount: 500, GSTCode: ptrGST(core.FRE)},
@@ -558,16 +523,12 @@ func TestDeleteExpenseRouteAuditsContents(t *testing.T) {
 		t.Fatalf("CreateExpense: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/orgs/acme/expenses/%d", exp.ID), nil)
-	req.Header.Set("X-Shigoto-CSRF", "1")
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr := s.Do(http.MethodDelete, fmt.Sprintf("/api/v1/orgs/acme/expenses/%d", exp.ID), nil)
 	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204: %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 204: %s", rr.Code, rr.Body)
 	}
 
-	rows, err := pool.Query(ctx, `SELECT actor_user_id, diff FROM audit_log WHERE org_id = $1 AND entity = 'expense' AND entity_id = $2 AND action = 'delete'`, orgID, exp.ID)
+	rows, err := pool.Query(ctx, `SELECT actor_user_id, diff FROM audit_log WHERE org_id = $1 AND entity = 'expense' AND entity_id = $2 AND action = 'delete'`, org.ID, exp.ID)
 	if err != nil {
 		t.Fatalf("reading audit_log: %v", err)
 	}
@@ -583,7 +544,7 @@ func TestDeleteExpenseRouteAuditsContents(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("audit_log rows: %v", err)
 	}
-	if want := ownerUserID(t, pool); len(actors) != 1 || actors[0] == nil || *actors[0] != want {
+	if want := owner.ID; len(actors) != 1 || actors[0] == nil || *actors[0] != want {
 		t.Fatalf("delete audit actors = %v, want exactly one with the requesting user %d", actors, want)
 	}
 	want := fmt.Sprintf(`{"spent_on":"2026-11-01","description":"Plumber","lines":[`+
