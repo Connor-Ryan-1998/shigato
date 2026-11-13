@@ -1,0 +1,6 @@
+- name: first
+  in: 1
+  want: 2
+- name: second
+  in: 3
+  want: 6
