@@ -165,11 +165,12 @@ type Request struct {
 }
 
 // Expect is what the response must look like. Body is a subset match (see
-// Subset) and may contain `{seedName}` tokens; Headers are exact values for
-// the listed names only.
+// Subset), or with Exact a whole-body match (see Equal), and may contain
+// `{seedName}` tokens; Headers are exact values for the listed names only.
 type Expect struct {
 	Status  int               `yaml:"status"`
 	Body    any               `yaml:"body"`
+	Exact   bool              `yaml:"exact"`
 	Headers map[string]string `yaml:"headers"`
 }
 
@@ -418,6 +419,9 @@ func (f File) Validate() error {
 			caseErr("expect.body: %v", err)
 		}
 
+		if c.Expect.Exact && c.Expect.Body == nil {
+			caseErr("expect.exact needs an expect.body")
+		}
 		if c.Expect.Status == 0 {
 			caseErr("expect.status is required")
 		} else if c.Expect.Status < 100 || c.Expect.Status > 599 {
@@ -501,6 +505,13 @@ func InterpolateBody(v any, ids map[string]int64) (any, error) {
 	}
 }
 
+// Equal reports whether got equals want exactly, after the same JSON
+// normalisation as Subset: extra keys in got objects fail too. diff names
+// the JSON path of the first difference.
+func Equal(want, got any) (ok bool, diff string) {
+	return compare(want, got, true)
+}
+
 // Subset reports whether want is contained in got, after normalising both
 // through a JSON round trip: every wanted map key must be present with a
 // matching value (extra keys in got are ignored), slices must have equal
@@ -508,6 +519,10 @@ func InterpolateBody(v any, ids map[string]int64) (any, error) {
 // compared exactly by value and never equal to strings. diff names the
 // JSON path of the first mismatch.
 func Subset(want, got any) (ok bool, diff string) {
+	return compare(want, got, false)
+}
+
+func compare(want, got any, exact bool) (ok bool, diff string) {
 	w, err := normalise(want)
 	if err != nil {
 		return false, fmt.Sprintf("encoding expected body: %v", err)
@@ -516,7 +531,7 @@ func Subset(want, got any) (ok bool, diff string) {
 	if err != nil {
 		return false, fmt.Sprintf("encoding actual body: %v", err)
 	}
-	if d := subset(w, g, ""); d != "" {
+	if d := subset(w, g, "", exact); d != "" {
 		return false, d
 	}
 	return true, ""
@@ -536,7 +551,9 @@ func normalise(v any) (any, error) {
 	return out, nil
 }
 
-func subset(want, got any, path string) string {
+// subset returns the first place got does not contain want, or "". With
+// exact, a key in a got object that want lacks is also a difference.
+func subset(want, got any, path string, exact bool) string {
 	at := path
 	if at == "" {
 		at = "(root)"
@@ -556,8 +573,19 @@ func subset(want, got any, path string) string {
 			if !present {
 				return fmt.Sprintf("%s: missing key (want %s)", child, show(w[k]))
 			}
-			if d := subset(w[k], gv, child); d != "" {
+			if d := subset(w[k], gv, child, exact); d != "" {
 				return d
+			}
+		}
+		if exact {
+			for _, k := range sortedKeys(g) {
+				if _, wanted := w[k]; !wanted {
+					child := k
+					if path != "" {
+						child = path + "." + k
+					}
+					return fmt.Sprintf("%s: unexpected key (got %s)", child, show(g[k]))
+				}
 			}
 		}
 		return ""
@@ -570,7 +598,7 @@ func subset(want, got any, path string) string {
 			return fmt.Sprintf("%s: array length got %d want %d (got %s)", at, len(g), len(w), show(got))
 		}
 		for i := range w {
-			if d := subset(w[i], g[i], fmt.Sprintf("%s[%d]", path, i)); d != "" {
+			if d := subset(w[i], g[i], fmt.Sprintf("%s[%d]", path, i), exact); d != "" {
 				return d
 			}
 		}

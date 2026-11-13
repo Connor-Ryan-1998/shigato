@@ -212,10 +212,14 @@ func runCase(t *testing.T, file string, w *caseWorld, c casefile.Case, actor str
 		if err != nil {
 			t.Fatalf("%s: expect.body: %v", prefix, err)
 		}
+		match := casefile.Subset
+		if c.Expect.Exact {
+			match = casefile.Equal
+		}
 		var got any
 		if err := json.Unmarshal(r.Body, &got); err != nil {
 			t.Errorf("%s: body is not JSON (%v)\nbody: %s", prefix, err, truncate(string(r.Body)))
-		} else if ok, diff := casefile.Subset(want, got); !ok {
+		} else if ok, diff := match(want, got); !ok {
 			t.Errorf("%s: body mismatch at %s\nbody: %s", prefix, diff, truncate(string(r.Body)))
 		}
 	}

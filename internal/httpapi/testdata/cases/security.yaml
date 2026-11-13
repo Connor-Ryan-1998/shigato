@@ -4,7 +4,8 @@
 # org (allowed roles reach validation or the handler, the rest get 403), by
 # every role in an org they don't belong to (404) and anonymously (401).
 # Every request is invalid or read-only, so none may change financial data,
-# and denials carry only the error word.
+# and denials carry only the error word (exact: true, so a leaked field
+# fails).
 seed:
   orgs: [acme, foreign]
   users:
@@ -45,7 +46,7 @@ cases:
   - name: owner cannot issue a foreign org's draft
     as: owner
     request: {method: POST, path: "/api/v1/orgs/acme/invoices/{draft_foreign}/issue"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [invoices, payments, invoice_counters, audit_log]
 
   - name: owner cannot pay a foreign org's invoice
@@ -54,7 +55,7 @@ cases:
       method: POST
       path: "/api/v1/orgs/acme/invoices/{open_foreign}/payments"
       body: {amount: 400, method: bank_transfer, paid_on: "2026-11-13"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [invoices, payments, invoice_counters, audit_log]
 
 
@@ -67,22 +68,22 @@ cases:
   - name: PUT /settings is forbidden to other roles
     as: [staff, keeper, tenant, client]
     request: {method: PUT, path: "/api/v1/orgs/acme/settings", body: {}}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: PUT /settings in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: PUT, path: "/api/v1/orgs/foreign/settings", body: {}}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: PUT /settings needs a session
     as: anonymous
     request: {method: PUT, path: "/api/v1/orgs/acme/settings", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: PUT /settings in a foreign org needs a session
     as: anonymous
     request: {method: PUT, path: "/api/v1/orgs/foreign/settings", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
 
   # POST /invoices: owner, staff.
@@ -94,49 +95,49 @@ cases:
   - name: POST /invoices is forbidden to other roles
     as: [keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/acme/invoices", body: {}}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/foreign/invoices", body: {}}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/acme/invoices", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices in a foreign org needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/foreign/invoices", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
 
   # POST /invoices/{id}/issue: owner, staff.
   - name: POST /invoices/{id}/issue as an allowed role
     as: [owner, staff]
     request: {method: POST, path: "/api/v1/orgs/acme/invoices/999999/issue", body: {}}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/issue is forbidden to other roles
     as: [keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/acme/invoices/999999/issue", body: {}}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/issue in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/foreign/invoices/999999/issue", body: {}}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/issue needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/acme/invoices/999999/issue", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/issue in a foreign org needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/foreign/invoices/999999/issue", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
 
   # POST /invoices/{id}/payments: owner, staff, keeper.
@@ -148,22 +149,22 @@ cases:
   - name: POST /invoices/{id}/payments is forbidden to other roles
     as: [tenant, client]
     request: {method: POST, path: "/api/v1/orgs/acme/invoices/999999/payments", body: {}}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/payments in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/foreign/invoices/999999/payments", body: {}}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/payments needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/acme/invoices/999999/payments", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /invoices/{id}/payments in a foreign org needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/foreign/invoices/999999/payments", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
 
   # GET /reports/transactions.csv: owner, staff, keeper.
@@ -175,49 +176,49 @@ cases:
   - name: GET /reports/transactions.csv is forbidden to other roles
     as: [tenant, client]
     request: {method: GET, path: "/api/v1/orgs/acme/reports/transactions.csv?from=2026-07-01&to=2026-07-01"}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /reports/transactions.csv in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: GET, path: "/api/v1/orgs/foreign/reports/transactions.csv?from=2026-07-01&to=2026-07-01"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /reports/transactions.csv needs a session
     as: anonymous
     request: {method: GET, path: "/api/v1/orgs/acme/reports/transactions.csv?from=2026-07-01&to=2026-07-01"}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /reports/transactions.csv in a foreign org needs a session
     as: anonymous
     request: {method: GET, path: "/api/v1/orgs/foreign/reports/transactions.csv?from=2026-07-01&to=2026-07-01"}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
 
   # GET /files/{id}: owner, staff, keeper.
   - name: GET /files/{id} as an allowed role
     as: [owner, staff, keeper]
     request: {method: GET, path: "/api/v1/orgs/acme/files/999999"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /files/{id} is forbidden to other roles
     as: [tenant, client]
     request: {method: GET, path: "/api/v1/orgs/acme/files/999999"}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /files/{id} in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: GET, path: "/api/v1/orgs/foreign/files/999999"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /files/{id} needs a session
     as: anonymous
     request: {method: GET, path: "/api/v1/orgs/acme/files/999999"}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: GET /files/{id} in a foreign org needs a session
     as: anonymous
     request: {method: GET, path: "/api/v1/orgs/foreign/files/999999"}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
 
   # POST /time-entries: owner, staff.
@@ -229,20 +230,20 @@ cases:
   - name: POST /time-entries is forbidden to other roles
     as: [keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/acme/time-entries", body: {}}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /time-entries in a foreign org is not found
     as: [owner, staff, keeper, tenant, client]
     request: {method: POST, path: "/api/v1/orgs/foreign/time-entries", body: {}}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /time-entries needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/acme/time-entries", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]
   - name: POST /time-entries in a foreign org needs a session
     as: anonymous
     request: {method: POST, path: "/api/v1/orgs/foreign/time-entries", body: {}}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [orgs, invoices, payments, time_entries, audit_log]

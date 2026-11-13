@@ -312,3 +312,50 @@ func TestValidInviteSeedInterpolates(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 }
+
+func TestEqualExtraKeyFails(t *testing.T) {
+	want := map[string]any{"error": "not found"}
+	ok, diff := Equal(want, map[string]any{"error": "not found", "invoice": map[string]any{"id": 7}})
+	if ok {
+		t.Fatal("Equal passed with an extra key")
+	}
+	if !strings.Contains(diff, "invoice") || !strings.Contains(diff, "unexpected key") {
+		t.Fatalf("diff %q does not name the extra key", diff)
+	}
+	// Nested: the path names the parent.
+	ok, diff = Equal(map[string]any{"a": map[string]any{"b": 1}}, map[string]any{"a": map[string]any{"b": 1, "c": 2}})
+	if ok || !strings.Contains(diff, "a.c") {
+		t.Fatalf("nested extra key: ok=%v diff=%q, want a failure at a.c", ok, diff)
+	}
+	// Subset still ignores the extra key.
+	if ok, diff := Subset(want, map[string]any{"error": "not found", "invoice": 7}); !ok {
+		t.Fatalf("Subset failed on an extra key: %s", diff)
+	}
+}
+
+func TestEqualEqualPasses(t *testing.T) {
+	want := map[string]any{"error": "forbidden", "n": 1000, "xs": []any{1, "a"}}
+	got := map[string]any{"error": "forbidden", "n": 1000.0, "xs": []any{1, "a"}}
+	if ok, diff := Equal(want, got); !ok {
+		t.Fatalf("Equal failed on equal bodies: %s", diff)
+	}
+	if ok, _ := Equal(map[string]any{"n": 1000}, map[string]any{"n": "1000"}); ok {
+		t.Fatal(`Equal matched 1000 to "1000"`)
+	}
+}
+
+func TestLoadRejectsExactWithoutBody(t *testing.T) {
+	path := writeYAML(t, "exact.yaml", `
+seed:
+  orgs: [acme]
+  users:
+    owner: {org: acme, role: owner}
+cases:
+  - name: exact with nothing to match
+    as: owner
+    request: {method: GET, path: /api/v1/orgs/acme/contacts}
+    expect: {status: 200, exact: true}
+`)
+	_, err := Load(path)
+	requireErrContains(t, err, "exact.yaml", "exact with nothing to match", "expect.exact")
+}
