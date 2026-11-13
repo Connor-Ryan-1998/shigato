@@ -1,87 +1,54 @@
 //go:build integration
 
-package httpapi
+package httpapi_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"shigoto/internal/auth"
-	"shigoto/internal/config"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
+	"shigoto/internal/httpapi"
 	"shigoto/internal/importers"
 	"shigoto/internal/recon"
+	"shigoto/internal/testkit"
 )
-
-// newDashboardTestHandler builds a handler with the given modules enabled
-// (property/timesheets/reconciliation), GetEnv returning "" so no org ever
-// resolves a Stripe provider.
-func newDashboardTestHandler(pool *pgxpool.Pool, mods map[string]bool) http.Handler {
-	a := auth.New(pool, false)
-	return New(Deps{
-		Pool:   pool,
-		Auth:   a,
-		Cfg:    config.Config{Modules: mods},
-		GetEnv: func(string) string { return "" },
-	})
-}
-
-func getDashboard(handler http.Handler, token string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/dashboard", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	return rr
-}
-
-// dashboardIssueInvoice creates and issues a one-line, GST-free invoice for
-// totalCents, due dueInDays after today - the same create-then-issue
-// sequence webhookContactAndInvoice uses, minus the provider_ref stamp
-// that test doesn't need here.
-func dashboardIssueInvoice(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, totalCents int64, dueInDays int) core.Invoice {
-	t.Helper()
-	ctx := context.Background()
-	draft, err := core.CreateDraftInvoice(ctx, pool, orgID, core.NewInvoice{
-		ContactID: contactID, Source: "manual", DueInDays: dueInDays,
-		Lines: []core.NewLine{{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"}},
-	})
-	if err != nil {
-		t.Fatalf("CreateDraftInvoice: %v", err)
-	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	inv, err := core.IssueInvoice(ctx, tx, orgID, draft.ID, time.Now())
-	if err != nil {
-		t.Fatalf("IssueInvoice: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	return inv
-}
 
 // backdateDueDate pushes invoiceID's due_date days into the past, so tests
 // can create an overdue invoice without a negative due_in_days (which
 // CreateDraftInvoice rejects).
-func backdateDueDate(t *testing.T, pool *pgxpool.Pool, orgID, invoiceID int64, days int) {
-	t.Helper()
-	if _, err := pool.Exec(context.Background(),
+func backdateDueDate(e *testkit.Env, org core.Org, invoiceID int64, days int) {
+	e.T.Helper()
+	if _, err := e.Pool.Exec(e.Ctx,
 		"UPDATE invoices SET due_date = due_date - make_interval(days => $1) WHERE org_id = $2 AND id = $3",
-		days, orgID, invoiceID,
+		days, org.ID, invoiceID,
 	); err != nil {
-		t.Fatalf("backdating due_date: %v", err)
+		e.T.Fatalf("backdating due_date: %v", err)
+	}
+}
+
+// issuedDueIn creates and issues today a one-line, GST-free manual invoice
+// for totalCents, then moves its due date to dueInDays after the issue
+// date (testkit drafts use a 14-day term).
+func issuedDueIn(e *testkit.Env, org core.Org, contactID, totalCents int64, dueInDays int) core.Invoice {
+	e.T.Helper()
+	inv := e.Invoice(org, contactID, testkit.Amount(totalCents), testkit.InvoiceGST("N-T"), testkit.Source("manual"), testkit.Issued(time.Now()))
+	if dueInDays != 14 {
+		backdateDueDate(e, org, inv.ID, 14-dueInDays)
+	}
+	return inv
+}
+
+// recordPayment records a cash payment of amount on invoiceID, paid today.
+func recordPayment(e *testkit.Env, org core.Org, invoiceID int64, amount core.Cents) {
+	e.T.Helper()
+	if _, _, err := core.RecordPayment(e.Ctx, e.Pool, org.ID, core.NewPayment{
+		InvoiceID: invoiceID, Amount: amount, PaidOn: time.Now(), Method: "cash",
+	}); err != nil {
+		e.T.Fatalf("RecordPayment: %v", err)
 	}
 }
 
@@ -99,14 +66,14 @@ type dashboardBody struct {
 	Modules map[string]map[string]any `json:"modules"`
 }
 
-func decodeDashboard(t *testing.T, rr *httptest.ResponseRecorder) dashboardBody {
+func decodeDashboard(t *testing.T, rr testkit.Response) dashboardBody {
 	t.Helper()
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body)
 	}
 	var body dashboardBody
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("decoding dashboard response %s: %v", rr.Body.String(), err)
+	if err := json.Unmarshal(rr.Body, &body); err != nil {
+		t.Fatalf("decoding dashboard response %s: %v", rr.Body, err)
 	}
 	return body
 }
@@ -115,44 +82,27 @@ func decodeDashboard(t *testing.T, rr *httptest.ResponseRecorder) dashboardBody 
 // draft, one open invoice not yet due, one open invoice overdue with a
 // partial payment, and one fully paid invoice.
 func TestDashboardCore(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
-	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
-	contactID := webhookTestContact(t, pool, org.ID)
-	handler := newDashboardTestHandler(pool, map[string]bool{})
-	ctx := context.Background()
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules())
+	org, owner := e.OwnerSession("acme", handler)
+	contact := e.Contact(org)
 
 	// draft
-	if _, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
-		ContactID: contactID, Source: "manual", DueInDays: 14,
-		Lines: []core.NewLine{{Description: "draft", QuantityMilli: 1000, UnitAmount: 1000, GSTCode: "N-T"}},
-	}); err != nil {
-		t.Fatalf("CreateDraftInvoice (draft): %v", err)
-	}
+	e.Invoice(org, contact.ID, testkit.Amount(1000), testkit.InvoiceGST("N-T"), testkit.Source("manual"))
 
 	// open, not yet due
-	dashboardIssueInvoice(t, pool, org.ID, contactID, 5000, 30)
+	issuedDueIn(e, org, contact.ID, 5000, 30)
 
 	// open, overdue, with a partial payment
-	overdue := dashboardIssueInvoice(t, pool, org.ID, contactID, 10000, 0)
-	backdateDueDate(t, pool, org.ID, overdue.ID, 5)
-	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-		InvoiceID: overdue.ID, Amount: 4000, PaidOn: time.Now(), Method: "cash",
-	}); err != nil {
-		t.Fatalf("RecordPayment (partial): %v", err)
-	}
+	overdue := issuedDueIn(e, org, contact.ID, 10000, 0)
+	backdateDueDate(e, org, overdue.ID, 5)
+	recordPayment(e, org, overdue.ID, 4000)
 
 	// paid in full
-	paid := dashboardIssueInvoice(t, pool, org.ID, contactID, 2000, 14)
-	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-		InvoiceID: paid.ID, Amount: 2000, PaidOn: time.Now(), Method: "cash",
-	}); err != nil {
-		t.Fatalf("RecordPayment (paid): %v", err)
-	}
+	paid := issuedDueIn(e, org, contact.ID, 2000, 14)
+	recordPayment(e, org, paid.ID, 2000)
 
-	body := decodeDashboard(t, getDashboard(handler, token))
+	body := decodeDashboard(t, owner.Do(http.MethodGet, "/api/v1/orgs/acme/dashboard", nil))
 	if body.Core.DraftCount != 1 {
 		t.Fatalf("draft_count = %d, want 1", body.Core.DraftCount)
 	}
@@ -180,23 +130,15 @@ func TestDashboardCore(t *testing.T) {
 // dashboard can tell "no invoices at all" apart from "fully settled"
 // (see internal/httpapi/dashboard.go's coreDashboard.InvoiceCount doc).
 func TestDashboardInvoiceCountIncludesSettledInvoices(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
-	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
-	contactID := webhookTestContact(t, pool, org.ID)
-	handler := newDashboardTestHandler(pool, map[string]bool{})
-	ctx := context.Background()
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules())
+	org, owner := e.OwnerSession("acme", handler)
+	contact := e.Contact(org)
 
-	paid := dashboardIssueInvoice(t, pool, org.ID, contactID, 2000, 14)
-	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-		InvoiceID: paid.ID, Amount: 2000, PaidOn: time.Now(), Method: "cash",
-	}); err != nil {
-		t.Fatalf("RecordPayment: %v", err)
-	}
+	paid := issuedDueIn(e, org, contact.ID, 2000, 14)
+	recordPayment(e, org, paid.ID, 2000)
 
-	body := decodeDashboard(t, getDashboard(handler, token))
+	body := decodeDashboard(t, owner.Do(http.MethodGet, "/api/v1/orgs/acme/dashboard", nil))
 	if body.Core.OpenCount != 0 || body.Core.OverdueCount != 0 || body.Core.DraftCount != 0 {
 		t.Fatalf("core = %+v, want open/overdue/draft all 0 (invoice is paid)", body.Core)
 	}
@@ -208,14 +150,11 @@ func TestDashboardInvoiceCountIncludesSettledInvoices(t *testing.T) {
 // TestDashboardOmitsDisabledModule checks that only enabled modules appear
 // under "modules", even for a role (owner) that holds every permission.
 func TestDashboardOmitsDisabledModule(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
-	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
-	handler := newDashboardTestHandler(pool, map[string]bool{"timesheets": true})
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules("timesheets"))
+	_, owner := e.OwnerSession("acme", handler)
 
-	body := decodeDashboard(t, getDashboard(handler, token))
+	body := decodeDashboard(t, owner.Do(http.MethodGet, "/api/v1/orgs/acme/dashboard", nil))
 	if len(body.Modules) != 1 {
 		t.Fatalf("modules = %v, want exactly one key", body.Modules)
 	}
@@ -228,35 +167,23 @@ func TestDashboardOmitsDisabledModule(t *testing.T) {
 // overdue filters, and that "total" always reflects the full matching
 // count regardless of limit.
 func TestInvoiceListFiltersAndTotal(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
-	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
-	contactID := webhookTestContact(t, pool, org.ID)
-	handler := newDashboardTestHandler(pool, map[string]bool{})
-	ctx := context.Background()
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules())
+	org, owner := e.OwnerSession("acme", handler)
+	contact := e.Contact(org)
 
-	if _, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
-		ContactID: contactID, Source: "manual", DueInDays: 14,
-		Lines: []core.NewLine{{Description: "draft", QuantityMilli: 1000, UnitAmount: 1000, GSTCode: "N-T"}},
-	}); err != nil {
-		t.Fatalf("CreateDraftInvoice (draft): %v", err)
-	}
-	dashboardIssueInvoice(t, pool, org.ID, contactID, 5000, 30) // open, not due
-	overdue := dashboardIssueInvoice(t, pool, org.ID, contactID, 7000, 0)
-	backdateDueDate(t, pool, org.ID, overdue.ID, 5)
+	e.Invoice(org, contact.ID, testkit.Amount(1000), testkit.InvoiceGST("N-T"), testkit.Source("manual"))
+	issuedDueIn(e, org, contact.ID, 5000, 30) // open, not due
+	overdue := issuedDueIn(e, org, contact.ID, 7000, 0)
+	backdateDueDate(e, org, overdue.ID, 5)
 
-	listInvoicesVia := func(query string) invoiceListResponse {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/invoices"+query, nil)
-		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
+	listInvoicesVia := func(query string) httpapi.InvoiceListResponse {
+		rr := owner.Do(http.MethodGet, "/api/v1/orgs/acme/invoices"+query, nil)
 		if rr.Code != http.StatusOK {
-			t.Fatalf("GET /invoices%s: status = %d, want 200, body=%s", query, rr.Code, rr.Body.String())
+			t.Fatalf("GET /invoices%s: status = %d, want 200, body=%s", query, rr.Code, rr.Body)
 		}
-		var body invoiceListResponse
-		if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		var body httpapi.InvoiceListResponse
+		if err := json.Unmarshal(rr.Body, &body); err != nil {
 			t.Fatalf("decoding: %v", err)
 		}
 		return body
@@ -284,30 +211,19 @@ func TestInvoiceListFiltersAndTotal(t *testing.T) {
 // never reached a payment provider (GetEnv returns "" so no org ever
 // resolves one). GET /invoices (the list) must not carry either field.
 func TestInvoiceDetailIncludesPaymentsAndProviderURL(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
-	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
-	contactID := webhookTestContact(t, pool, org.ID)
-	handler := newDashboardTestHandler(pool, map[string]bool{})
-	ctx := context.Background()
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules())
+	org, owner := e.OwnerSession("acme", handler)
+	contact := e.Contact(org)
 
-	inv := dashboardIssueInvoice(t, pool, org.ID, contactID, 10000, 14)
-	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-		InvoiceID: inv.ID, Amount: 4000, PaidOn: time.Now(), Method: "cash",
-	}); err != nil {
-		t.Fatalf("RecordPayment: %v", err)
-	}
+	inv := issuedDueIn(e, org, contact.ID, 10000, 14)
+	recordPayment(e, org, inv.ID, 4000)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/invoices/"+strconv.FormatInt(inv.ID, 10), nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr := owner.Do(http.MethodGet, "/api/v1/orgs/acme/invoices/"+strconv.FormatInt(inv.ID, 10), nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /invoices/%d: status = %d, want 200, body=%s", inv.ID, rr.Code, rr.Body.String())
+		t.Fatalf("GET /invoices/%d: status = %d, want 200, body=%s", inv.ID, rr.Code, rr.Body)
 	}
-	rawBody := rr.Body.String()
+	rawBody := string(rr.Body)
 	if strings.Contains(rawBody, "provider_ref") {
 		t.Fatalf("detail response leaked provider_ref: %s", rawBody)
 	}
@@ -336,15 +252,12 @@ func TestInvoiceDetailIncludesPaymentsAndProviderURL(t *testing.T) {
 	}
 
 	// GET /invoices (the list) must not carry payments/provider_url at all.
-	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/invoices", nil)
-	listReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	listRR := httptest.NewRecorder()
-	handler.ServeHTTP(listRR, listReq)
+	listRR := owner.Do(http.MethodGet, "/api/v1/orgs/acme/invoices", nil)
 	if listRR.Code != http.StatusOK {
-		t.Fatalf("GET /invoices: status = %d, want 200, body=%s", listRR.Code, listRR.Body.String())
+		t.Fatalf("GET /invoices: status = %d, want 200, body=%s", listRR.Code, listRR.Body)
 	}
-	if strings.Contains(listRR.Body.String(), "payments") || strings.Contains(listRR.Body.String(), "provider_url") {
-		t.Fatalf("list response leaked detail-only fields: %s", listRR.Body.String())
+	if strings.Contains(string(listRR.Body), "payments") || strings.Contains(string(listRR.Body), "provider_url") {
+		t.Fatalf("list response leaked detail-only fields: %s", listRR.Body)
 	}
 }
 
@@ -352,38 +265,35 @@ func TestInvoiceDetailIncludesPaymentsAndProviderURL(t *testing.T) {
 // line matched to an invoice: kind "invoice", with the invoice's number as
 // the label.
 func TestBankLineMatchLabel(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Owner)
-	token := settingsTestLogin(t, pool, "owner@example.com", "correct-password")
-	contactID := webhookTestContact(t, pool, org.ID)
-	handler := newDashboardTestHandler(pool, map[string]bool{"reconciliation": true})
-	ctx := context.Background()
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules("reconciliation"))
+	org, owner := e.OwnerSession("acme", handler)
+	contact := e.Contact(org)
+	ctx := e.Ctx
 
 	mapping, ok := importers.Preset("commbank")
 	if !ok {
 		t.Fatal("commbank preset not found")
 	}
-	account, err := recon.CreateBankAccount(ctx, pool, org.ID, "Everyday", mapping)
+	account, err := recon.CreateBankAccount(ctx, e.Pool, org.ID, "Everyday", mapping)
 	if err != nil {
 		t.Fatalf("CreateBankAccount: %v", err)
 	}
-	if _, err := recon.Import(ctx, pool, org.ID, account.ID, strings.NewReader("01/03/2026,100.00,Payment received\n")); err != nil {
+	if _, err := recon.Import(ctx, e.Pool, org.ID, account.ID, strings.NewReader("01/03/2026,100.00,Payment received\n")); err != nil {
 		t.Fatalf("Import: %v", err)
 	}
-	lines, _, err := recon.ListBankLines(ctx, pool, org.ID, recon.BankLineFilter{})
+	lines, _, err := recon.ListBankLines(ctx, e.Pool, org.ID, recon.BankLineFilter{})
 	if err != nil || len(lines) != 1 {
 		t.Fatalf("ListBankLines: lines=%+v, err=%v", lines, err)
 	}
 	lineID := lines[0].ID
 
-	inv := dashboardIssueInvoice(t, pool, org.ID, contactID, 10000, 14)
+	inv := issuedDueIn(e, org, contact.ID, 10000, 14)
 	if inv.Number == nil {
 		t.Fatal("issued invoice has no number")
 	}
 
-	tx, err := pool.Begin(ctx)
+	tx, err := e.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
@@ -394,12 +304,9 @@ func TestBankLineMatchLabel(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/bank-lines", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr := owner.Do(http.MethodGet, "/api/v1/orgs/acme/bank-lines", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body)
 	}
 
 	var body struct {
@@ -413,7 +320,7 @@ func TestBankLineMatchLabel(t *testing.T) {
 		} `json:"lines"`
 		Total int `json:"total"`
 	}
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(rr.Body, &body); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
 	if body.Total != 1 || len(body.Lines) != 1 {

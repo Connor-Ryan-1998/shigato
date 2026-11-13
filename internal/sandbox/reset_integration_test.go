@@ -9,17 +9,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"shigoto/internal/core"
-	"shigoto/internal/db"
+	"shigoto/internal/testkit"
 )
 
 func TestPopulateRefusesExternalExpenseLine(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	result := populateTest(t, pool)
-	other, err := core.CreateOrg(context.Background(), pool, "unrelated", "Keep this organisation")
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := e.Org("unrelated")
 	mustExec(t, pool, `INSERT INTO expense_lines (org_id,expense_id,category_id,amount,gst_code,gst_amount)
 		SELECT $1,e.id,c.id,1000,'FRE',0 FROM expenses e CROSS JOIN categories c
 		WHERE e.org_id=$2 AND c.org_id=$1 LIMIT 1`, other.ID, result.Orgs[0].ID)
@@ -84,12 +81,10 @@ func addResetDependencies(t *testing.T, pool *pgxpool.Pool, orgID int64, email s
 }
 
 func TestPopulateResetsOwnedDependenciesOnly(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	result := populateTest(t, pool)
-	other, err := core.CreateOrg(context.Background(), pool, "unrelated", "Keep this organisation")
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := e.Org("unrelated")
 	owned := addResetDependencies(t, pool, result.Orgs[0].ID, "staff@example.test")
 	unrelated := addResetDependencies(t, pool, other.ID, "unrelated@example.test")
 	populateTest(t, pool)
@@ -122,13 +117,11 @@ func TestPopulateResetsOwnedDependenciesOnly(t *testing.T) {
 }
 
 func TestPopulateRefusesExternalFileReference(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	result := populateTest(t, pool)
 	owned := addResetDependencies(t, pool, result.Orgs[0].ID, "staff@example.test")
-	other, err := core.CreateOrg(context.Background(), pool, "unrelated", "Keep this organisation")
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := e.Org("unrelated")
 	mustExec(t, pool, `INSERT INTO expenses (org_id,spent_on,description,receipt_file_id) VALUES ($1,$2,'External file reference',$3)`, other.ID, testDay, owned.file)
 	before := count(t, pool, `SELECT count(*) FROM expenses`)
 	if _, err := Populate(context.Background(), pool, testDay); err == nil {

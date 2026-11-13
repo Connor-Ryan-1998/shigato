@@ -562,3 +562,43 @@ func TestProjectGSTOption(t *testing.T) {
 		t.Fatalf("GSTCode = %q, want FRE", got.GSTCode)
 	}
 }
+
+func TestOnlyModulesEnablesJustThoseNamed(t *testing.T) {
+	e := testkit.New(t)
+	meta := func(opts ...testkit.HandlerOption) string {
+		t.Helper()
+		r := e.Anonymous(e.Handler(opts...)).Do(http.MethodGet, "/api/v1/meta", nil)
+		var body struct {
+			Modules []string `json:"modules"`
+		}
+		r.JSON(&body)
+		return strings.Join(body.Modules, ",")
+	}
+	if got := meta(testkit.OnlyModules()); got != "" {
+		t.Fatalf("OnlyModules() meta modules = %q, want none", got)
+	}
+	if got := meta(testkit.OnlyModules("timesheets")); got != "timesheets" {
+		t.Fatalf("OnlyModules(timesheets) meta modules = %q, want timesheets", got)
+	}
+	if got := meta(testkit.OnlyModules("property", "reconciliation")); got != "property,reconciliation" {
+		t.Fatalf("OnlyModules(property, reconciliation) meta modules = %q, want property,reconciliation", got)
+	}
+}
+
+func TestOwnerSessionReadsOrg(t *testing.T) {
+	e := testkit.New(t)
+	h := e.Handler()
+	org, s := e.OwnerSession("acme", h)
+	if org.Slug != "acme" || org.ID == 0 {
+		t.Fatalf("org = %+v, want slug acme with an id", org)
+	}
+	if n := e.Count("users", "email = $1", "owner@acme.example"); n != 1 {
+		t.Fatalf("users with email owner@acme.example = %d, want 1", n)
+	}
+	if n := e.Count("memberships", "org_id = $1 AND role = 'owner'", org.ID); n != 1 {
+		t.Fatalf("owner memberships of acme = %d, want 1", n)
+	}
+	if r := s.Do(http.MethodGet, "/api/v1/orgs/acme/settings", nil); r.Code != http.StatusOK {
+		t.Fatalf("owner GET settings = %d, want 200; body %s", r.Code, r.Body)
+	}
+}

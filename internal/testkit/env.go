@@ -56,6 +56,19 @@ func Modules(m map[string]bool) HandlerOption {
 	return func(c *handlerConfig) { maps.Copy(c.modules, m) }
 }
 
+// OnlyModules enables exactly the named modules and disables every other
+// config.Known module. OnlyModules() disables them all.
+func OnlyModules(names ...string) HandlerOption {
+	return func(c *handlerConfig) {
+		for name := range c.modules {
+			c.modules[name] = false
+		}
+		for _, name := range names {
+			c.modules[name] = true
+		}
+	}
+}
+
 // Mailer sets the handler's mailer. The default is nil (no email).
 func Mailer(m *mail.Mailer) HandlerOption {
 	return func(c *handlerConfig) { c.mailer = m }

@@ -11,8 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"shigoto/internal/core"
-	"shigoto/internal/db"
+	"shigoto/internal/testkit"
 )
 
 var testDay = time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)
@@ -45,11 +44,10 @@ func populateTest(t *testing.T, pool *pgxpool.Pool) Result {
 func TestPopulateCollision(t *testing.T) {
 	for _, kind := range []string{"slug", "email"} {
 		t.Run(kind, func(t *testing.T) {
-			pool := db.TestPool(t)
+			e := testkit.New(t)
+			pool := e.Pool
 			if kind == "slug" {
-				if _, err := core.CreateOrg(context.Background(), pool, "sbx-property", "Existing work"); err != nil {
-					t.Fatal(err)
-				}
+				e.Org("sbx-property")
 			} else {
 				mustExec(t, pool, `INSERT INTO users (email, name) VALUES ('OWNER@EXAMPLE.TEST', 'Existing person')`)
 			}
@@ -68,15 +66,10 @@ func TestPopulateCollision(t *testing.T) {
 }
 
 func TestPopulatePreservesUnrelatedData(t *testing.T) {
-	pool := db.TestPool(t)
-	org, err := core.CreateOrg(context.Background(), pool, "existing", "Existing work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	contact, err := core.CreateContact(context.Background(), pool, org.ID, core.Contact{Kind: "client", Name: "Keep me"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	e := testkit.New(t)
+	pool := e.Pool
+	org := e.Org("existing")
+	contact := e.Contact(org, testkit.Kind("client"), testkit.Name("Keep me"))
 	first := populateTest(t, pool)
 	second := populateTest(t, pool)
 	if len(first.Accounts) == 0 || len(second.Orgs) != 2 {
@@ -94,12 +87,10 @@ func TestPopulatePreservesUnrelatedData(t *testing.T) {
 }
 
 func TestPopulateRefusesSharedUser(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	populateTest(t, pool)
-	org, err := core.CreateOrg(context.Background(), pool, "existing", "Existing work")
-	if err != nil {
-		t.Fatal(err)
-	}
+	org := e.Org("existing")
 	mustExec(t, pool, `INSERT INTO memberships (user_id, org_id, role) SELECT id, $1, 'staff' FROM users WHERE email='owner@example.test'`, org.ID)
 	before := count(t, pool, `SELECT count(*) FROM contacts`)
 	if _, err := Populate(context.Background(), pool, testDay); err == nil {
@@ -114,7 +105,8 @@ func TestPopulateRefusesSharedUser(t *testing.T) {
 }
 
 func TestPopulateRollback(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	populateTest(t, pool)
 	mustExec(t, pool, `UPDATE orgs SET name='Tester edit' WHERE slug='sbx-property'`)
 	mustExec(t, pool, `CREATE FUNCTION fail_sandbox() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected population failure'; END $$`)
@@ -128,7 +120,8 @@ func TestPopulateRollback(t *testing.T) {
 }
 
 func TestPopulateConcurrent(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
 	for range 2 {

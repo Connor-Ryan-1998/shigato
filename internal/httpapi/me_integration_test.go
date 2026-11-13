@@ -1,17 +1,15 @@
 //go:build integration
 
-package httpapi
+package httpapi_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"shigoto/internal/auth"
-	"shigoto/internal/db"
+	"shigoto/internal/testkit"
 )
 
 type meResponse struct {
@@ -29,31 +27,24 @@ type meResponse struct {
 }
 
 func TestMeListsOrgsAndPerms(t *testing.T) {
-	pool := db.TestPool(t)
-	handler := newWebhookHandler(pool, nil)
+	e := testkit.New(t)
+	handler := e.Handler(testkit.OnlyModules())
 
-	orgB := webhookTestOrg(t, pool, "org-b")
-	orgA := webhookTestOrg(t, pool, "org-a")
-	userID := webhookTestUser(t, pool, "owner@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, orgA.ID, auth.Owner)
-	webhookTestAddMembership(t, pool, userID, orgB.ID, auth.Owner)
+	orgB := e.Org("org-b")
+	orgA := e.Org("org-a")
+	user := e.User("owner@example.com", testkit.WithPassword("correct-password"))
+	userID := user.ID
+	e.Member(user, orgA, auth.Owner)
+	e.Member(user, orgB, auth.Owner)
 
-	token, err := auth.Login(context.Background(), pool, "owner@example.com", "correct-password")
-	if err != nil {
-		t.Fatalf("Login: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+	rr := e.Login(user, handler).Do(http.MethodGet, "/api/v1/me", nil)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body)
 	}
 
 	var body meResponse
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(rr.Body, &body); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
@@ -83,7 +74,7 @@ func TestMeListsOrgsAndPerms(t *testing.T) {
 		}
 	}
 
-	raw := rr.Body.String()
+	raw := string(rr.Body)
 	if strings.Contains(raw, "password") || strings.Contains(raw, "oidc") {
 		t.Errorf("response body exposes password hash or oidc subject: %s", raw)
 	}

@@ -159,6 +159,16 @@ func (e *Env) Login(u User, h http.Handler) Session {
 	return Session{env: e, h: h}
 }
 
+// OwnerSession creates org slug, a passwordless user owner@<slug>.example
+// who owns it, and returns the org with a logged-in Session to h.
+func (e *Env) OwnerSession(slug string, h http.Handler) (core.Org, Session) {
+	e.T.Helper()
+	org := e.Org(slug)
+	owner := e.User("owner@" + slug + ".example")
+	e.Member(owner, org, auth.Owner)
+	return org, e.Login(owner, h)
+}
+
 // Anonymous returns a Session that sends no cookie.
 func (e *Env) Anonymous(h http.Handler) Session {
 	return Session{env: e, h: h}

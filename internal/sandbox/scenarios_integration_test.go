@@ -10,16 +10,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"shigoto/internal/auth"
-	"shigoto/internal/config"
-	"shigoto/internal/db"
-	"shigoto/internal/httpapi"
+	"shigoto/internal/testkit"
 )
 
 func TestPopulateScenarios(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	result := populateTest(t, pool)
 	main := result.Orgs[0].ID
 	for name, query := range map[string]string{
@@ -82,13 +80,10 @@ func TestPopulateScenarios(t *testing.T) {
 }
 
 func TestPopulatePortalVisibility(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	populateTest(t, pool)
-	a := auth.New(pool, false)
-	h := httpapi.New(httpapi.Deps{Pool: pool, Auth: a, Cfg: config.Config{
-		BaseURL: "http://localhost:8080", Location: time.UTC,
-		Modules: map[string]bool{"property": true, "timesheets": true, "reconciliation": true},
-	}})
+	h := e.Handler(testkit.OnlyModules("property", "timesheets", "reconciliation"))
 	for _, name := range []string{"tenant", "tenant-other", "tenant-empty", "client", "client-empty", "tenant-beta", "client-beta"} {
 		t.Run(name, func(t *testing.T) {
 			token, err := auth.RequestMagicLink(context.Background(), pool, name+"@example.test")
@@ -167,7 +162,8 @@ func TestPopulatePortalVisibility(t *testing.T) {
 }
 
 func TestPopulateReplacesTesterEdits(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	populateTest(t, pool)
 	mustExec(t, pool, `INSERT INTO contacts (org_id,kind,name) SELECT org_id,'supplier','Tester supplier' FROM sandbox_orgs LIMIT 1`)
 	mustExec(t, pool, `INSERT INTO sessions (token_hash,user_id,expires_at) SELECT decode('01','hex'),user_id,now()+interval '1 day' FROM sandbox_users LIMIT 1`)
@@ -181,7 +177,8 @@ func TestPopulateReplacesTesterEdits(t *testing.T) {
 }
 
 func TestPopulateRefusesExternalRecord(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
+	pool := e.Pool
 	populateTest(t, pool)
 	mustExec(t, pool, `INSERT INTO orgs (slug,name) VALUES ('unrelated','Unrelated')`)
 	// An invalid cross-org relationship can exist in SQL even though domain APIs reject it.
