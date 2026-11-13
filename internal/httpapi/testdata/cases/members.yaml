@@ -53,13 +53,13 @@ cases:
       method: PUT
       path: "/api/v1/orgs/acme/members/{beta_staff}"
       body: {role: staff}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [memberships, audit_log]
 
   - name: owner cannot remove a foreign org's member
     as: owner
     request: {method: DELETE, path: "/api/v1/orgs/acme/members/{beta_staff}"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [memberships, audit_log]
 
   # Portal roles are tied to a contact; they cannot become staff roles.
@@ -78,7 +78,7 @@ cases:
       method: POST
       path: /api/v1/orgs/acme/invites
       body: {email: nope@example.com, role: staff}
-    expect: {status: 403, body: {error: forbidden}}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [invites, audit_log]
 
   - name: invite rejects an invalid email
@@ -112,7 +112,7 @@ cases:
   - name: owner cannot revoke a foreign org's invite
     as: owner
     request: {method: DELETE, path: "/api/v1/orgs/acme/invites/{iv_beta}"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [invites, audit_log]
 
   - name: expired invite details say expired

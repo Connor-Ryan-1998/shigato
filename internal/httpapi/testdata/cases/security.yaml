@@ -26,7 +26,7 @@ cases:
   - name: anonymous cannot read me
     as: anonymous
     request: {method: GET, path: /api/v1/me}
-    expect: {status: 401, body: {error: unauthorized}}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
 
   # An acme owner naming foreign records through acme's routes is refused
   # without revealing them, and nothing is written.

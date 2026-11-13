@@ -19,13 +19,13 @@ cases:
       method: POST
       path: /api/v1/orgs/acme/contacts
       body: {kind: client, name: Sneaky}
-    expect: {status: 403}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: anonymous cannot list contacts
     as: anonymous
     request: {method: GET, path: /api/v1/orgs/acme/contacts}
-    expect: {status: 401}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
 
   # CSRF is the outermost middleware, so 401 (not 403) proves the runner
   # sent X-Shigoto-CSRF on an anonymous unsafe request.
@@ -35,7 +35,7 @@ cases:
       method: POST
       path: /api/v1/orgs/acme/contacts
       body: {kind: client, name: Anon Client}
-    expect: {status: 401}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: owner creates a contact
@@ -57,7 +57,7 @@ cases:
       method: PUT
       path: "/api/v1/orgs/acme/contacts/{c_foreign}"
       body: {name: Attack}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: owner cannot edit a missing contact
@@ -66,7 +66,7 @@ cases:
       method: PUT
       path: /api/v1/orgs/acme/contacts/99999999
       body: {name: Attack}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: owner cannot edit a malformed contact id
@@ -75,7 +75,7 @@ cases:
       method: PUT
       path: /api/v1/orgs/acme/contacts/bad
       body: {name: Attack}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: edit rejects an empty name
@@ -139,7 +139,7 @@ cases:
       method: PUT
       path: "/api/v1/orgs/acme/contacts/{c_tenant}"
       body: {name: Attack}
-    expect: {status: 403}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: anonymous cannot edit contacts
@@ -148,7 +148,7 @@ cases:
       method: PUT
       path: "/api/v1/orgs/acme/contacts/{c_tenant}"
       body: {name: Attack}
-    expect: {status: 401}
+    expect: {status: 401, body: {error: unauthorized}, exact: true}
     unchanged: [contacts, audit_log]
 
   - name: edit without the CSRF header is refused
@@ -158,7 +158,7 @@ cases:
       path: "/api/v1/orgs/acme/contacts/{c_tenant}"
       body: {name: Attack}
       headers: {X-Shigoto-CSRF: ""}
-    expect: {status: 403}
+    expect: {status: 403, body: {error: missing CSRF header}, exact: true}
     unchanged: [contacts, audit_log]
 
   # Editing a tenant contact's email must not move the linked portal

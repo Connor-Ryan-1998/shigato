@@ -676,3 +676,19 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// DecodeBody decodes a JSON response body for Subset/Equal, keeping numbers
+// as json.Number so integers above 2^53 compare exactly. Trailing data after
+// the first JSON value is an error.
+func DecodeBody(body []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var got any
+	if err := dec.Decode(&got); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("unexpected data after JSON value")
+	}
+	return got, nil
+}

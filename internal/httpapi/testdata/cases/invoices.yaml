@@ -21,7 +21,7 @@ cases:
   - name: owner cannot read a foreign org's invoice
     as: owner
     request: {method: GET, path: "/api/v1/orgs/acme/invoices/{inv_foreign}"}
-    expect: {status: 404, body: {error: not found}}
+    expect: {status: 404, body: {error: not found}, exact: true}
 
   # Creating a draft: each invalid input is rejected with 422 and nothing
   # is persisted. acme is not GST-registered, so valid lines use N-T.

@@ -402,3 +402,24 @@ cases:
 	_, err := Load(path)
 	requireErrContains(t, err, "exact.yaml", "exact with nothing to match", "expect.exact")
 }
+
+// TestDecodeBodyKeepsLargeIntegersExact pins the runner's decode path: a
+// response integer above 2^53 must not round onto a neighbouring value.
+func TestDecodeBodyKeepsLargeIntegersExact(t *testing.T) {
+	got, err := DecodeBody([]byte(`{"total": 9007199254740993}`))
+	if err != nil {
+		t.Fatalf("DecodeBody: %v", err)
+	}
+	if ok, _ := Subset(map[string]any{"total": int64(9007199254740992)}, got); ok {
+		t.Fatal("9007199254740992 matched 9007199254740993 after decoding")
+	}
+	if ok, diff := Subset(map[string]any{"total": int64(9007199254740993)}, got); !ok {
+		t.Fatalf("exact value did not match: %s", diff)
+	}
+}
+
+func TestDecodeBodyRejectsNonJSON(t *testing.T) {
+	if _, err := DecodeBody([]byte(`{"a":1} trailing`)); err == nil {
+		t.Fatal("DecodeBody accepted trailing data")
+	}
+}
