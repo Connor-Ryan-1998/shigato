@@ -123,7 +123,7 @@ func TestExpiredSession401(t *testing.T) {
 	})))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/probe", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -171,7 +171,7 @@ func TestRequireOrgCrossOrg404(t *testing.T) {
 	})))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/org-b/probe", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -200,7 +200,7 @@ func TestRequireOrgBookkeeperCannotWriteContacts(t *testing.T) {
 	})))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/probe", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -253,7 +253,7 @@ func TestAuthErrorsAreJSON(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, c.path, nil)
 			if c.token != "" {
-				req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: c.token})
+				req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: c.token})
 			}
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
@@ -292,8 +292,8 @@ func TestLoginHandlerSetsSecureCookieOnlyWhenConfigured(t *testing.T) {
 	}
 
 	cookies := rr.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != sessionCookieName {
-		t.Fatalf("cookies = %+v, want one %s cookie", cookies, sessionCookieName)
+	if len(cookies) != 1 || cookies[0].Name != SessionCookieName {
+		t.Fatalf("cookies = %+v, want one %s cookie", cookies, SessionCookieName)
 	}
 	if !cookies[0].Secure {
 		t.Error("cookie should be Secure when secureCookies is true")
@@ -522,7 +522,7 @@ func TestLogoutHandlerRevokesSession(t *testing.T) {
 	a := New(pool, false)
 
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
-	logoutReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	logoutReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
 	logoutRR := httptest.NewRecorder()
 	a.LogoutHandler(logoutRR, logoutReq)
 
@@ -536,7 +536,7 @@ func TestLogoutHandlerRevokesSession(t *testing.T) {
 	})))
 
 	probeReq := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/probe", nil)
-	probeReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	probeReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
 	probeRR := httptest.NewRecorder()
 	mux.ServeHTTP(probeRR, probeReq)
 

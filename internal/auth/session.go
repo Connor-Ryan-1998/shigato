@@ -95,7 +95,7 @@ func (a *Auth) StartSession(ctx context.Context, q core.Querier, w http.Response
 		return err
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		Expires:  time.Now().Add(sessionTTL),

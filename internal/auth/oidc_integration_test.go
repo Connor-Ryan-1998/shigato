@@ -84,7 +84,7 @@ func callbackOIDC(mux http.Handler, state, cookieValue string) (loc *url.URL, se
 	}
 	for _, c := range rr.Result().Cookies() {
 		switch c.Name {
-		case sessionCookieName:
+		case SessionCookieName:
 			sessionCookie = c.Value
 		case oidcStateCookieName:
 			stateCookieCleared = c.Value == "" && c.MaxAge < 0

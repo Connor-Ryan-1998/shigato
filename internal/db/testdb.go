@@ -15,7 +15,7 @@ import (
 // TestPool returns a connection pool scoped to a fresh, migrated schema for
 // use in integration tests. It skips the test if SHIGOTO_TEST_DATABASE_URL
 // is unset. The schema is dropped in t.Cleanup.
-func TestPool(t *testing.T) *pgxpool.Pool {
+func TestPool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 
 	url := os.Getenv("SHIGOTO_TEST_DATABASE_URL")
@@ -66,7 +66,7 @@ func TestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func randomSuffix(t *testing.T) string {
+func randomSuffix(t testing.TB) string {
 	t.Helper()
 	buf := make([]byte, 8)
 	if _, err := rand.Read(buf); err != nil {

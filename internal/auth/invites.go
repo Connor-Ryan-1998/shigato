@@ -410,7 +410,7 @@ func PruneInvites(ctx context.Context, q core.Querier, now time.Time) error {
 // such routes can check for an optional session without duplicating
 // RequireOrg/RequireUser's cookie-reading code.
 func (a *Auth) UserFromRequest(r *http.Request) (userID int64, ok bool) {
-	c, err := r.Cookie(sessionCookieName)
+	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		return 0, false
 	}

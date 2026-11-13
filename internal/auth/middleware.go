@@ -16,8 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// sessionCookieName is the cookie holding the session token.
-const sessionCookieName = "shigoto_session"
+// SessionCookieName is the cookie holding the session token.
+const SessionCookieName = "shigoto_session"
 
 // Login rate limits (global-constraints.md "Rate limits"): at most 5 failed
 // logins per email, and 20 per client IP, in a trailing 15 minutes.
@@ -167,14 +167,14 @@ func WriteTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
 // (if any) and clears the cookie.
 func (a *Auth) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	var logoutErr error
-	if c, err := r.Cookie(sessionCookieName); err == nil {
+	if c, err := r.Cookie(SessionCookieName); err == nil {
 		logoutErr = Logout(r.Context(), a.pool, c.Value)
 	}
 
 	// Clear the cookie regardless of whether the server-side delete
 	// succeeded: the browser should stop sending a token either way.
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     SessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -200,7 +200,7 @@ func (a *Auth) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 func (a *Auth) RequireOrg(p Perm) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			c, err := r.Cookie(sessionCookieName)
+			c, err := r.Cookie(SessionCookieName)
 			if err != nil {
 				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 				return
@@ -255,7 +255,7 @@ func (a *Auth) RequireOrg(p Perm) func(http.Handler) http.Handler {
 // too, which that handler enforces itself from the stored Principal.
 func (a *Auth) RequirePortal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie(sessionCookieName)
+		c, err := r.Cookie(SessionCookieName)
 		if err != nil {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -312,7 +312,7 @@ func UserIDFrom(ctx context.Context) (int64, bool) {
 // to rather than being scoped to one. No session: 401.
 func (a *Auth) RequireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie(sessionCookieName)
+		c, err := r.Cookie(SessionCookieName)
 		if err != nil {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
