@@ -32,6 +32,17 @@ cases:
     request: {method: GET, path: /api/v1/orgs/acme/contacts}
     expect: {status: 401}
 
+  # CSRF is the outermost middleware, so 401 (not 403) proves the runner
+  # sent X-Shigoto-CSRF on an anonymous unsafe request.
+  - name: anonymous cannot create contacts
+    as: anonymous
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/contacts
+      body: {kind: client, name: Anon Client}
+    expect: {status: 401}
+    unchanged: [contacts, audit_log]
+
   - name: owner creates a contact
     as: owner
     isolate: true
