@@ -1,0 +1,116 @@
+# Customer portal isolation and portal invites.
+#
+# A portal user (tenant or client) sees only records for the contact their
+# membership is tied to, in orgs they belong to, and never staff routes.
+# Records belonging to a neighbouring contact or another org are 404 with
+# nothing but the error word (exact: true, so a leaked field fails).
+seed:
+  orgs: [acme, beta]
+  users:
+    owner: {org: acme, role: owner}
+    tenant_a: {org: acme, role: tenant, contact: c_a}
+    client: {org: acme, role: client, contact: c_client}
+    # A genuine beta tenant; acme also holds a contact with the same email.
+    victim: {org: beta, role: tenant, contact: c_victim_beta}
+  contacts:
+    c_a: {org: acme, kind: tenant, name: Tenant A, email: tenanta@example.com}
+    c_b: {org: acme, kind: tenant, name: Tenant B, email: tenantb@example.com}
+    c_client: {org: acme, kind: client, name: Client, email: client@example.com}
+    c_supplier: {org: acme, kind: supplier, name: A Supplier, email: supplier@example.com}
+    c_no_email: {org: acme, kind: tenant, name: No Email}
+    c_victim_acme: {org: acme, kind: tenant, name: Same Email, email: victim@example.com}
+    c_other: {org: beta, kind: tenant, name: Other Tenant, email: othertenant@example.com}
+    c_victim_beta: {org: beta, kind: tenant, name: Victim Tenant, email: victim@example.com}
+  invoices:
+    inv_a: {org: acme, contact: c_a, amount: 10000, status: issued}
+    inv_a_draft: {org: acme, contact: c_a, amount: 5000}
+    inv_b: {org: acme, contact: c_b, amount: 20000, status: issued}
+    inv_other: {org: beta, contact: c_other, amount: 30000, status: issued}
+  properties:
+    prop: {org: acme}
+  leases:
+    lease_a: {org: acme, property: prop, tenant: c_a}
+    lease_b: {org: acme, property: prop, tenant: c_b, rent: 60000}
+
+cases:
+  # Invoices: only the caller's contact's issued invoices.
+  - name: tenant lists only their own issued invoices
+    as: tenant_a
+    request: {method: GET, path: /api/v1/portal/acme/invoices}
+    expect: {status: 200, body: [{id: "{inv_a}"}]}
+
+  - name: tenant reads their own invoice
+    as: tenant_a
+    request: {method: GET, path: "/api/v1/portal/acme/invoices/{inv_a}"}
+    expect: {status: 200, body: {id: "{inv_a}"}}
+
+  - name: tenant cannot read a neighbour's invoice
+    as: tenant_a
+    request: {method: GET, path: "/api/v1/portal/acme/invoices/{inv_b}"}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: tenant cannot read another org's invoice through their org
+    as: tenant_a
+    request: {method: GET, path: "/api/v1/portal/acme/invoices/{inv_other}"}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: tenant cannot list another org's invoices
+    as: tenant_a
+    request: {method: GET, path: /api/v1/portal/beta/invoices}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: tenant cannot read their own draft invoice
+    as: tenant_a
+    request: {method: GET, path: "/api/v1/portal/acme/invoices/{inv_a_draft}"}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  # Leases: tenants only, and only their own.
+  - name: tenant lists only their own lease
+    as: tenant_a
+    request: {method: GET, path: /api/v1/portal/acme/leases}
+    expect:
+      status: 200
+      body: [{id: "{lease_a}", property_name: 1 Test St, rent_amount: 50000, frequency: weekly}]
+
+  - name: client has no leases route
+    as: client
+    request: {method: GET, path: /api/v1/portal/acme/leases}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  # Portal users never reach staff routes.
+  - name: portal users cannot use staff invoice routes
+    as: [tenant_a, client]
+    request: {method: GET, path: /api/v1/orgs/acme/invoices}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+
+  # Portal invites (owner, no mailer configured).
+  - name: portal invite refuses a supplier contact
+    as: owner
+    request: {method: POST, path: "/api/v1/orgs/acme/contacts/{c_supplier}/portal-invite"}
+    expect: {status: 422, body: {error: contact must be a tenant or client}}
+    unchanged: [users, memberships, magic_links, audit_log]
+
+  - name: portal invite refuses a contact without email
+    as: owner
+    request: {method: POST, path: "/api/v1/orgs/acme/contacts/{c_no_email}/portal-invite"}
+    expect: {status: 422, body: {error: contact has no email}}
+    unchanged: [users, memberships, magic_links, audit_log]
+
+  - name: portal invite cannot name another org's contact
+    as: owner
+    request: {method: POST, path: "/api/v1/orgs/acme/contacts/{c_other}/portal-invite"}
+    expect: {status: 404, body: {error: not found}, exact: true}
+    unchanged: [users, memberships, magic_links, audit_log]
+
+  # Inviting another org's tenant by email must not hand back their sign-in
+  # link: the exact body has no `link` key.
+  - name: portal invite withholds the link for another org's member
+    as: owner
+    isolate: true
+    request: {method: POST, path: "/api/v1/orgs/acme/contacts/{c_victim_acme}/portal-invite"}
+    expect:
+      status: 200
+      exact: true
+      body:
+        emailed: false
+        message: "This person already has an account in another organisation. Configure email to send them a link, or have them request one at /login."

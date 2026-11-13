@@ -1,0 +1,46 @@
+# Org access middleware (RequireOrg) and sign-in configuration.
+#
+# Every RequireOrg denial is a JSON body carrying only the error word, so
+# the SPA can parse every API error the same way.
+seed:
+  orgs: [acme, beta]
+  users:
+    owner: {org: acme, role: owner}
+    keeper: {org: acme, role: bookkeeper}
+
+cases:
+  - name: org route needs a session
+    as: anonymous
+    request: {method: GET, path: /api/v1/orgs/acme/contacts}
+    expect:
+      status: 401
+      body: {error: unauthorized}
+      exact: true
+      headers: {Content-Type: application/json}
+
+  - name: bookkeeper lacks contacts write permission
+    as: keeper
+    request: {method: POST, path: /api/v1/orgs/acme/contacts, body: {kind: client, name: New}}
+    expect:
+      status: 403
+      body: {error: forbidden}
+      exact: true
+      headers: {Content-Type: application/json}
+    unchanged: [contacts]
+
+  - name: member of one org cannot reach another org
+    as: owner
+    request: {method: GET, path: /api/v1/orgs/beta/contacts}
+    expect:
+      status: 404
+      body: {error: not found}
+      exact: true
+      headers: {Content-Type: application/json}
+
+  # With no mailer configured, a magic-link request fails as configuration
+  # before the email is looked at, so it reveals nothing about accounts.
+  - name: magic link request needs email configured
+    as: anonymous
+    request: {method: POST, path: /api/v1/auth/magic, body: {email: anyone@example.com}}
+    expect: {status: 422, body: {error: email is not configured}}
+    unchanged: [magic_links]

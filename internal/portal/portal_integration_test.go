@@ -385,64 +385,14 @@ func TestPortalMembershipContactScopesAcrossOrgs(t *testing.T) {
 	}
 }
 
-func TestPortalInvoiceScoping(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	other := createOrg(t, pool, "beta")
-
-	tenantA := createContact(t, pool, org.ID, "tenant", "Tenant A", "tenanta@example.com")
-	tenantB := createContact(t, pool, org.ID, "tenant", "Tenant B", "tenantb@example.com")
-	otherContact := createContact(t, pool, other.ID, "tenant", "Other Tenant", "othertenant@example.com")
-
-	invA := createIssuedInvoice(t, pool, org.ID, tenantA.ID, 10000)
-	invB := createIssuedInvoice(t, pool, org.ID, tenantB.ID, 20000)
-	invOther := createIssuedInvoice(t, pool, other.ID, otherContact.ID, 30000)
-
-	h := newTestHandler(pool, nil)
-	tokenA := signInPortalUser(t, pool, h, org.ID, "tenant", "tenanta@example.com", tenantA.ID)
-
-	rr := doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices", tokenA, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("list status = %d, body %s", rr.Code, rr.Body.String())
-	}
-	var invoices []map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &invoices); err != nil {
-		t.Fatalf("decoding invoices: %v", err)
-	}
-	if len(invoices) != 1 || int64(invoices[0]["id"].(float64)) != invA {
-		t.Fatalf("tenant A's invoice list = %+v, want only invoice %d", invoices, invA)
-	}
-
-	// Tenant B's invoice is a 404 by id, not just excluded from the list.
-	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices/"+itoa(invB), tokenA, nil)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("tenant A reading tenant B's invoice status = %d, want 404, body %s", rr.Code, rr.Body.String())
-	}
-
-	// Another org's invoice (and that org's own slug won't even resolve a
-	// membership for tokenA) is also a 404.
-	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices/"+itoa(invOther), tokenA, nil)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("tenant A reading another org's invoice status = %d, want 404, body %s", rr.Code, rr.Body.String())
-	}
-	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/beta/invoices", tokenA, nil)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("tenant A listing another org's invoices status = %d, want 404, body %s", rr.Code, rr.Body.String())
-	}
-
-	// Sanity: tenant A's own invoice detail does work.
-	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices/"+itoa(invA), tokenA, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("tenant A reading their own invoice status = %d, body %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestPortalHidesDraftAndVoid(t *testing.T) {
+// TestPortalHidesVoid covers what the portal.yaml cases can't seed: a void
+// invoice is neither listed nor readable by its own contact (drafts are
+// covered in portal.yaml).
+func TestPortalHidesVoid(t *testing.T) {
 	pool := db.TestPool(t)
 	org := createOrg(t, pool, "acme")
 	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
 
-	draftID := createDraft(t, pool, org.ID, tenant.ID, 5000)
 	voidID := createVoidInvoice(t, pool, org.ID, tenant.ID, 6000)
 	openID := createIssuedInvoice(t, pool, org.ID, tenant.ID, 7000)
 
@@ -461,50 +411,9 @@ func TestPortalHidesDraftAndVoid(t *testing.T) {
 		t.Fatalf("portal invoice list = %+v, want only the open invoice %d", invoices, openID)
 	}
 
-	for name, id := range map[string]int64{"draft": draftID, "void": voidID} {
-		rr := doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices/"+itoa(id), token, nil)
-		if rr.Code != http.StatusNotFound {
-			t.Errorf("%s invoice detail status = %d, want 404, body %s", name, rr.Code, rr.Body.String())
-		}
-	}
-}
-
-func TestPortalLeasesTenantOnly(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-	client := createContact(t, pool, org.ID, "client", "Client", "client@example.com")
-	propertyID := createProperty(t, pool, org.ID)
-	lease := createLease(t, pool, org.ID, propertyID, tenant.ID)
-
-	h := newTestHandler(pool, nil)
-	tenantToken := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
-	clientToken := signInPortalUser(t, pool, h, org.ID, "client", "client@example.com", client.ID)
-
-	rr := doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/leases", tenantToken, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("tenant leases status = %d, body %s", rr.Code, rr.Body.String())
-	}
-	var leases []map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &leases); err != nil {
-		t.Fatalf("decoding leases: %v", err)
-	}
-	if len(leases) != 1 || int64(leases[0]["id"].(float64)) != lease.ID {
-		t.Fatalf("tenant leases = %+v, want only lease %d", leases, lease.ID)
-	}
-	if leases[0]["property_name"] != "1 Test St" {
-		t.Errorf("lease property_name = %v, want '1 Test St'", leases[0]["property_name"])
-	}
-	if leases[0]["rent_amount"].(float64) != 50000 {
-		t.Errorf("lease rent_amount = %v, want 50000", leases[0]["rent_amount"])
-	}
-	if leases[0]["frequency"] != "weekly" {
-		t.Errorf("lease frequency = %v, want weekly", leases[0]["frequency"])
-	}
-
-	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/leases", clientToken, nil)
+	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices/"+itoa(voidID), token, nil)
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("client leases status = %d, want 404, body %s", rr.Code, rr.Body.String())
+		t.Errorf("void invoice detail status = %d, want 404, body %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -596,19 +505,6 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	waitForMailCount(t, sink, 1, 2*time.Second)
 	if n := sink.count(); n != 1 {
 		t.Fatalf("mail sent for eligible portal email = %d messages, want 1", n)
-	}
-}
-
-// TestMagicRequestEmailNotConfigured covers Ruling 58: with no mailer
-// configured, POST /api/v1/auth/magic always 422s before even looking at
-// the email - a config-level failure, not an account-enumeration signal.
-func TestMagicRequestEmailNotConfigured(t *testing.T) {
-	pool := db.TestPool(t)
-	h := newTestHandler(pool, nil)
-
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": "anyone@example.com"})
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422, body %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -866,88 +762,6 @@ func TestAcceptInviteRevokesOtherSessions(t *testing.T) {
 	}
 	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s2New, nil); rr.Code != http.StatusOK {
 		t.Fatalf("s2's replacement session GET /me status = %d, want 200, body %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestPortalInviteValidation(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	other := createOrg(t, pool, "beta")
-	createStaffUser(t, pool, "owner@example.com", "correct-password", org.ID, "owner")
-	ownerToken := staffLogin(t, pool, "owner@example.com", "correct-password")
-
-	h := newTestHandler(pool, nil)
-
-	supplier := createContact(t, pool, org.ID, "supplier", "A Supplier", "supplier@example.com")
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(supplier.ID)+"/portal-invite", ownerToken, nil)
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("supplier contact invite status = %d, want 422, body %s", rr.Code, rr.Body.String())
-	}
-
-	noEmail := createContact(t, pool, org.ID, "tenant", "No Email", "")
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(noEmail.ID)+"/portal-invite", ownerToken, nil)
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("no-email contact invite status = %d, want 422, body %s", rr.Code, rr.Body.String())
-	}
-
-	otherOrgContact := createContact(t, pool, other.ID, "tenant", "Other Org Tenant", "otherorgtenant@example.com")
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(otherOrgContact.ID)+"/portal-invite", ownerToken, nil)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("cross-org contact invite status = %d, want 404, body %s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestPortalInviteCrossOrgDoesNotLeakLink covers Ruling 60: a staff member
-// in one org must never be handed a working magic-sign-in link for a user
-// who already belongs to a different org, just by "inviting" that user's
-// known email address as a brand-new contact here. Without the fix this
-// let staff in org A hijack org B's tenant account outright.
-func TestPortalInviteCrossOrgDoesNotLeakLink(t *testing.T) {
-	pool := db.TestPool(t)
-	orgA := createOrg(t, pool, "acme")
-	orgB := createOrg(t, pool, "beta")
-	createStaffUser(t, pool, "owner@example.com", "correct-password", orgA.ID, "owner")
-	ownerToken := staffLogin(t, pool, "owner@example.com", "correct-password")
-
-	// The victim: a genuine tenant of org B.
-	victimContactB := createContact(t, pool, orgB.ID, "tenant", "Victim Tenant", "victim@example.com")
-	createMembershipUser(t, pool, orgB.ID, "tenant", "victim@example.com", victimContactB.ID)
-
-	// Staff in org A "invites" the same email address as a brand-new
-	// contact of their own org, with no mailer configured.
-	victimContactA := createContact(t, pool, orgA.ID, "tenant", "Same Email", "victim@example.com")
-	h := newTestHandler(pool, nil)
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(victimContactA.ID)+"/portal-invite", ownerToken, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("portal-invite status = %d, body %s", rr.Code, rr.Body.String())
-	}
-
-	var resp map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if resp["emailed"] != false {
-		t.Errorf("emailed = %v, want false (no mailer configured)", resp["emailed"])
-	}
-	if _, leaked := resp["link"]; leaked {
-		t.Fatalf("response leaked a magic link to another org's staff: %+v", resp)
-	}
-	if resp["message"] == nil || resp["message"] == "" {
-		t.Errorf("response has no explanatory message when the link is withheld")
-	}
-}
-
-func TestStaffEndpointsRejectPortalUser(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-
-	h := newTestHandler(pool, nil)
-	token := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
-
-	rr := doJSON(t, h, http.MethodGet, "/api/v1/orgs/acme/invoices", token, nil)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("tenant GET staff invoices status = %d, want 403, body %s", rr.Code, rr.Body.String())
 	}
 }
 
