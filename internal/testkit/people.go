@@ -20,6 +20,7 @@ func (e *Env) Org(slug string) core.Org {
 	org, err := core.CreateOrg(e.Ctx, e.Pool, slug, slug+" org")
 	if err != nil {
 		e.T.Fatalf("creating org %q: %v", slug, err)
+		return core.Org{}
 	}
 	return org
 }
@@ -56,6 +57,7 @@ func (e *Env) User(email string, opts ...UserOption) User {
 		h, err := auth.HashPassword(c.password)
 		if err != nil {
 			e.T.Fatalf("hashing password for %s: %v", email, err)
+			return User{}
 		}
 		hash = &h
 	}
@@ -65,6 +67,7 @@ func (e *Env) User(email string, opts ...UserOption) User {
 		email, email, hash,
 	).Scan(&u.ID); err != nil {
 		e.T.Fatalf("inserting user %s: %v", email, err)
+		return User{}
 	}
 	return u
 }

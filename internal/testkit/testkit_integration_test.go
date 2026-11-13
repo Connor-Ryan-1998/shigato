@@ -98,6 +98,33 @@ func TestSnapshotDetectsChange(t *testing.T) {
 	}
 }
 
+func TestSnapshotOrdersByFirstColumn(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	var ids []int64
+	for _, name := range []string{"Alpha", "Bravo", "Charlie"} {
+		c, err := core.CreateContact(e.Ctx, e.Pool, org.ID, core.Contact{Kind: "client", Name: name})
+		if err != nil {
+			t.Fatalf("CreateContact: %v", err)
+		}
+		ids = append(ids, c.ID)
+	}
+	before := e.Snapshot("contacts")
+	// A no-op update writes a new row version at the end of the heap, so an
+	// unordered scan would now return Alpha last.
+	if _, err := e.Pool.Exec(e.Ctx, "UPDATE contacts SET name = name WHERE id = $1", ids[0]); err != nil {
+		t.Fatalf("touching contact: %v", err)
+	}
+	after := e.Snapshot("contacts")
+	if before != after {
+		t.Fatalf("snapshot changed after a no-op update:\nbefore %s\nafter  %s", before, after)
+	}
+	a, b, c := strings.Index(after, "Alpha"), strings.Index(after, "Bravo"), strings.Index(after, "Charlie")
+	if a < 0 || a > b || b > c {
+		t.Fatalf("snapshot rows not in id order: %s", after)
+	}
+}
+
 // recordingTB embeds the real testing.TB to satisfy its private method and
 // records Fatalf instead of stopping the test.
 type recordingTB struct {

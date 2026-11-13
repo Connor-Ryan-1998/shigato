@@ -5,6 +5,8 @@ package testkit
 import (
 	"regexp"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // identifier matches a plain, unquoted SQL table name. Table names are
@@ -12,9 +14,10 @@ import (
 var identifier = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // Snapshot returns each table's rows as a jsonb array, ordered by the
-// table's first column, one "table: [...]" line per table. Comparing two
-// snapshots shows whether anything in those tables changed. An unknown or
-// invalid table name fails the test, naming the table.
+// table's first column with ties broken by the row's JSON text, one
+// "table: [...]" line per table. Comparing two snapshots shows whether
+// anything in those tables changed. An unknown or invalid table name fails
+// the test, naming the table.
 func (e *Env) Snapshot(tables ...string) string {
 	e.T.Helper()
 	if len(tables) == 0 {
@@ -27,9 +30,21 @@ func (e *Env) Snapshot(tables ...string) string {
 			e.T.Fatalf("Snapshot: invalid table name %q", table)
 			return ""
 		}
-		var rows string
+		var first string
 		err := e.Pool.QueryRow(e.Ctx,
-			"SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)::text FROM (SELECT * FROM "+table+" ORDER BY 1) t",
+			`SELECT column_name FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = $1
+			ORDER BY ordinal_position LIMIT 1`,
+			table,
+		).Scan(&first)
+		if err != nil {
+			e.T.Fatalf("Snapshot of table %q: finding its first column: %v", table, err)
+			return ""
+		}
+		col := pgx.Identifier{first}.Sanitize()
+		var rows string
+		err = e.Pool.QueryRow(e.Ctx,
+			"SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t."+col+", to_jsonb(t)::text), '[]'::jsonb)::text FROM "+table+" t",
 		).Scan(&rows)
 		if err != nil {
 			e.T.Fatalf("Snapshot of table %q: %v", table, err)
