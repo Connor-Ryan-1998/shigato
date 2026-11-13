@@ -318,6 +318,38 @@ func TestSettingsPayOptionsAllowIssue(t *testing.T) {
 	}
 }
 
+func TestIssueExistingDraftOnDate(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	draft := e.Invoice(org, e.Contact(org).ID)
+	on := testkit.Date("2026-03-02")
+
+	inv := e.Issue(org, draft.ID, on)
+	if inv.ID != draft.ID || inv.Status != "open" || inv.Number == nil {
+		t.Fatalf("issued invoice = %+v, want draft %d open with a number", inv, draft.ID)
+	}
+	if inv.IssueDate == nil || !inv.IssueDate.Equal(on) {
+		t.Fatalf("IssueDate = %v, want %s", inv.IssueDate, on)
+	}
+	if inv.DueDate == nil || !inv.DueDate.Equal(on.AddDate(0, 0, 14)) {
+		t.Fatalf("DueDate = %v, want 14 days after %s", inv.DueDate, on)
+	}
+}
+
+func TestSettingsRentRun(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	other := e.Org("other")
+
+	e.Settings(org, testkit.RentRun(0, true))
+	if got := e.Count("orgs", "id = $1 AND invoice_lead_days = 0 AND auto_send_rent", org.ID); got != 1 {
+		t.Fatalf("org rent run settings not set")
+	}
+	if got := e.Count("orgs", "id = $1 AND invoice_lead_days = 0", other.ID); got != 0 {
+		t.Fatalf("other org's rent run settings changed")
+	}
+}
+
 func TestProjectTaskEntry(t *testing.T) {
 	e := testkit.New(t)
 	org := e.Org("acme")

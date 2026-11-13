@@ -1,66 +1,30 @@
 //go:build integration
 
-package property
+// Package property_test holds property's integration tests. They live
+// outside package property so they can use internal/testkit, which imports
+// property; export_test.go re-exports the unexported symbols they need.
+package property_test
 
 import (
-	"context"
 	"errors"
 	"testing"
-	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/core"
-	"shigoto/internal/db"
+	"shigoto/internal/property"
+	"shigoto/internal/testkit"
 )
 
-func testOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
-	t.Helper()
-	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
-	if err != nil {
-		t.Fatalf("CreateOrg(%s): %v", slug, err)
-	}
-	return org
-}
-
-func testContact(t *testing.T, pool *pgxpool.Pool, orgID int64, kind, name string) int64 {
-	t.Helper()
-	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: kind, Name: name})
-	if err != nil {
-		t.Fatalf("CreateContact: %v", err)
-	}
-	return c.ID
-}
-
-func testProperty(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
-	t.Helper()
-	p, err := CreateProperty(context.Background(), pool, orgID, Property{Name: "1 Test St", Residential: true})
-	if err != nil {
-		t.Fatalf("CreateProperty: %v", err)
-	}
-	return p.ID
-}
-
-func mustDate(t *testing.T, s string) time.Time {
-	t.Helper()
-	d, err := time.ParseInLocation(dateLayout, s, time.UTC)
-	if err != nil {
-		t.Fatalf("parsing date %s: %v", s, err)
-	}
-	return d
-}
-
 func TestCreatePropertyAndGet(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 
-	created, err := CreateProperty(ctx, pool, org.ID, Property{Name: "1 Test St", Address: "1 Test St, Brisbane", Kind: "house", Residential: true})
+	created, err := property.CreateProperty(ctx, pool, org.ID, property.Property{Name: "1 Test St", Address: "1 Test St, Brisbane", Kind: "house", Residential: true})
 	if err != nil {
 		t.Fatalf("CreateProperty: %v", err)
 	}
 
-	got, err := GetProperty(ctx, pool, org.ID, created.ID)
+	got, err := property.GetProperty(ctx, pool, org.ID, created.ID)
 	if err != nil {
 		t.Fatalf("GetProperty: %v", err)
 	}
@@ -68,88 +32,88 @@ func TestCreatePropertyAndGet(t *testing.T) {
 		t.Fatalf("GetProperty = %+v, want matching created property", got)
 	}
 
-	other := testOrg(t, pool, "other")
-	if _, err := GetProperty(ctx, pool, other.ID, created.ID); !errors.Is(err, core.ErrNotFound) {
+	other := e.Org("other")
+	if _, err := property.GetProperty(ctx, pool, other.ID, created.ID); !errors.Is(err, core.ErrNotFound) {
 		t.Fatalf("cross-org GetProperty: err = %v, want ErrNotFound", err)
 	}
 }
 
 func TestCreateLeaseRequiresOnePrimary(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
-	tenant2ID := testContact(t, pool, org.ID, "tenant", "Tenant Two")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
+	tenant2ID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant Two")).ID
 
-	base := NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
+	base := property.NewLease{
+		PropertyID: propertyID, StartDate: testkit.Date("2026-11-02"),
+		Frequency: property.Weekly, RentAmount: 50000,
 	}
 
 	// No primary.
 	in := base
-	in.Tenants = []NewLeaseTenant{{ContactID: tenantID, Primary: false}}
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	in.Tenants = []property.NewLeaseTenant{{ContactID: tenantID, Primary: false}}
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("no primary: err = %v, want ErrInvalidInput", err)
 	}
 
 	// Two primaries.
 	in = base
-	in.Tenants = []NewLeaseTenant{{ContactID: tenantID, Primary: true}, {ContactID: tenant2ID, Primary: true}}
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	in.Tenants = []property.NewLeaseTenant{{ContactID: tenantID, Primary: true}, {ContactID: tenant2ID, Primary: true}}
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("two primaries: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestCreateLeaseRejectsCrossOrgTenant(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	other := testOrg(t, pool, "other")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	otherTenantID := testContact(t, pool, other.ID, "tenant", "Other Org Tenant")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	other := e.Org("other")
+	propertyID := e.Property(org).ID
+	otherTenantID := e.Contact(other, testkit.Kind("tenant"), testkit.Name("Other Org Tenant")).ID
 
-	in := NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: otherTenantID, Primary: true}},
+	in := property.NewLease{
+		PropertyID: propertyID, StartDate: testkit.Date("2026-11-02"),
+		Frequency: property.Weekly, RentAmount: 50000,
+		Tenants: []property.NewLeaseTenant{{ContactID: otherTenantID, Primary: true}},
 	}
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("cross-org tenant: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestCreateLeaseRejectsNonTenantContact(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	clientID := testContact(t, pool, org.ID, "client", "Not A Tenant")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	clientID := e.Contact(org, testkit.Kind("client"), testkit.Name("Not A Tenant")).ID
 
-	in := NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: clientID, Primary: true}},
+	in := property.NewLease{
+		PropertyID: propertyID, StartDate: testkit.Date("2026-11-02"),
+		Frequency: property.Weekly, RentAmount: 50000,
+		Tenants: []property.NewLeaseTenant{{ContactID: clientID, Primary: true}},
 	}
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("non-tenant contact: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestCreateLeaseSuccessStoresInitialRentChange(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	in := NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	in := property.NewLease{
+		PropertyID: propertyID, StartDate: testkit.Date("2026-11-02"),
+		Frequency: property.Weekly, RentAmount: 50000,
+		Tenants: []property.NewLeaseTenant{{ContactID: tenantID, Primary: true}},
 	}
-	lease, err := CreateLease(ctx, pool, org.ID, in)
+	lease, err := property.CreateLease(ctx, pool, org.ID, in)
 	if err != nil {
 		t.Fatalf("CreateLease: %v", err)
 	}
@@ -162,23 +126,16 @@ func TestCreateLeaseSuccessStoresInitialRentChange(t *testing.T) {
 }
 
 func TestRentChangeWarning(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2025-01-01"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2025-01-01")))
 
 	// First increase: no prior non-initial increase, so no warning.
-	_, warnings, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2025-06-01"), 55000)
+	_, warnings, err := property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2025-06-01"), 55000)
 	if err != nil {
 		t.Fatalf("first increase: %v", err)
 	}
@@ -187,15 +144,15 @@ func TestRentChangeWarning(t *testing.T) {
 	}
 
 	// Second increase 6 months later: within 365 days of the first increase.
-	_, warnings, err = CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2025-12-01"), 60000)
+	_, warnings, err = property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2025-12-01"), 60000)
 	if err != nil {
 		t.Fatalf("second increase: %v", err)
 	}
-	if len(warnings) != 1 || warnings[0] != warnMoreThanOneIncreaseWithin12Months {
-		t.Fatalf("second increase warnings = %v, want [%s]", warnings, warnMoreThanOneIncreaseWithin12Months)
+	if len(warnings) != 1 || warnings[0] != property.WarnMoreThanOneIncreaseWithin12Months {
+		t.Fatalf("second increase warnings = %v, want [%s]", warnings, property.WarnMoreThanOneIncreaseWithin12Months)
 	}
 
-	got, err := GetLease(ctx, pool, org.ID, lease.ID)
+	got, err := property.GetLease(ctx, pool, org.ID, lease.ID)
 	if err != nil {
 		t.Fatalf("GetLease: %v", err)
 	}
@@ -205,23 +162,16 @@ func TestRentChangeWarning(t *testing.T) {
 }
 
 func TestCreateChargeAndTerminateLease(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-02")))
 
-	charge, err := CreateCharge(ctx, pool, org.ID, lease.ID, NewCharge{
-		Description: "Water", Amount: 2000, StartDate: mustDate(t, "2026-11-09"),
+	charge, err := property.CreateCharge(ctx, pool, org.ID, lease.ID, property.NewCharge{
+		Description: "Water", Amount: 2000, StartDate: testkit.Date("2026-11-09"),
 	})
 	if err != nil {
 		t.Fatalf("CreateCharge: %v", err)
@@ -230,137 +180,130 @@ func TestCreateChargeAndTerminateLease(t *testing.T) {
 		t.Fatalf("charge = %+v, want Water/2000", charge)
 	}
 
-	updated, err := TerminateLease(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-12-01"))
+	updated, err := property.TerminateLease(ctx, pool, org.ID, lease.ID, testkit.Date("2026-12-01"))
 	if err != nil {
 		t.Fatalf("TerminateLease: %v", err)
 	}
-	if updated.TerminationDate == nil || !updated.TerminationDate.Equal(mustDate(t, "2026-12-01")) {
+	if updated.TerminationDate == nil || !updated.TerminationDate.Equal(testkit.Date("2026-12-01")) {
 		t.Fatalf("TerminationDate = %v, want 2026-12-01", updated.TerminationDate)
 	}
 
-	if _, err := TerminateLease(ctx, pool, org.ID, 999999, mustDate(t, "2026-12-01")); !errors.Is(err, core.ErrNotFound) {
+	if _, err := property.TerminateLease(ctx, pool, org.ID, 999999, testkit.Date("2026-12-01")); !errors.Is(err, core.ErrNotFound) {
 		t.Fatalf("terminate unknown lease: err = %v, want ErrNotFound", err)
 	}
 }
 
 func TestCreateLeasePaidToDateAlignment(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	base := func() NewLease {
-		return NewLease{
-			PropertyID: testProperty(t, pool, org.ID), StartDate: mustDate(t, "2026-11-02"),
-			Frequency: Weekly, RentAmount: 50000,
-			Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	base := func() property.NewLease {
+		return property.NewLease{
+			PropertyID: e.Property(org).ID, StartDate: testkit.Date("2026-11-02"),
+			Frequency: property.Weekly, RentAmount: 50000,
+			Tenants: []property.NewLeaseTenant{{ContactID: tenantID, Primary: true}},
 		}
 	}
 
 	// Accepted: start-1 (nothing paid yet).
 	in := base()
-	notPaid := mustDate(t, "2026-11-01")
+	notPaid := testkit.Date("2026-11-01")
 	in.PaidToDate = &notPaid
-	if _, err := CreateLease(ctx, pool, org.ID, in); err != nil {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); err != nil {
 		t.Fatalf("paid_to_date = start-1: err = %v, want nil", err)
 	}
 
 	// Accepted: a period's natural last day.
 	in = base()
-	periodEnd := mustDate(t, "2026-11-15") // end of the 2nd weekly period.
+	periodEnd := testkit.Date("2026-11-15") // end of the 2nd weekly period.
 	in.PaidToDate = &periodEnd
-	if _, err := CreateLease(ctx, pool, org.ID, in); err != nil {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); err != nil {
 		t.Fatalf("paid_to_date = period end: err = %v, want nil", err)
 	}
 
 	// Rejected: a misaligned, mid-period date.
 	in = base()
-	misaligned := mustDate(t, "2026-11-10")
+	misaligned := testkit.Date("2026-11-10")
 	in.PaidToDate = &misaligned
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("misaligned paid_to_date: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestCreateLeaseRejectsDuplicateTenant(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	in := NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{
+	in := property.NewLease{
+		PropertyID: propertyID, StartDate: testkit.Date("2026-11-02"),
+		Frequency: property.Weekly, RentAmount: 50000,
+		Tenants: []property.NewLeaseTenant{
 			{ContactID: tenantID, Primary: true},
 			{ContactID: tenantID, Primary: false},
 		},
 	}
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("duplicate tenant contact_id: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestCreateLeaseRejectsEndBeforeStartAndNegativeAmounts(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	base := func() NewLease {
-		return NewLease{
-			PropertyID: testProperty(t, pool, org.ID), StartDate: mustDate(t, "2026-11-02"),
-			Frequency: Weekly, RentAmount: 50000,
-			Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
+	base := func() property.NewLease {
+		return property.NewLease{
+			PropertyID: e.Property(org).ID, StartDate: testkit.Date("2026-11-02"),
+			Frequency: property.Weekly, RentAmount: 50000,
+			Tenants: []property.NewLeaseTenant{{ContactID: tenantID, Primary: true}},
 		}
 	}
 
 	in := base()
-	end := mustDate(t, "2026-11-01")
+	end := testkit.Date("2026-11-01")
 	in.EndDate = &end
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("end_date before start_date: err = %v, want ErrInvalidInput", err)
 	}
 
 	in = base()
 	in.OpeningArrears = -1
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("negative opening_arrears: err = %v, want ErrInvalidInput", err)
 	}
 
 	in = base()
 	in.BondAmount = -1
-	if _, err := CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateLease(ctx, pool, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("negative bond_amount: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestCreateRentChangeRejectsDuplicateEffectiveDate(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-02")))
 
 	// Same effective_date as the initial rent row.
-	if _, _, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-11-02"), 60000); !errors.Is(err, core.ErrInvalidInput) {
+	if _, _, err := property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2026-11-02"), 60000); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("duplicate effective_date (initial): err = %v, want ErrInvalidInput", err)
 	}
 
-	if _, _, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-12-01"), 60000); err != nil {
+	if _, _, err := property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2026-12-01"), 60000); err != nil {
 		t.Fatalf("first distinct rent change: %v", err)
 	}
-	if _, _, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-12-01"), 70000); !errors.Is(err, core.ErrInvalidInput) {
+	if _, _, err := property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2026-12-01"), 70000); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("duplicate effective_date (repeat): err = %v, want ErrInvalidInput", err)
 	}
 }
@@ -370,25 +313,18 @@ func TestCreateRentChangeRejectsDuplicateEffectiveDate(t *testing.T) {
 // increase is the boundary itself, not "within 12 months", so it must not
 // warn.
 func TestRentChangeWarningExactAnniversaryNoWarning(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2024-01-01"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2024-01-01")))
 
-	if _, warnings, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2024-03-01"), 55000); err != nil || len(warnings) != 0 {
+	if _, warnings, err := property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2024-03-01"), 55000); err != nil || len(warnings) != 0 {
 		t.Fatalf("first increase: err = %v, warnings = %v, want nil, none", err, warnings)
 	}
-	_, warnings, err := CreateRentChange(ctx, pool, org.ID, lease.ID, mustDate(t, "2025-03-01"), 60000)
+	_, warnings, err := property.CreateRentChange(ctx, pool, org.ID, lease.ID, testkit.Date("2025-03-01"), 60000)
 	if err != nil {
 		t.Fatalf("anniversary increase: %v", err)
 	}
@@ -398,24 +334,17 @@ func TestRentChangeWarningExactAnniversaryNoWarning(t *testing.T) {
 }
 
 func TestCreateChargeRejectsEndBeforeStart(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-02")))
 
-	end := mustDate(t, "2026-11-01")
-	_, err = CreateCharge(ctx, pool, org.ID, lease.ID, NewCharge{
-		Description: "Water", Amount: 2000, StartDate: mustDate(t, "2026-11-09"), EndDate: &end,
+	end := testkit.Date("2026-11-01")
+	_, err := property.CreateCharge(ctx, pool, org.ID, lease.ID, property.NewCharge{
+		Description: "Water", Amount: 2000, StartDate: testkit.Date("2026-11-09"), EndDate: &end,
 	})
 	if !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("charge end_date before start_date: err = %v, want ErrInvalidInput", err)
@@ -423,48 +352,31 @@ func TestCreateChargeRejectsEndBeforeStart(t *testing.T) {
 }
 
 func TestTerminateLeaseRejectsTerminationBeforeStart(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"),
-		Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-02")))
 
-	if _, err := TerminateLease(ctx, pool, org.ID, lease.ID, mustDate(t, "2026-11-01")); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.TerminateLease(ctx, pool, org.ID, lease.ID, testkit.Date("2026-11-01")); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("termination_date before start_date: err = %v, want ErrInvalidInput", err)
 	}
 }
 
 func TestListLeasesByProperty(t *testing.T) {
-	pool := db.TestPool(t)
-	org := testOrg(t, pool, "acme")
-	ctx := context.Background()
-	propertyID := testProperty(t, pool, org.ID)
-	otherPropertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Tenant One")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	otherPropertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant One")).ID
 
-	if _, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-02"), Frequency: Weekly, RentAmount: 50000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	}); err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
-	if _, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: otherPropertyID, StartDate: mustDate(t, "2026-11-02"), Frequency: Weekly, RentAmount: 60000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	}); err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-02")))
+	e.Lease(org, otherPropertyID, tenantID, testkit.Start(testkit.Date("2026-11-02")), testkit.Rent(60000))
 
-	leases, err := ListLeasesByProperty(ctx, pool, org.ID, propertyID)
+	leases, err := property.ListLeasesByProperty(ctx, pool, org.ID, propertyID)
 	if err != nil {
 		t.Fatalf("ListLeasesByProperty: %v", err)
 	}

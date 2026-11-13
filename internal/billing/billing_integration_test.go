@@ -3,60 +3,15 @@
 package billing_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
 	"shigoto/internal/payments"
+	"shigoto/internal/testkit"
 )
-
-func testOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
-	t.Helper()
-	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
-	if err != nil {
-		t.Fatalf("CreateOrg(%s): %v", slug, err)
-	}
-	return org
-}
-
-func testContact(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
-	t.Helper()
-	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: "tenant", Name: "Test Tenant"})
-	if err != nil {
-		t.Fatalf("CreateContact: %v", err)
-	}
-	return c.ID
-}
-
-// testDraft creates a one-line draft invoice whose line totals to exactly
-// totalCents (GST-free), with the given source and a 14-day term.
-func testDraft(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, source string, totalCents int64) int64 {
-	t.Helper()
-	inv, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
-		ContactID: contactID,
-		Source:    source,
-		DueInDays: 14,
-		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateDraftInvoice: %v", err)
-	}
-	return inv.ID
-}
-
-// noProvider is a billing.Service.Payments func that reports every org has
-// no payment provider configured, so Issue's best-effort send is a no-op.
-func noProvider(string) (payments.Provider, error) {
-	return nil, payments.ErrNoProvider
-}
 
 func TestServiceSendRejectsVoidedAfterInitialRead(t *testing.T) {
 	testSendRejectsChangedState(t, "void")
@@ -72,12 +27,12 @@ func TestServiceSendRejectsPartiallyPaidAfterInitialRead(t *testing.T) {
 
 func testSendRejectsChangedState(t *testing.T, status string) {
 	t.Helper()
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := testContact(t, pool, org.ID)
-	id := testDraft(t, pool, org.ID, contactID, "manual", 1000)
-	svc := billing.New(pool, func(string) string { return "" }, noProvider, time.UTC)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	id := e.Invoice(org, contactID, testkit.Source("manual"), testkit.Amount(1000)).ID
+	svc := e.BillingService()
 	if _, err := svc.Issue(ctx, org.ID, org.Slug, id); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +40,7 @@ func testSendRejectsChangedState(t *testing.T, status string) {
 	// The resolver runs after Send's initial read but before its row lock.
 	svc.Payments = func(string) (payments.Provider, error) {
 		if status == "void" {
-			voider := billing.New(pool, func(string) string { return "" }, noProvider, time.UTC)
+			voider := e.BillingService()
 			if _, err := voider.Void(ctx, org.ID, org.Slug, id); err != nil {
 				t.Fatal(err)
 			}
@@ -126,10 +81,10 @@ func testSendRejectsChangedState(t *testing.T, status string) {
 }
 
 func TestServiceIssueEnforcesPayOptions(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := testContact(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
 
 	// A BSB and account number alone is only one pay option (bank
 	// transfer); a rent invoice needs at least two.
@@ -137,9 +92,9 @@ func TestServiceIssueEnforcesPayOptions(t *testing.T) {
 		t.Fatalf("setting org bank details: %v", err)
 	}
 
-	draftID := testDraft(t, pool, org.ID, contactID, "rent", 1000)
+	draftID := e.Invoice(org, contactID, testkit.Source("rent"), testkit.Amount(1000)).ID
 
-	svc := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noProvider, Location: time.UTC}
+	svc := e.BillingService()
 	_, err := svc.Issue(ctx, org.ID, "acme", draftID)
 	if !errors.Is(err, billing.ErrTooFewPayOptions) {
 		t.Fatalf("Issue error = %v, want ErrTooFewPayOptions", err)
@@ -158,9 +113,9 @@ func TestServiceIssueEnforcesPayOptions(t *testing.T) {
 }
 
 func TestPayOptionsStripeNeedsBothKeys(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
 
 	getenv := func(key string) string {
 		if key == "SHIGOTO_STRIPE_ACME_SECRET_KEY" {
@@ -168,7 +123,8 @@ func TestPayOptionsStripeNeedsBothKeys(t *testing.T) {
 		}
 		return ""
 	}
-	svc := &billing.Service{Pool: pool, GetEnv: getenv, Payments: noProvider, Location: time.UTC}
+	svc := e.BillingService()
+	svc.GetEnv = getenv
 
 	opts, err := svc.PayOptions(ctx, pool, org.ID)
 	if err != nil {
@@ -182,13 +138,13 @@ func TestPayOptionsStripeNeedsBothKeys(t *testing.T) {
 }
 
 func TestServiceIssueNoActorAudits(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := testContact(t, pool, org.ID)
-	draftID := testDraft(t, pool, org.ID, contactID, "manual", 1000)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	draftID := e.Invoice(org, contactID, testkit.Source("manual"), testkit.Amount(1000)).ID
 
-	svc := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noProvider, Location: time.UTC}
+	svc := e.BillingService()
 	if _, err := svc.Issue(ctx, org.ID, "acme", draftID); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -208,11 +164,11 @@ func TestServiceIssueNoActorAudits(t *testing.T) {
 // invoice owes anything. A draft (never issued) and a void invoice report
 // 0 outstanding, while an open, partly paid one reports total - paid.
 func TestInvoiceJSONOutstandingOnlyForOpen(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	contactID := testContact(t, pool, org.ID)
-	svc := &billing.Service{Pool: pool, GetEnv: func(string) string { return "" }, Payments: noProvider, Location: time.UTC}
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	contactID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	svc := e.BillingService()
 
 	outstanding := func(id int64) int64 {
 		t.Helper()
@@ -227,12 +183,12 @@ func TestInvoiceJSONOutstandingOnlyForOpen(t *testing.T) {
 		return resp.Outstanding
 	}
 
-	draftID := testDraft(t, pool, org.ID, contactID, "manual", 1000)
+	draftID := e.Invoice(org, contactID, testkit.Source("manual"), testkit.Amount(1000)).ID
 	if got := outstanding(draftID); got != 0 {
 		t.Errorf("draft outstanding = %d, want 0", got)
 	}
 
-	voidID := testDraft(t, pool, org.ID, contactID, "manual", 2000)
+	voidID := e.Invoice(org, contactID, testkit.Source("manual"), testkit.Amount(2000)).ID
 	if _, err := svc.Issue(ctx, org.ID, "acme", voidID); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -243,7 +199,7 @@ func TestInvoiceJSONOutstandingOnlyForOpen(t *testing.T) {
 		t.Errorf("void outstanding = %d, want 0", got)
 	}
 
-	openID := testDraft(t, pool, org.ID, contactID, "manual", 3000)
+	openID := e.Invoice(org, contactID, testkit.Source("manual"), testkit.Amount(3000)).ID
 	if _, err := svc.Issue(ctx, org.ID, "acme", openID); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

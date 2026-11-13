@@ -98,19 +98,26 @@ func (e *Env) Invoice(org core.Org, contactID int64, opts ...InvoiceOption) core
 	if c.issue == nil {
 		return inv
 	}
+	return e.Issue(org, inv.ID, *c.issue)
+}
+
+// Issue issues the existing draft invoiceID dated today, in its own
+// transaction, through core.IssueInvoice (no pay-options check, no send).
+func (e *Env) Issue(org core.Org, invoiceID int64, today time.Time) core.Invoice {
+	e.T.Helper()
 	tx, err := e.Pool.Begin(e.Ctx)
 	if err != nil {
-		e.T.Fatalf("beginning issue of invoice %d: %v", inv.ID, err)
+		e.T.Fatalf("beginning issue of invoice %d: %v", invoiceID, err)
 		return core.Invoice{}
 	}
 	defer func() { _ = tx.Rollback(e.Ctx) }()
-	inv, err = core.IssueInvoice(e.Ctx, tx, org.ID, inv.ID, *c.issue)
+	inv, err := core.IssueInvoice(e.Ctx, tx, org.ID, invoiceID, today)
 	if err != nil {
-		e.T.Fatalf("issuing invoice in %s: %v", org.Slug, err)
+		e.T.Fatalf("issuing invoice %d in %s: %v", invoiceID, org.Slug, err)
 		return core.Invoice{}
 	}
 	if err := tx.Commit(e.Ctx); err != nil {
-		e.T.Fatalf("committing issue of invoice %d: %v", inv.ID, err)
+		e.T.Fatalf("committing issue of invoice %d: %v", invoiceID, err)
 		return core.Invoice{}
 	}
 	return inv
@@ -279,6 +286,12 @@ func (e *Env) Entry(org core.Org, userID int64, entry timesheets.Entry, today ti
 type settingsConfig struct {
 	gst        *bool
 	payOptions bool
+	rentRun    *rentRunConfig
+}
+
+type rentRunConfig struct {
+	leadDays int
+	autoSend bool
 }
 
 // SettingsOption customises Env.Settings.
@@ -293,6 +306,12 @@ func GSTRegistered(registered bool) SettingsOption {
 // and PayID (owner@example.com), satisfying billing.Service.Issue's
 // pay-options rule.
 func PayOptions() SettingsOption { return func(c *settingsConfig) { c.payOptions = true } }
+
+// RentRun sets the org's invoice_lead_days and auto_send_rent, which
+// control how far ahead the rent run invoices and whether it issues them.
+func RentRun(leadDays int, autoSend bool) SettingsOption {
+	return func(c *settingsConfig) { c.rentRun = &rentRunConfig{leadDays: leadDays, autoSend: autoSend} }
+}
 
 // Settings updates org settings directly, bypassing OrgSettings validation.
 func (e *Env) Settings(org core.Org, opts ...SettingsOption) {
@@ -313,6 +332,15 @@ func (e *Env) Settings(org core.Org, opts ...SettingsOption) {
 			"062-000", "12345678", "owner@example.com", org.ID,
 		); err != nil {
 			e.T.Fatalf("setting pay options of %s: %v", org.Slug, err)
+			return
+		}
+	}
+	if c.rentRun != nil {
+		if _, err := e.Pool.Exec(e.Ctx,
+			"UPDATE orgs SET invoice_lead_days = $1, auto_send_rent = $2 WHERE id = $3",
+			c.rentRun.leadDays, c.rentRun.autoSend, org.ID,
+		); err != nil {
+			e.T.Fatalf("setting rent run settings of %s: %v", org.Slug, err)
 			return
 		}
 	}

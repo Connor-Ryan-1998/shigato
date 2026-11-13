@@ -1,9 +1,8 @@
 //go:build integration
 
-package property
+package property_test
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -11,29 +10,23 @@ import (
 
 	"shigoto/internal/config"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
 	"shigoto/internal/module"
+	"shigoto/internal/property"
+	"shigoto/internal/testkit"
 )
 
 func TestBondInvoiceNTAndOnce(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
-	setOrgPayOptions(t, pool, org.ID)
+	e := testkit.New(t)
+	ctx := e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	e.Settings(org, testkit.PayOptions())
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-		RentAmount: 50000, BondAmount: 140000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")), testkit.Bond(140000))
 
-	b := testService(pool)
-	inv, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	b := e.BillingService()
+	inv, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
 	if err != nil {
 		t.Fatalf("CreateBondInvoice: %v", err)
 	}
@@ -55,47 +48,40 @@ func TestBondInvoiceNTAndOnce(t *testing.T) {
 	}
 
 	// A second POST (second call) must not create a second bond invoice.
-	if _, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidState) {
+	if _, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidState) {
 		t.Fatalf("second CreateBondInvoice error = %v, want core.ErrInvalidState (409)", err)
 	}
 }
 
 func TestBondLodgeRequiresHeld(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
-	setOrgPayOptions(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	e.Settings(org, testkit.PayOptions())
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-		RentAmount: 50000, BondAmount: 140000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")), testkit.Bond(140000))
 
-	b := testService(pool)
-	inv, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	b := e.BillingService()
+	inv, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
 	if err != nil {
 		t.Fatalf("CreateBondInvoice: %v", err)
 	}
 
 	// Lodging before payment: the derived status is still "due".
-	if _, err := LodgeBond(ctx, pool, org.ID, nil, lease.ID, "QLD-REF-1", mustDate(t, "2026-11-05"), mustDate(t, "2026-11-10")); !errors.Is(err, core.ErrInvalidState) {
+	if _, err := property.LodgeBond(ctx, pool, org.ID, nil, lease.ID, "QLD-REF-1", testkit.Date("2026-11-05"), testkit.Date("2026-11-10")); !errors.Is(err, core.ErrInvalidState) {
 		t.Fatalf("lodge before payment error = %v, want core.ErrInvalidState (409)", err)
 	}
 
 	// Manually record payment in full.
 	if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-		InvoiceID: inv.ID, Amount: inv.Total, PaidOn: mustDate(t, "2026-11-03"), Method: "bank_transfer",
+		InvoiceID: inv.ID, Amount: inv.Total, PaidOn: testkit.Date("2026-11-03"), Method: "bank_transfer",
 	}); err != nil {
 		t.Fatalf("RecordPayment: %v", err)
 	}
 
-	updated, err := LodgeBond(ctx, pool, org.ID, nil, lease.ID, "QLD-REF-1", mustDate(t, "2026-11-05"), mustDate(t, "2026-11-10"))
+	updated, err := property.LodgeBond(ctx, pool, org.ID, nil, lease.ID, "QLD-REF-1", testkit.Date("2026-11-05"), testkit.Date("2026-11-10"))
 	if err != nil {
 		t.Fatalf("LodgeBond after payment: %v", err)
 	}
@@ -103,7 +89,7 @@ func TestBondLodgeRequiresHeld(t *testing.T) {
 		t.Errorf("rta_lodgement_ref = %q, want QLD-REF-1", updated.RTALodgementRef)
 	}
 
-	status, _, err := BondInfo(ctx, pool, org.ID, updated, mustDate(t, "2026-11-10"))
+	status, _, err := property.BondInfo(ctx, pool, org.ID, updated, testkit.Date("2026-11-10"))
 	if err != nil {
 		t.Fatalf("BondInfo: %v", err)
 	}
@@ -115,23 +101,16 @@ func TestBondLodgeRequiresHeld(t *testing.T) {
 // TestBondInvoiceZeroAmountRejected covers the brief's "422 if
 // bond_amount == 0" rule.
 func TestBondInvoiceZeroAmountRejected(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
-	setOrgPayOptions(t, pool, org.ID)
+	e := testkit.New(t)
+	ctx := e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	e.Settings(org, testkit.PayOptions())
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-		RentAmount: 50000, BondAmount: 0,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")))
 
-	if _, err := CreateBondInvoice(ctx, testService(pool), org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.CreateBondInvoice(ctx, e.BillingService(), org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("bond_amount 0 error = %v, want core.ErrInvalidInput (422)", err)
 	}
 }
@@ -147,14 +126,12 @@ func TestTodayUsesCalendarDateInLocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLocation: %v", err)
 	}
-	orig := clockNow
-	defer func() { clockNow = orig }()
-	clockNow = func() time.Time { return time.Date(2026, 11, 5, 8, 0, 0, 0, loc) }
+	defer property.SetClockNow(func() time.Time { return time.Date(2026, 11, 5, 8, 0, 0, 0, loc) })()
 
-	got := today(module.Deps{Cfg: config.Config{Location: loc}})
-	want := mustDate(t, "2026-11-05")
+	got := property.Today(module.Deps{Cfg: config.Config{Location: loc}})
+	want := testkit.Date("2026-11-05")
 	if !got.Equal(want) {
-		t.Errorf("today() = %s, want %s", got.Format(dateLayout), want.Format(dateLayout))
+		t.Errorf("today() = %s, want %s", got.Format(property.DateLayout), want.Format(property.DateLayout))
 	}
 }
 
@@ -165,38 +142,29 @@ func TestTodayUsesCalendarDateInLocation(t *testing.T) {
 // neither of which held before today(d) was fixed to return a calendar
 // date instead of an instant.
 func TestBondLodgementSameDayInBrisbaneTime(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	setOrgPayOptions(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	e.Settings(org, testkit.PayOptions())
 
 	loc, err := time.LoadLocation("Australia/Brisbane")
 	if err != nil {
 		t.Fatalf("LoadLocation: %v", err)
 	}
-	orig := clockNow
-	defer func() { clockNow = orig }()
-	clockNow = func() time.Time { return time.Date(2026, 11, 5, 8, 0, 0, 0, loc) }
-	todayDate := today(module.Deps{Cfg: config.Config{Location: loc}})
+	defer property.SetClockNow(func() time.Time { return time.Date(2026, 11, 5, 8, 0, 0, 0, loc) })()
+	todayDate := property.Today(module.Deps{Cfg: config.Config{Location: loc}})
 
-	newHeldLease := func(t *testing.T) Lease {
+	newHeldLease := func(t *testing.T) property.Lease {
 		t.Helper()
-		tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
-		lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-			PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-			RentAmount: 50000, BondAmount: 140000,
-			Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-		})
-		if err != nil {
-			t.Fatalf("CreateLease: %v", err)
-		}
-		inv, err := CreateBondInvoice(ctx, testService(pool), org.ID, "acme", lease.ID)
+		tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+		lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")), testkit.Bond(140000))
+		inv, err := property.CreateBondInvoice(ctx, e.BillingService(), org.ID, "acme", lease.ID)
 		if err != nil {
 			t.Fatalf("CreateBondInvoice: %v", err)
 		}
 		if _, _, err := core.RecordPayment(ctx, pool, org.ID, core.NewPayment{
-			InvoiceID: inv.ID, Amount: inv.Total, PaidOn: mustDate(t, "2026-11-03"), Method: "bank_transfer",
+			InvoiceID: inv.ID, Amount: inv.Total, PaidOn: testkit.Date("2026-11-03"), Method: "bank_transfer",
 		}); err != nil {
 			t.Fatalf("RecordPayment: %v", err)
 		}
@@ -204,35 +172,28 @@ func TestBondLodgementSameDayInBrisbaneTime(t *testing.T) {
 	}
 
 	sameDay := newHeldLease(t)
-	if _, err := LodgeBond(ctx, pool, org.ID, nil, sameDay.ID, "QLD-REF-SAME-DAY", mustDate(t, "2026-11-05"), todayDate); err != nil {
+	if _, err := property.LodgeBond(ctx, pool, org.ID, nil, sameDay.ID, "QLD-REF-SAME-DAY", testkit.Date("2026-11-05"), todayDate); err != nil {
 		t.Fatalf("same-day lodgement rejected: %v", err)
 	}
 
 	tomorrow := newHeldLease(t)
-	if _, err := LodgeBond(ctx, pool, org.ID, nil, tomorrow.ID, "QLD-REF-TOMORROW", mustDate(t, "2026-11-06"), todayDate); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := property.LodgeBond(ctx, pool, org.ID, nil, tomorrow.ID, "QLD-REF-TOMORROW", testkit.Date("2026-11-06"), todayDate); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("tomorrow's lodgement error = %v, want core.ErrInvalidInput (422)", err)
 	}
 }
 
 func TestBondInvoiceReissueAfterVoid(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
-	setOrgPayOptions(t, pool, org.ID)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	e.Settings(org, testkit.PayOptions())
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-		RentAmount: 50000, BondAmount: 140000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")), testkit.Bond(140000))
 
-	b := testService(pool)
-	first, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	b := e.BillingService()
+	first, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
 	if err != nil {
 		t.Fatalf("CreateBondInvoice: %v", err)
 	}
@@ -240,29 +201,29 @@ func TestBondInvoiceReissueAfterVoid(t *testing.T) {
 		t.Fatalf("Void: %v", err)
 	}
 
-	today := mustDate(t, "2026-11-05")
-	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
-	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "due" {
+	today := testkit.Date("2026-11-05")
+	lease, _ = property.GetLease(ctx, pool, org.ID, lease.ID)
+	if status, _, err := property.BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "due" {
 		t.Fatalf("status after void = %q (err %v), want due", status, err)
 	}
 
-	second, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	second, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
 	if err != nil {
 		t.Fatalf("CreateBondInvoice after void: %v", err)
 	}
 	if second.ID == first.ID || second.Status != "open" {
 		t.Fatalf("second invoice = %d (%s), want a new open invoice", second.ID, second.Status)
 	}
-	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
+	lease, _ = property.GetLease(ctx, pool, org.ID, lease.ID)
 	if lease.BondInvoiceID == nil || *lease.BondInvoiceID != second.ID {
 		t.Fatalf("bond_invoice_id = %v, want %d", lease.BondInvoiceID, second.ID)
 	}
-	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "due" {
+	if status, _, err := property.BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "due" {
 		t.Fatalf("status before payment = %q (err %v), want due", status, err)
 	}
 
 	// A live (non-void) bond invoice still blocks another.
-	if _, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidState) {
+	if _, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID); !errors.Is(err, core.ErrInvalidState) {
 		t.Fatalf("third CreateBondInvoice error = %v, want core.ErrInvalidState", err)
 	}
 
@@ -271,7 +232,7 @@ func TestBondInvoiceReissueAfterVoid(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordPayment: %v", err)
 	}
-	if status, _, err := BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "held" {
+	if status, _, err := property.BondInfo(ctx, pool, org.ID, lease, today); err != nil || status != "held" {
 		t.Fatalf("status after payment = %q (err %v), want held", status, err)
 	}
 }
@@ -280,22 +241,15 @@ func TestBondInvoiceReissueAfterVoid(t *testing.T) {
 // one lease must produce exactly one bond invoice - both for the first
 // bond invoice and for the reissue after a void.
 func TestBondInvoiceConcurrent(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
-	setOrgPayOptions(t, pool, org.ID)
-	b := testService(pool)
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
+	e.Settings(org, testkit.PayOptions())
+	b := e.BillingService()
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-		RentAmount: 50000, BondAmount: 140000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")), testkit.Bond(140000))
 
 	race := func(t *testing.T, wantLive int) core.Invoice {
 		t.Helper()
@@ -306,7 +260,7 @@ func TestBondInvoiceConcurrent(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				invs[i], errs[i] = CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+				invs[i], errs[i] = property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
 			}(i)
 		}
 		wg.Wait()
@@ -342,7 +296,7 @@ func TestBondInvoiceConcurrent(t *testing.T) {
 		t.Fatalf("Void: %v", err)
 	}
 	second := race(t, 1)
-	l, err := GetLease(ctx, pool, org.ID, lease.ID)
+	l, err := property.GetLease(ctx, pool, org.ID, lease.ID)
 	if err != nil {
 		t.Fatalf("GetLease: %v", err)
 	}
@@ -356,25 +310,18 @@ func TestBondInvoiceConcurrent(t *testing.T) {
 // bond invoice must allow a new bond invoice to be created, the same way
 // a voided issued one already does.
 func TestBondInvoiceReissueAfterVoidDraft(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	propertyID := testProperty(t, pool, org.ID)
-	tenantID := testContact(t, pool, org.ID, "tenant", "Test Tenant")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	propertyID := e.Property(org).ID
+	tenantID := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Test Tenant")).ID
 	// No pay options configured: createBondDraft succeeds regardless, but
 	// Issue is never called here, so the draft is left unissued.
 
-	lease, err := CreateLease(ctx, pool, org.ID, NewLease{
-		PropertyID: propertyID, StartDate: mustDate(t, "2026-11-01"), Frequency: Weekly,
-		RentAmount: 50000, BondAmount: 140000,
-		Tenants: []NewLeaseTenant{{ContactID: tenantID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
+	lease := e.Lease(org, propertyID, tenantID, testkit.Start(testkit.Date("2026-11-01")), testkit.Bond(140000))
 
-	b := testService(pool)
-	draftID, err := createBondDraft(ctx, b, org.ID, lease.ID)
+	b := e.BillingService()
+	draftID, err := property.CreateBondDraft(ctx, b, org.ID, lease.ID)
 	if err != nil {
 		t.Fatalf("createBondDraft: %v", err)
 	}
@@ -390,20 +337,20 @@ func TestBondInvoiceReissueAfterVoidDraft(t *testing.T) {
 		t.Fatalf("Void draft: %v", err)
 	}
 
-	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
-	if status, _, err := BondInfo(ctx, pool, org.ID, lease, mustDate(t, "2026-11-05")); err != nil || status != "due" {
+	lease, _ = property.GetLease(ctx, pool, org.ID, lease.ID)
+	if status, _, err := property.BondInfo(ctx, pool, org.ID, lease, testkit.Date("2026-11-05")); err != nil || status != "due" {
 		t.Fatalf("status after voiding draft = %q (err %v), want due", status, err)
 	}
 
-	setOrgPayOptions(t, pool, org.ID)
-	second, err := CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
+	e.Settings(org, testkit.PayOptions())
+	second, err := property.CreateBondInvoice(ctx, b, org.ID, "acme", lease.ID)
 	if err != nil {
 		t.Fatalf("CreateBondInvoice after voiding draft: %v", err)
 	}
 	if second.ID == draftID || second.Status != "open" {
 		t.Fatalf("second invoice = %d (%s), want a new open invoice", second.ID, second.Status)
 	}
-	lease, _ = GetLease(ctx, pool, org.ID, lease.ID)
+	lease, _ = property.GetLease(ctx, pool, org.ID, lease.ID)
 	if lease.BondInvoiceID == nil || *lease.BondInvoiceID != second.ID {
 		t.Fatalf("bond_invoice_id = %v, want %d", lease.BondInvoiceID, second.ID)
 	}
