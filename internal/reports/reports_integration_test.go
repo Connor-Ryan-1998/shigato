@@ -427,19 +427,6 @@ func TestPnLByProperty(t *testing.T) {
 	}
 }
 
-// TestBASUnregistered422 checks that /bas refuses an org that isn't
-// GST-registered.
-func TestBASUnregistered422(t *testing.T) {
-	pool, handler, token, orgID := reportsTestSetup(t)
-	setGSTRegistered(t, pool, orgID, false)
-	_ = pool
-
-	rr := get(handler, token, "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1")
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body.String())
-	}
-}
-
 // TestTransactionsCSV checks the header row, row count, and dollar
 // formatting of the transactions.csv export.
 func TestTransactionsCSV(t *testing.T) {

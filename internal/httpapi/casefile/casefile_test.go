@@ -223,6 +223,21 @@ func TestValidateRejectsBadSeedAndCases(t *testing.T) {
 		{"invite name collides", func(f *File) {
 			f.Seed.Invites = map[string]SeedInvite{"owner": {Org: "acme", Email: "a@example.com", Role: "staff", Token: "t"}}
 		}, []string{"owner", "duplicate"}},
+		{"unknown task project", func(f *File) {
+			f.Seed.Tasks = map[string]SeedTask{"tk": {Org: "acme", Project: "ghost"}}
+		}, []string{"tasks.tk", "ghost"}},
+		{"cross-org task project", func(f *File) {
+			f.Seed.Projects = map[string]SeedProject{"pr": {Org: "other", Client: "c_foreign"}}
+			f.Seed.Tasks = map[string]SeedTask{"tk": {Org: "acme", Project: "pr"}}
+		}, []string{"tasks.tk", "pr", "other"}},
+		{"negative task rate", func(f *File) {
+			f.Seed.Projects = map[string]SeedProject{"pr": {Org: "other", Client: "c_foreign"}}
+			f.Seed.Tasks = map[string]SeedTask{"tk": {Org: "other", Project: "pr", Rate: -1}}
+		}, []string{"tasks.tk", "negative rate"}},
+		{"task name collides", func(f *File) {
+			f.Seed.Projects = map[string]SeedProject{"pr": {Org: "other", Client: "c_foreign"}}
+			f.Seed.Tasks = map[string]SeedTask{"owner": {Org: "other", Project: "pr"}}
+		}, []string{"owner", "duplicate"}},
 		{"cross-org contact", func(f *File) {
 			f.Seed.Users["tenant"] = SeedUser{Org: "acme", Role: "tenant", Contact: "c_foreign"}
 		}, []string{"tenant", "c_foreign", "other"}},
@@ -310,6 +325,34 @@ func TestValidInviteSeedInterpolates(t *testing.T) {
 	f.Cases[0].Request = Request{Method: "DELETE", Path: "/api/v1/orgs/acme/invites/{iv}"}
 	if err := f.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidTaskSeedInterpolates(t *testing.T) {
+	path := writeYAML(t, "tasks.yaml", `
+seed:
+  orgs: [acme]
+  users:
+    owner: {org: acme, role: owner}
+  contacts:
+    c_client: {org: acme, kind: client}
+  projects:
+    pr: {org: acme, client: c_client}
+  tasks:
+    tk: {org: acme, project: pr, name: Design, rate: 5000}
+cases:
+  - name: edit task
+    as: owner
+    request: {method: PUT, path: "/api/v1/orgs/acme/tasks/{tk}", body: {name: Design}}
+    expect: {status: 422}
+`)
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := SeedTask{Org: "acme", Project: "pr", Name: "Design", Rate: 5000}
+	if got := f.Seed.Tasks["tk"]; got != want {
+		t.Fatalf("tasks.tk = %+v, want %+v", got, want)
 	}
 }
 

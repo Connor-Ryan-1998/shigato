@@ -1,8 +1,8 @@
 //go:build integration
 
-// Package recon_test exercises the recon store and HTTP handlers (module
-// gating, upload limits, cross-org access), so it needs to import httpapi
-// and auth alongside recon without an import cycle.
+// Package recon_test exercises the recon store and HTTP handlers (upload
+// limits, cross-org access), so it needs to import httpapi and auth
+// alongside recon without an import cycle.
 package recon_test
 
 import (
@@ -55,13 +55,13 @@ func testBankAccount(t *testing.T, pool *pgxpool.Pool, orgID int64, name string,
 	return a
 }
 
-func newReconTestHandler(t *testing.T, pool *pgxpool.Pool, enabled bool) http.Handler {
+func newReconTestHandler(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	a := auth.New(pool, false)
 	return httpapi.New(httpapi.Deps{
 		Pool:   pool,
 		Auth:   a,
-		Cfg:    config.Config{Modules: map[string]bool{"reconciliation": enabled}, FilesDir: t.TempDir()},
+		Cfg:    config.Config{Modules: map[string]bool{"reconciliation": true}, FilesDir: t.TempDir()},
 		GetEnv: func(string) string { return "" },
 	})
 }
@@ -94,7 +94,7 @@ func reconTestSetup(t *testing.T) (pool *pgxpool.Pool, handler http.Handler, tok
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	return pool, newReconTestHandler(t, pool, true), token, org.ID
+	return pool, newReconTestHandler(t, pool), token, org.ID
 }
 
 // uploadCSV POSTs csv as a multipart "file" upload to
@@ -249,45 +249,6 @@ func TestImportTooLarge413(t *testing.T) {
 	}
 }
 
-func TestReconModuleDisabled404(t *testing.T) {
-	pool, _, token, _ := reconTestSetup(t)
-	handler := newReconTestHandler(t, pool, false)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/bank-accounts", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestCreateBankAccountRequiresExactlyOneMappingStyle(t *testing.T) {
-	_, handler, token, _ := reconTestSetup(t)
-
-	rr := postJSON(handler, token, "/api/v1/orgs/acme/bank-accounts", map[string]any{
-		"name": "Both styles", "preset": "commbank",
-		"csv_mapping": commbankMapping(),
-	})
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("both set: status = %d, want 422, body = %s", rr.Code, rr.Body.String())
-	}
-
-	rr = postJSON(handler, token, "/api/v1/orgs/acme/bank-accounts", map[string]any{"name": "Neither style"})
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("neither set: status = %d, want 422, body = %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestCreateBankAccountViaPreset(t *testing.T) {
-	_, handler, token, _ := reconTestSetup(t)
-	rr := postJSON(handler, token, "/api/v1/orgs/acme/bank-accounts", map[string]any{
-		"name": "Everyday", "preset": "commbank",
-	})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201, body = %s", rr.Code, rr.Body.String())
-	}
-}
-
 // TestImportConcurrentSameFile covers the controller's correctness
 // requirement for concurrent imports of the same file: it's the unique
 // constraint on (bank_account_id, dedupe_key), not an app-level check,
@@ -333,20 +294,6 @@ func TestImportConcurrentSameFile(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("len(lines) = %d, want 3 (no duplicates persisted)", len(lines))
 	}
-}
-
-func postJSON(handler http.Handler, token, path string, body any) *httptest.ResponseRecorder {
-	b, err := json.Marshal(body)
-	if err != nil {
-		panic(err)
-	}
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Shigoto-CSRF", "1")
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	return rr
 }
 
 // TestImportRouteAuditsActor covers that a route-triggered import records

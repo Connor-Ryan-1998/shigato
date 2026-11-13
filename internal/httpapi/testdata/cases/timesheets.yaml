@@ -1,0 +1,175 @@
+# Timesheets routes: org isolation, full-replace project and task edits,
+# entry ownership, the entry list filter and billing-run access.
+seed:
+  orgs: [acme, other]
+  users:
+    owner: {org: acme, role: owner}
+    keeper: {org: acme, role: bookkeeper}
+  contacts:
+    c_client: {org: acme, kind: client, name: A Client}
+    c_foreign: {org: other, kind: client, name: Other Client}
+  projects:
+    # Both "Website rebuild" at 12000 cents an hour, GST, in progress.
+    pr: {org: acme, client: c_client}
+    pr_foreign: {org: other, client: c_foreign}
+  tasks:
+    tk: {org: acme, project: pr, name: Design}
+    tk_rated: {org: acme, project: pr, name: Review, rate: 5000}
+
+cases:
+  - name: owner cannot add a task to a foreign org's project
+    as: owner
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/projects/{pr_foreign}/tasks"
+      body: {name: Design}
+    expect: {status: 404, body: {error: not found}, exact: true}
+    unchanged: [project_tasks, audit_log]
+
+  # PUT /projects/{id} is a full replace: an omitted field is a 422, never
+  # a silent default (an omitted active flag could re-activate a project).
+  - name: project update needs name
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, status: completed, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "name is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs client_contact_id
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, hourly_rate: 12000, gst_code: GST, status: completed, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "client_contact_id is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs hourly_rate
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", gst_code: GST, status: completed, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "hourly_rate is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs gst_code
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, status: completed, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "gst_code is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs status
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "status is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs description
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, status: completed, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "description is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs start_date
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, status: completed, description: Done, end_date: null, billing_method: fixed}
+    expect: {status: 422, body: {error: "start_date is required (use null for none)"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs end_date
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, status: completed, description: Done, start_date: "2026-01-01", billing_method: fixed}
+    expect: {status: 422, body: {error: "end_date is required (use null for none)"}}
+    unchanged: [projects, audit_log]
+  - name: project update needs billing_method
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, status: completed, description: Done, start_date: "2026-01-01", end_date: null}
+    expect: {status: 422, body: {error: "billing_method is required"}}
+    unchanged: [projects, audit_log]
+  - name: project update with every field replaces the project
+    as: owner
+    isolate: true
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/projects/{pr}"
+      body: {name: Website rebuild, client_contact_id: "{c_client}", hourly_rate: 12000, gst_code: GST, status: completed, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+    expect:
+      status: 200
+      body: {status: completed, active: false, description: Done, start_date: "2026-01-01", end_date: null, billing_method: fixed}
+
+  # PUT /tasks/{id} must name hourly_rate (null clears the override); an
+  # omitted key is not "leave the override alone".
+  - name: task update needs the hourly_rate key
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/tasks/{tk}"
+      body: {name: Design, active: true}
+    expect: {status: 422, body: {error: "hourly_rate is required (use null to clear the override)"}}
+    unchanged: [project_tasks, audit_log]
+  # The response is the updated row (RETURNING), so it shows what was
+  # stored. A task without an override omits hourly_rate, so the exact
+  # body proves the override is gone.
+  - name: task update with a null hourly_rate clears the override
+    as: owner
+    isolate: true
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/tasks/{tk_rated}"
+      body: {name: Review, active: true, hourly_rate: null}
+    expect:
+      status: 200
+      body: {id: "{tk_rated}", project_id: "{pr}", name: Review, active: true}
+      exact: true
+
+  # POST /time-entries always logs time under the caller.
+  - name: time entry is logged as the caller
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/time-entries
+      body: {task_id: "{tk}", work_date: "2026-11-01", minutes: 60, note: work}
+    expect:
+      status: 201
+      body: {task_id: "{tk}", user_id: "{owner}", minutes: 60}
+
+  # unbilled accepts only "true"; anything else is a 422, not an ignored
+  # filter.
+  - name: entry list rejects an unbilled value other than true
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/time-entries?unbilled=yes"}
+    expect: {status: 422, body: {error: "unbilled must be true"}}
+
+  - name: bookkeeper cannot run billing
+    as: keeper
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/billing-runs
+      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+    unchanged: [invoices, invoice_lines, time_entries, audit_log]
+
+  # The seed logs no time, so there is nothing to bill.
+  - name: billing run with no unbilled time is refused
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/billing-runs
+      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14}
+    expect: {status: 422, body: {error: "invalid input: no unbilled time"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, time_entries, audit_log]

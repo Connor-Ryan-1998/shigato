@@ -1,0 +1,14 @@
+# Report routes. Reports are core, so every toggleable module is off here
+# to prove they work regardless.
+seed:
+  orgs: [acme]
+  modules: {property: false, timesheets: false, reconciliation: false}
+  users:
+    owner: {org: acme, role: owner}
+  # acme is not GST-registered (the default).
+
+cases:
+  - name: BAS is refused for an org that is not GST-registered
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/reports/bas?period=FY2027-Q1"}
+    expect: {status: 422, body: {error: "org is not GST-registered"}}

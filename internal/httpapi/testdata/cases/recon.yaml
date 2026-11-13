@@ -1,0 +1,39 @@
+# Reconciliation routes: a bank account takes exactly one mapping style,
+# either a named preset or an explicit CSV mapping.
+seed:
+  orgs: [acme]
+  users:
+    owner: {org: acme, role: owner}
+
+cases:
+  - name: bank account rejects both a preset and a CSV mapping
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/bank-accounts
+      body:
+        name: Both styles
+        preset: commbank
+        csv_mapping: {has_header: false, date_column: 0, date_format: "02/01/2006", amount_column: 1, description_column: 2}
+    expect: {status: 422, body: {error: "invalid input: set exactly one of preset or csv_mapping"}}
+    unchanged: [bank_accounts, audit_log]
+
+  - name: bank account needs a preset or a CSV mapping
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/bank-accounts
+      body: {name: Neither style}
+    expect: {status: 422, body: {error: "invalid input: set exactly one of preset or csv_mapping"}}
+    unchanged: [bank_accounts, audit_log]
+
+  - name: bank account can be created from a preset
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/bank-accounts
+      body: {name: Everyday, preset: commbank}
+    expect:
+      status: 201
+      body: {name: Everyday}

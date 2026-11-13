@@ -1,0 +1,78 @@
+# Property routes: lease creation validation and the rent-change route.
+#
+# The lease rules themselves (one primary tenant, tenants from this org,
+# the rent-increase warning) are owned by the property store tests; these
+# cases pin how the routes map them to HTTP.
+seed:
+  orgs: [acme, other]
+  users:
+    owner: {org: acme, role: owner}
+  contacts:
+    c_t1: {org: acme, kind: tenant, name: Tenant One}
+    c_t2: {org: acme, kind: tenant, name: Tenant Two}
+    c_other: {org: other, kind: tenant, name: Other Org Tenant}
+  properties:
+    # p_vacant has no lease, so a create is refused only for the reason
+    # each case names.
+    p_vacant: {org: acme, name: 2 Vacant St}
+    p_let: {org: acme, name: 1 Let St}
+  leases:
+    # Weekly from 2026-01-05; its only rent change is the initial one.
+    l_let: {org: acme, property: p_let, tenant: c_t1}
+
+cases:
+  - name: lease create needs a primary tenant
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/leases
+      body:
+        property_id: "{p_vacant}"
+        start_date: "2026-11-02"
+        frequency: weekly
+        rent_amount: 50000
+        tenants: [{contact_id: "{c_t1}", primary: false}]
+    expect: {status: 422, body: {error: "invalid input: a lease needs exactly one primary tenant"}}
+    unchanged: [leases, lease_tenants, lease_rent_changes, invoices, audit_log]
+
+  - name: lease create allows only one primary tenant
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/leases
+      body:
+        property_id: "{p_vacant}"
+        start_date: "2026-11-02"
+        frequency: weekly
+        rent_amount: 50000
+        tenants:
+          - {contact_id: "{c_t1}", primary: true}
+          - {contact_id: "{c_t2}", primary: true}
+    expect: {status: 422, body: {error: "invalid input: a lease needs exactly one primary tenant"}}
+    unchanged: [leases, lease_tenants, lease_rent_changes, invoices, audit_log]
+
+  - name: lease create rejects another org's tenant
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/leases
+      body:
+        property_id: "{p_vacant}"
+        start_date: "2026-11-02"
+        frequency: weekly
+        rent_amount: 50000
+        tenants: [{contact_id: "{c_other}", primary: true}]
+    expect: {status: 422, body: {error: "invalid input: contact_id {c_other} not found"}}
+    unchanged: [leases, lease_tenants, lease_rent_changes, invoices, audit_log]
+
+  # Which increases warn is owned by the store test TestRentChangeWarning.
+  - name: rent increase is created
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/leases/{l_let}/rent-changes"
+      body: {effective_date: "2026-06-01", amount: 55000}
+    expect:
+      status: 201
+      body: {effective_date: "2026-06-01", amount: 55000}

@@ -41,7 +41,8 @@ type File struct {
 
 // Seed is the data created before a file's cases run. Every map key is a
 // seed name; names are unique across Users, Contacts, Invoices, Properties,
-// Leases, Projects and Invites and resolve to row IDs in `{name}` tokens.
+// Leases, Projects, Tasks and Invites and resolve to row IDs in `{name}`
+// tokens.
 type Seed struct {
 	Orgs       []string                `yaml:"orgs"`
 	Modules    map[string]bool         `yaml:"modules"` // nil: all enabled
@@ -51,6 +52,7 @@ type Seed struct {
 	Properties map[string]SeedProperty `yaml:"properties"`
 	Leases     map[string]SeedLease    `yaml:"leases"`
 	Projects   map[string]SeedProject  `yaml:"projects"`
+	Tasks      map[string]SeedTask     `yaml:"tasks"`
 	Invites    map[string]SeedInvite   `yaml:"invites"`
 	Settings   map[string]SeedSettings `yaml:"settings"` // key is the org slug
 }
@@ -101,6 +103,15 @@ type SeedLease struct {
 type SeedProject struct {
 	Org    string `yaml:"org"`
 	Client string `yaml:"client"`
+}
+
+// SeedTask is a task in the seed project Project. Empty Name takes the
+// testkit default; Rate 0 means no override (the project's rate applies).
+type SeedTask struct {
+	Org     string `yaml:"org"`
+	Project string `yaml:"project"`
+	Name    string `yaml:"name"`
+	Rate    int64  `yaml:"rate"`
 }
 
 // SeedInvite is an outstanding staff invite to Org for Email with Role.
@@ -216,6 +227,7 @@ func (s Seed) seedNames() map[string]string {
 	add("properties", sortedKeys(s.Properties))
 	add("leases", sortedKeys(s.Leases))
 	add("projects", sortedKeys(s.Projects))
+	add("tasks", sortedKeys(s.Tasks))
 	add("invites", sortedKeys(s.Invites))
 	return names
 }
@@ -263,6 +275,7 @@ func (f File) Validate() error {
 		{"properties", sortedKeys(s.Properties)},
 		{"leases", sortedKeys(s.Leases)},
 		{"projects", sortedKeys(s.Projects)},
+		{"tasks", sortedKeys(s.Tasks)},
 		{"invites", sortedKeys(s.Invites)},
 	} {
 		for _, k := range group.keys {
@@ -343,6 +356,19 @@ func (f File) Validate() error {
 		where := "projects." + name
 		checkOrg(where, p.Org)
 		checkContact(where, "client", p.Client, p.Org)
+	}
+	for _, name := range sortedKeys(s.Tasks) {
+		tk := s.Tasks[name]
+		where := "tasks." + name
+		checkOrg(where, tk.Org)
+		if p, ok := s.Projects[tk.Project]; !ok {
+			seedErr("%s: project: unknown project %q", where, tk.Project)
+		} else if p.Org != tk.Org {
+			seedErr("%s: project: project %q is in org %q, not %q", where, tk.Project, p.Org, tk.Org)
+		}
+		if tk.Rate < 0 {
+			seedErr("%s: negative rate %d", where, tk.Rate)
+		}
 	}
 	tokens := map[string]string{}
 	for _, name := range sortedKeys(s.Invites) {

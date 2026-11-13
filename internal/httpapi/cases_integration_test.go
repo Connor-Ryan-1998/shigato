@@ -72,7 +72,7 @@ type caseWorld struct {
 }
 
 // seedCaseWorld applies s in a fixed order (orgs, settings, contacts,
-// users, properties, leases, projects, invoices, invites), each map in
+// users, properties, leases, projects, tasks, invoices, invites), each map in
 // sorted key order so IDs are deterministic, then logs every user in.
 func seedCaseWorld(t *testing.T, s casefile.Seed) *caseWorld {
 	t.Helper()
@@ -140,6 +140,17 @@ func seedCaseWorld(t *testing.T, s casefile.Seed) *caseWorld {
 	for _, name := range sortedKeys(s.Projects) {
 		p := s.Projects[name]
 		ids[name] = e.Project(orgs[p.Org], ids[p.Client]).ID
+	}
+	for _, name := range sortedKeys(s.Tasks) {
+		tk := s.Tasks[name]
+		var opts []testkit.TaskOption
+		if tk.Name != "" {
+			opts = append(opts, testkit.TaskName(tk.Name))
+		}
+		if tk.Rate != 0 {
+			opts = append(opts, testkit.TaskRate(core.Cents(tk.Rate)))
+		}
+		ids[name] = e.Task(orgs[tk.Org], ids[tk.Project], opts...).ID
 	}
 	for _, name := range sortedKeys(s.Invoices) {
 		inv := s.Invoices[name]

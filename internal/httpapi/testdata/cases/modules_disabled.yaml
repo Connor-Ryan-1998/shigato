@@ -1,0 +1,23 @@
+# With a module switched off its routes do not exist: a signed-in owner
+# gets the same 404 as for any unknown route.
+seed:
+  orgs: [acme]
+  modules: {property: false, timesheets: false, reconciliation: false}
+  users:
+    owner: {org: acme, role: owner}
+
+cases:
+  - name: property routes are gone when property is disabled
+    as: owner
+    request: {method: GET, path: /api/v1/orgs/acme/properties}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: timesheets routes are gone when timesheets is disabled
+    as: owner
+    request: {method: GET, path: /api/v1/orgs/acme/projects}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: reconciliation routes are gone when reconciliation is disabled
+    as: owner
+    request: {method: GET, path: /api/v1/orgs/acme/bank-accounts}
+    expect: {status: 404, body: {error: not found}, exact: true}

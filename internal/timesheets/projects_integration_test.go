@@ -1,8 +1,8 @@
 //go:build integration
 
-// Package timesheets_test exercises the timesheets store, plus one test
-// that goes through the real HTTP handlers (module gating), so it needs to
-// import httpapi and auth alongside timesheets without an import cycle.
+// Package timesheets_test exercises the timesheets store, plus a few tests
+// that go through the real HTTP handlers, so it needs to import httpapi
+// and auth alongside timesheets without an import cycle.
 package timesheets_test
 
 import (
@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -233,19 +232,6 @@ func TestUpdateProjectComplete(t *testing.T) {
 	}
 }
 
-func TestCreateTaskCrossOrgProject404(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	org := testOrg(t, pool, "acme")
-	client := testContact(t, pool, org.ID, "client", "A Client")
-	proj := testProject(t, pool, org.ID, client)
-
-	other := testOrg(t, pool, "other")
-	if _, err := timesheets.CreateTask(ctx, pool, other.ID, proj.ID, timesheets.Task{Name: "Design"}); !errors.Is(err, core.ErrNotFound) {
-		t.Fatalf("cross-org CreateTask: err = %v, want ErrNotFound", err)
-	}
-}
-
 func TestCreateTaskDuplicateName422(t *testing.T) {
 	pool := db.TestPool(t)
 	ctx := context.Background()
@@ -278,12 +264,12 @@ func TestEffectiveRate(t *testing.T) {
 	}
 }
 
-func newTimesheetsTestHandler(pool *pgxpool.Pool, enabled bool) http.Handler {
+func newTimesheetsTestHandler(pool *pgxpool.Pool) http.Handler {
 	a := auth.New(pool, false)
 	return httpapi.New(httpapi.Deps{
 		Pool:   pool,
 		Auth:   a,
-		Cfg:    config.Config{Modules: map[string]bool{"timesheets": enabled}},
+		Cfg:    config.Config{Modules: map[string]bool{"timesheets": true}},
 		GetEnv: func(string) string { return "" },
 	})
 }
@@ -316,7 +302,7 @@ func timesheetsTestSetup(t *testing.T) (pool *pgxpool.Pool, handler http.Handler
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	return pool, newTimesheetsTestHandler(pool, true), token, org.ID
+	return pool, newTimesheetsTestHandler(pool), token, org.ID
 }
 
 func putJSON(handler http.Handler, token, path string, body any) *httptest.ResponseRecorder {
@@ -328,112 +314,4 @@ func putJSON(handler http.Handler, token, path string, body any) *httptest.Respo
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	return rr
-}
-
-func TestTimesheetsModuleDisabled404(t *testing.T) {
-	pool, _, token, _ := timesheetsTestSetup(t)
-	handler := newTimesheetsTestHandler(pool, false)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/projects", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404, body=%s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestUpdateProjectRequiresAllFields covers the controller ruling that
-// PUT /projects/{id} is a full replace: an omitted field must 422, never
-// silently default (an omitted "active" defaulting to true could
-// re-activate a deactivated project).
-func TestUpdateProjectRequiresAllFields(t *testing.T) {
-	pool, handler, token, orgID := timesheetsTestSetup(t)
-	client := testContact(t, pool, orgID, "client", "A Client")
-	proj := testProject(t, pool, orgID, client)
-	path := fmt.Sprintf("/api/v1/orgs/acme/projects/%d", proj.ID)
-
-	full := map[string]any{
-		"name": proj.Name, "client_contact_id": client, "hourly_rate": int64(proj.HourlyRate),
-		"gst_code": string(proj.GSTCode), "status": "completed", "description": "Done",
-		"start_date": "2026-01-01", "end_date": nil, "billing_method": "fixed",
-	}
-	for key := range full {
-		partial := map[string]any{}
-		for k, v := range full {
-			if k != key {
-				partial[k] = v
-			}
-		}
-		if rr := putJSON(handler, token, path, partial); rr.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("missing %s: status = %d, want 422, body=%s", key, rr.Code, rr.Body.String())
-		}
-	}
-
-	rr := putJSON(handler, token, path, full)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("full update: status = %d, want 200, body=%s", rr.Code, rr.Body.String())
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if resp["status"] != "completed" || resp["active"] != false || resp["start_date"] != "2026-01-01" ||
-		resp["end_date"] != nil || resp["billing_method"] != "fixed" || resp["description"] != "Done" {
-		t.Fatalf("response = %v", resp)
-	}
-}
-
-// TestUpdateTaskHourlyRateKeyRequired covers the controller ruling that
-// PUT /tasks/{id} must include the hourly_rate key (null to clear the
-// override), never treat an omitted key as "leave the override alone".
-func TestUpdateTaskHourlyRateKeyRequired(t *testing.T) {
-	pool, handler, token, orgID := timesheetsTestSetup(t)
-	client := testContact(t, pool, orgID, "client", "A Client")
-	proj := testProject(t, pool, orgID, client)
-	task, err := timesheets.CreateTask(context.Background(), pool, orgID, proj.ID, timesheets.Task{Name: "Design"})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
-
-	missingRate := map[string]any{"name": "Design", "active": true}
-	rr := putJSON(handler, token, fmt.Sprintf("/api/v1/orgs/acme/tasks/%d", task.ID), missingRate)
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("missing hourly_rate key: status = %d, want 422, body=%s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestUpdateTaskNullHourlyRateClearsOverride covers explicit JSON null
-// clearing a task's rate override.
-func TestUpdateTaskNullHourlyRateClearsOverride(t *testing.T) {
-	pool, handler, token, orgID := timesheetsTestSetup(t)
-	client := testContact(t, pool, orgID, "client", "A Client")
-	proj := testProject(t, pool, orgID, client)
-	rate := core.Cents(5000)
-	task, err := timesheets.CreateTask(context.Background(), pool, orgID, proj.ID, timesheets.Task{Name: "Design", HourlyRate: &rate})
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
-
-	body := map[string]any{"name": "Design", "active": true, "hourly_rate": nil}
-	rr := putJSON(handler, token, fmt.Sprintf("/api/v1/orgs/acme/tasks/%d", task.ID), body)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
-	}
-	var resp struct {
-		HourlyRate *int64 `json:"hourly_rate"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if resp.HourlyRate != nil {
-		t.Fatalf("response hourly_rate = %v, want nil (cleared)", *resp.HourlyRate)
-	}
-
-	got, err := timesheets.GetTask(context.Background(), pool, orgID, task.ID)
-	if err != nil {
-		t.Fatalf("GetTask: %v", err)
-	}
-	if got.HourlyRate != nil {
-		t.Fatalf("persisted HourlyRate = %v, want nil (cleared)", *got.HourlyRate)
-	}
 }
