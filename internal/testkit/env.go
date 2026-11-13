@@ -43,6 +43,7 @@ type handlerConfig struct {
 	payments    func(string) (payments.Provider, error)
 	billing     *billing.Service
 	authOptions []auth.Option
+	getEnv      func(string) string
 }
 
 // HandlerOption customises the handler Env.Handler builds.
@@ -70,6 +71,12 @@ func Billing(b *billing.Service) HandlerOption {
 	return func(c *handlerConfig) { c.billing = b }
 }
 
+// GetEnv sets the handler's environment lookup, e.g. to give an org Stripe
+// keys through config.StripeFor. The default returns "" for every key.
+func GetEnv(f func(string) string) HandlerOption {
+	return func(c *handlerConfig) { c.getEnv = f }
+}
+
 // AuthOptions passes options to auth.New.
 func AuthOptions(opts ...auth.Option) HandlerOption {
 	return func(c *handlerConfig) { c.authOptions = append(c.authOptions, opts...) }
@@ -79,7 +86,10 @@ func AuthOptions(opts ...auth.Option) HandlerOption {
 // default every config.Known module is enabled, GetEnv returns "" and auth
 // uses insecure (non-Secure) cookies.
 func (e *Env) Handler(opts ...HandlerOption) http.Handler {
-	c := handlerConfig{modules: make(map[string]bool, len(config.Known))}
+	c := handlerConfig{
+		modules: make(map[string]bool, len(config.Known)),
+		getEnv:  func(string) string { return "" },
+	}
 	for _, name := range config.Known {
 		c.modules[name] = true
 	}
@@ -90,7 +100,7 @@ func (e *Env) Handler(opts ...HandlerOption) http.Handler {
 		Pool:     e.Pool,
 		Auth:     auth.New(e.Pool, false, c.authOptions...),
 		Cfg:      config.Config{Modules: c.modules, BaseURL: "https://shigoto.example"},
-		GetEnv:   func(string) string { return "" },
+		GetEnv:   c.getEnv,
 		Payments: c.payments,
 		Billing:  c.billing,
 		Mailer:   c.mailer,

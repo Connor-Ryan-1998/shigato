@@ -13,6 +13,7 @@ import (
 	"shigoto/internal/auth"
 	"shigoto/internal/billing"
 	"shigoto/internal/core"
+	"shigoto/internal/payments"
 	"shigoto/internal/property"
 	"shigoto/internal/testkit"
 	"shigoto/internal/timesheets"
@@ -306,4 +307,38 @@ func TestDateParsesUTC(t *testing.T) {
 		}
 	}()
 	testkit.Date("05/01/2026")
+}
+
+func TestGetEnvOptionReachesHandler(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	c := e.Contact(org)
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	// Bank details alone are one pay option; Stripe keys from GetEnv add a
+	// second, so a rent invoice can be issued only when GetEnv is applied.
+	if _, err := e.Pool.Exec(e.Ctx, "UPDATE orgs SET bank_bsb = '062-000', bank_account = '12345678' WHERE id = $1", org.ID); err != nil {
+		t.Fatalf("setting bank details: %v", err)
+	}
+	stripeEnv := func(key string) string {
+		switch key {
+		case "SHIGOTO_STRIPE_ACME_SECRET_KEY":
+			return "sk_test_dummy"
+		case "SHIGOTO_STRIPE_ACME_WEBHOOK_SECRET":
+			return "whsec_test_dummy"
+		}
+		return ""
+	}
+	fake := testkit.Payments(func(string) (payments.Provider, error) { return &payments.Fake{Secret: "whsec_test_dummy"}, nil })
+	issue := func(opts ...testkit.HandlerOption) int {
+		draft := e.Invoice(org, c.ID, testkit.Source("rent"))
+		return e.Login(owner, e.Handler(opts...)).Do(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draft.ID), nil).Code
+	}
+
+	if got := issue(fake); got != http.StatusUnprocessableEntity {
+		t.Fatalf("issue with default GetEnv = %d, want 422", got)
+	}
+	if got := issue(fake, testkit.GetEnv(stripeEnv)); got != http.StatusOK {
+		t.Fatalf("issue with Stripe GetEnv = %d, want 200", got)
+	}
 }
