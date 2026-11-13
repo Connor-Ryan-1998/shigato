@@ -3,14 +3,19 @@
 package testkit_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"shigoto/internal/auth"
+	"shigoto/internal/billing"
 	"shigoto/internal/core"
+	"shigoto/internal/property"
 	"shigoto/internal/testkit"
+	"shigoto/internal/timesheets"
 )
 
 func TestLoginOwnerCanReadOrg(t *testing.T) {
@@ -188,4 +193,117 @@ func TestCountWhere(t *testing.T) {
 	if !fake.fatal || !strings.Contains(fake.message, "no_such_table") {
 		t.Fatalf("Count on unknown table fatal=%v message %q, want failure naming the table", fake.fatal, fake.message)
 	}
+}
+
+func TestInvoiceIssuedHasNumber(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	c := e.Contact(org)
+	if c.Kind != "client" || c.Name != "Test Contact" {
+		t.Fatalf("contact defaults = %q/%q, want client/Test Contact", c.Kind, c.Name)
+	}
+
+	draft := e.Invoice(org, c.ID)
+	if draft.Status != "draft" || draft.Number != nil || draft.Total != 1000 || draft.Source != "manual" || draft.DueInDays != 14 {
+		t.Fatalf("draft = status %q number %v total %d source %q due_in %d, want draft/nil/1000/manual/14",
+			draft.Status, draft.Number, draft.Total, draft.Source, draft.DueInDays)
+	}
+
+	inv := e.Invoice(org, c.ID, testkit.Amount(2500), testkit.Issued(testkit.Date("2026-02-01")))
+	if inv.Status != "open" || inv.Number == nil || inv.Total != 2500 {
+		t.Fatalf("issued = status %q number %v total %d, want open/non-nil/2500", inv.Status, inv.Number, inv.Total)
+	}
+	if inv.IssueDate == nil || !inv.IssueDate.Equal(testkit.Date("2026-02-01")) {
+		t.Fatalf("issue date = %v, want 2026-02-01", inv.IssueDate)
+	}
+}
+
+func TestLeaseDefaultsWeeklyPrimary(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tina"))
+	prop := e.Property(org)
+	if !prop.Residential || prop.Name != "1 Test St" {
+		t.Fatalf("property defaults = %q residential=%v, want 1 Test St/true", prop.Name, prop.Residential)
+	}
+
+	l := e.Lease(org, prop.ID, tenant.ID)
+	if l.Frequency != property.Weekly || !l.StartDate.Equal(testkit.Date("2026-01-05")) {
+		t.Fatalf("lease = %s from %v, want weekly from 2026-01-05", l.Frequency, l.StartDate)
+	}
+	if len(l.Tenants) != 1 || l.Tenants[0].ContactID != tenant.ID || !l.Tenants[0].IsPrimary {
+		t.Fatalf("tenants = %+v, want only %d as primary", l.Tenants, tenant.ID)
+	}
+	if len(l.RentChanges) != 1 || l.RentChanges[0].Amount != 50000 {
+		t.Fatalf("rent changes = %+v, want one of 50000", l.RentChanges)
+	}
+
+	co := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Colin"))
+	shop := e.Property(org, testkit.Commercial(), testkit.PropertyName("2 Shop Rd"))
+	if shop.Residential || shop.Name != "2 Shop Rd" {
+		t.Fatalf("commercial property = %q residential=%v", shop.Name, shop.Residential)
+	}
+	l2 := e.Lease(org, shop.ID, tenant.ID, testkit.CoTenant(co.ID), testkit.Frequency(property.Monthly),
+		testkit.Start(testkit.Date("2026-03-01")), testkit.Rent(200000), testkit.Bond(100000))
+	if len(l2.Tenants) != 2 || l2.Frequency != property.Monthly || l2.BondAmount != 100000 {
+		t.Fatalf("lease with options = %+v", l2)
+	}
+}
+
+func TestSettingsPayOptionsAllowIssue(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	c := e.Contact(org)
+	// The QLD pay-options rule applies only to rent and bond invoices.
+	draft := e.Invoice(org, c.ID, testkit.Source("rent"))
+
+	if _, err := e.BillingService().Issue(e.Ctx, org.ID, org.Slug, draft.ID); !errors.Is(err, billing.ErrTooFewPayOptions) {
+		t.Fatalf("Issue without pay options = %v, want ErrTooFewPayOptions", err)
+	}
+
+	e.Settings(org, testkit.GSTRegistered(true), testkit.PayOptions())
+	inv, err := e.BillingService().Issue(e.Ctx, org.ID, org.Slug, draft.ID)
+	if err != nil {
+		t.Fatalf("Issue with pay options: %v", err)
+	}
+	if inv.Number == nil {
+		t.Fatalf("issued invoice has no number: %+v", inv)
+	}
+	if got := e.Count("orgs", "id = $1 AND gst_registered", org.ID); got != 1 {
+		t.Fatalf("org gst_registered not set")
+	}
+}
+
+func TestProjectTaskEntry(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	u := e.User("worker@example.com")
+	e.Member(u, org, auth.Owner)
+	client := e.Contact(org)
+	p := e.Project(org, client.ID)
+	if p.Name != "Website rebuild" || p.HourlyRate != 12000 || p.GSTCode != core.GST {
+		t.Fatalf("project defaults = %+v", p)
+	}
+	task := e.Task(org, p.ID)
+	if task.ProjectID != p.ID || task.Name == "" {
+		t.Fatalf("task = %+v", task)
+	}
+	entry := e.Entry(org, u.ID, timesheets.Entry{TaskID: task.ID, WorkDate: testkit.Date("2026-02-02"), Minutes: 90},
+		testkit.Date("2026-02-03"))
+	if entry.ID == 0 || entry.Minutes != 90 || entry.UserID != u.ID {
+		t.Fatalf("entry = %+v", entry)
+	}
+}
+
+func TestDateParsesUTC(t *testing.T) {
+	d := testkit.Date("2026-01-05")
+	if !d.Equal(time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)) || d.Location() != time.UTC {
+		t.Fatalf("Date = %v (%v), want 2026-01-05 UTC", d, d.Location())
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Date on a bad literal did not panic")
+		}
+	}()
+	testkit.Date("05/01/2026")
 }
