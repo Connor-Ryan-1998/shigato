@@ -224,30 +224,6 @@ func TestDashboardOmitsDisabledModule(t *testing.T) {
 	}
 }
 
-// TestDashboardBookkeeperNoTimesheetsWrite proves dashboard sections follow
-// a module's read permission, not its write one: Bookkeeper (rbac.go)
-// holds PermPropertyRead, PermTimesheetsRead and PermReportsRead but not
-// PermInvoicesWrite/PermTimesheetsWrite/PermReconWrite's write-side
-// counterparts the module's own write routes require. If the dashboard
-// handler accidentally gated a section on a write permission instead, this
-// role would see it wrongly omitted.
-func TestDashboardBookkeeperNoTimesheetsWrite(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "bookkeeper@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Bookkeeper)
-	token := settingsTestLogin(t, pool, "bookkeeper@example.com", "correct-password")
-	handler := newDashboardTestHandler(pool, map[string]bool{"property": true, "timesheets": true, "reconciliation": true})
-
-	body := decodeDashboard(t, getDashboard(handler, token))
-	if _, ok := body.Modules["timesheets"]; !ok {
-		t.Fatalf("modules = %v, want a timesheets key (bookkeeper holds PermTimesheetsRead)", body.Modules)
-	}
-	if len(body.Modules) != 3 {
-		t.Fatalf("modules = %v, want property, timesheets and reconciliation all present", body.Modules)
-	}
-}
-
 // TestInvoiceListFiltersAndTotal covers GET /invoices' status, limit and
 // overdue filters, and that "total" always reflects the full matching
 // count regardless of limit.

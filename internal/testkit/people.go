@@ -4,6 +4,7 @@ package testkit
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -96,6 +97,42 @@ func (e *Env) PortalUser(email string, org core.Org, role auth.Role, contactID i
 		e.T.Fatalf("adding portal %s %s of %s for contact %d: %v", role, email, org.Slug, contactID, err)
 	}
 	return u
+}
+
+type inviteConfig struct {
+	expired bool
+}
+
+// InviteOption customises Env.Invite.
+type InviteOption func(*inviteConfig)
+
+// Expired makes the invite already past its expiry.
+func Expired() InviteOption { return func(c *inviteConfig) { c.expired = true } }
+
+// Invite inserts an outstanding staff invite to org for email with role,
+// whose plaintext token is token, so a test can build the accept path
+// itself. It expires in a day unless Expired is given. Only the token's
+// SHA-256 is stored, matching auth's hashing.
+func (e *Env) Invite(org core.Org, email string, role auth.Role, token string, opts ...InviteOption) int64 {
+	e.T.Helper()
+	var c inviteConfig
+	for _, opt := range opts {
+		opt(&c)
+	}
+	expiry := "now() + interval '1 day'"
+	if c.expired {
+		expiry = "now() - interval '1 hour'"
+	}
+	sum := sha256.Sum256([]byte(token))
+	var id int64
+	if err := e.Pool.QueryRow(e.Ctx,
+		"INSERT INTO invites (org_id, email, role, token_hash, expires_at) VALUES ($1, $2, $3, $4, "+expiry+") RETURNING id",
+		org.ID, email, string(role), sum[:],
+	).Scan(&id); err != nil {
+		e.T.Fatalf("inserting invite for %s to %s: %v", email, org.Slug, err)
+		return 0
+	}
+	return id
 }
 
 // Session sends requests to h as one actor. An empty Token is anonymous.

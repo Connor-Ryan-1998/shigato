@@ -385,3 +385,26 @@ func TestGetEnvOptionReachesHandler(t *testing.T) {
 		t.Fatalf("issue with Stripe GetEnv = %d, want 200", got)
 	}
 }
+
+func TestInviteTokenResolves(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	if id := e.Invite(org, "live@example.com", auth.Staff, "live-token"); id == 0 {
+		t.Fatal("Invite returned id 0")
+	}
+	e.Invite(org, "late@example.com", auth.Staff, "late-token", testkit.Expired())
+	s := e.Anonymous(e.Handler())
+	for token, wantExpired := range map[string]bool{"live-token": false, "late-token": true} {
+		r := s.Do(http.MethodGet, "/api/v1/invites/"+token, nil)
+		if r.Code != http.StatusOK {
+			t.Fatalf("GET invite %s = %d, body %s", token, r.Code, r.Body)
+		}
+		var got struct {
+			Expired bool `json:"expired"`
+		}
+		r.JSON(&got)
+		if got.Expired != wantExpired {
+			t.Errorf("invite %s expired = %v, want %v", token, got.Expired, wantExpired)
+		}
+	}
+}

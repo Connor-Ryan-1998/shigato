@@ -88,25 +88,3 @@ func TestMeListsOrgsAndPerms(t *testing.T) {
 		t.Errorf("response body exposes password hash or oidc subject: %s", raw)
 	}
 }
-
-func TestMeUnauthenticated401(t *testing.T) {
-	pool := db.TestPool(t)
-	handler := newWebhookHandler(pool, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401, body=%s", rr.Code, rr.Body.String())
-	}
-	var body struct {
-		Error string `json:"error"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if body.Error == "" {
-		t.Error("error body missing \"error\" key value")
-	}
-}

@@ -72,8 +72,8 @@ type caseWorld struct {
 }
 
 // seedCaseWorld applies s in a fixed order (orgs, settings, contacts,
-// users, properties, leases, projects, invoices), each map in sorted key
-// order so IDs are deterministic, then logs every user in.
+// users, properties, leases, projects, invoices, invites), each map in
+// sorted key order so IDs are deterministic, then logs every user in.
 func seedCaseWorld(t *testing.T, s casefile.Seed) *caseWorld {
 	t.Helper()
 	e := testkit.New(t)
@@ -154,6 +154,14 @@ func seedCaseWorld(t *testing.T, s casefile.Seed) *caseWorld {
 			opts = append(opts, testkit.Issued(time.Now()))
 		}
 		ids[name] = e.Invoice(orgs[inv.Org], ids[inv.Contact], opts...).ID
+	}
+	for _, name := range sortedKeys(s.Invites) {
+		inv := s.Invites[name]
+		var opts []testkit.InviteOption
+		if inv.Expired {
+			opts = append(opts, testkit.Expired())
+		}
+		ids[name] = e.Invite(orgs[inv.Org], inv.Email, auth.Role(inv.Role), inv.Token, opts...)
 	}
 
 	h := e.Handler(testkit.Modules(s.Modules))

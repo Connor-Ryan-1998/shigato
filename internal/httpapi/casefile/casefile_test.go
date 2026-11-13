@@ -205,6 +205,24 @@ func TestValidateRejectsBadSeedAndCases(t *testing.T) {
 			f.Seed.Leases = map[string]SeedLease{"l": {Org: "other", Property: "p", Tenant: "c_foreign"}}
 		}, []string{"l", "p"}},
 		{"unknown project client", func(f *File) { f.Seed.Projects = map[string]SeedProject{"pr": {Org: "acme", Client: "zz"}} }, []string{"pr", "zz"}},
+		{"unknown invite org", func(f *File) {
+			f.Seed.Invites = map[string]SeedInvite{"iv": {Org: "nope", Email: "a@example.com", Role: "staff", Token: "t"}}
+		}, []string{"invites.iv", "nope"}},
+		{"invite portal role", func(f *File) {
+			f.Seed.Invites = map[string]SeedInvite{"iv": {Org: "acme", Email: "a@example.com", Role: "tenant", Token: "t"}}
+		}, []string{"invites.iv", "tenant"}},
+		{"invite missing email and token", func(f *File) {
+			f.Seed.Invites = map[string]SeedInvite{"iv": {Org: "acme", Role: "staff"}}
+		}, []string{"invites.iv: email is required", "invites.iv: token is required"}},
+		{"duplicate invite token", func(f *File) {
+			f.Seed.Invites = map[string]SeedInvite{
+				"iv1": {Org: "acme", Email: "a@example.com", Role: "staff", Token: "same"},
+				"iv2": {Org: "acme", Email: "b@example.com", Role: "staff", Token: "same"},
+			}
+		}, []string{"invites.iv2", "same", "invites.iv1"}},
+		{"invite name collides", func(f *File) {
+			f.Seed.Invites = map[string]SeedInvite{"owner": {Org: "acme", Email: "a@example.com", Role: "staff", Token: "t"}}
+		}, []string{"owner", "duplicate"}},
 		{"cross-org contact", func(f *File) {
 			f.Seed.Users["tenant"] = SeedUser{Org: "acme", Role: "tenant", Contact: "c_foreign"}
 		}, []string{"tenant", "c_foreign", "other"}},
@@ -284,4 +302,13 @@ cases:
 	var a Actors
 	err = yaml.Unmarshal([]byte("{x: 1}"), &a)
 	requireErrContains(t, err, "as")
+}
+
+func TestValidInviteSeedInterpolates(t *testing.T) {
+	f := validFile()
+	f.Seed.Invites = map[string]SeedInvite{"iv": {Org: "other", Email: "a@example.com", Role: "bookkeeper", Token: "t", Expired: true}}
+	f.Cases[0].Request = Request{Method: "DELETE", Path: "/api/v1/orgs/acme/invites/{iv}"}
+	if err := f.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
 }

@@ -1,0 +1,147 @@
+# Invoice routes: org isolation, input validation and the pay-options rule
+# for issuing rent invoices.
+seed:
+  orgs: [acme, paid, other]
+  settings:
+    # Bank transfer plus PayID: two pay options, enough to issue rent.
+    paid: {pay_options: true}
+  users:
+    owner: {org: acme, role: owner}
+    paid_owner: {org: paid, role: owner}
+  contacts:
+    c_acme: {org: acme, kind: client, name: Acme Client}
+    c_paid: {org: paid, kind: tenant, name: Paid Tenant}
+    c_foreign: {org: other, kind: client, name: Foreign Client}
+  invoices:
+    inv_foreign: {org: other, contact: c_foreign, status: issued}
+    rent_acme: {org: acme, contact: c_acme, source: rent}
+    rent_paid: {org: paid, contact: c_paid, source: rent}
+
+cases:
+  - name: owner cannot read a foreign org's invoice
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/invoices/{inv_foreign}"}
+    expect: {status: 404, body: {error: not found}}
+
+  # Creating a draft: each invalid input is rejected with 422 and nothing
+  # is persisted. acme is not GST-registered, so valid lines use N-T.
+  - name: create rejects empty lines
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body: {contact_id: "{c_acme}", source: manual, due_in_days: 14, lines: []}
+    expect: {status: 422, body: {error: "invalid input: invoice must have at least one line"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  - name: create rejects zero quantity
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: 14
+        lines: [{description: x, quantity_milli: 0, unit_amount: 100, gst_code: N-T}]
+    expect: {status: 422, body: {error: "invalid input: line 0: quantity_milli must be from 1 to 10,000,000"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  - name: create rejects negative quantity
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: 14
+        lines: [{description: x, quantity_milli: -1, unit_amount: 100, gst_code: N-T}]
+    expect: {status: 422, body: {error: "invalid input: line 0: quantity_milli must be from 1 to 10,000,000"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  # One over the 10,000,000 bound, which keeps LineAmount's multiplication
+  # from overflowing.
+  - name: create rejects quantity over the bound
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: 14
+        lines: [{description: x, quantity_milli: 10000001, unit_amount: 100, gst_code: N-T}]
+    expect: {status: 422, body: {error: "invalid input: line 0: quantity_milli must be from 1 to 10,000,000"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  - name: create rejects negative unit amount
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: 14
+        lines: [{description: x, quantity_milli: 1000, unit_amount: -1, gst_code: N-T}]
+    expect: {status: 422, body: {error: "invalid input: line 0: unit_amount must be from 0 to 100,000,000,000"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  - name: create rejects unknown gst code
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: 14
+        lines: [{description: x, quantity_milli: 1000, unit_amount: 100, gst_code: VAT}]
+    expect: {status: 422, body: {error: "invalid input: line 0: invalid GST code: \"VAT\""}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  - name: create rejects negative due days
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: -1
+        lines: [{description: x, quantity_milli: 1000, unit_amount: 100, gst_code: N-T}]
+    expect: {status: 422, body: {error: "invalid input: due_in_days must not be negative"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, audit_log]
+
+  # The max corner of both bounds: quantity_milli * unit_amount is exactly
+  # 1e18, still inside int64, so the amount must be exact, not wrapped.
+  - name: create accepts max quantity and unit amount
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invoices
+      body:
+        contact_id: "{c_acme}"
+        source: manual
+        due_in_days: 14
+        lines: [{description: x, quantity_milli: 10000000, unit_amount: 100000000000, gst_code: N-T}]
+    expect:
+      status: 201
+      body:
+        total: 1000000000000000
+        lines: [{amount: 1000000000000000}]
+
+  # A rent invoice needs at least two pay options; acme has none.
+  - name: rent invoice without pay options cannot be issued
+    as: owner
+    request: {method: POST, path: "/api/v1/orgs/acme/invoices/{rent_acme}/issue"}
+    expect: {status: 422, body: {error: "rent and bond invoices need at least 2 payment options"}}
+    unchanged: [invoices, invoice_counters, audit_log]
+
+  - name: rent invoice with bank and PayID can be issued
+    as: paid_owner
+    isolate: true
+    request: {method: POST, path: "/api/v1/orgs/paid/invoices/{rent_paid}/issue"}
+    expect: {status: 200, body: {status: open}}

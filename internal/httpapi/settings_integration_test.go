@@ -116,26 +116,6 @@ func TestSettingsPutThenIssueRent(t *testing.T) {
 	}
 }
 
-// TestSettingsPutNeedsOrgAdmin checks that a staff member (who holds
-// invoices_write/read but not org_admin) is forbidden from changing org
-// settings.
-func TestSettingsPutNeedsOrgAdmin(t *testing.T) {
-	pool := db.TestPool(t)
-	org := webhookTestOrg(t, pool, "acme")
-	userID := webhookTestUser(t, pool, "staff@example.com", "correct-password")
-	webhookTestAddMembership(t, pool, userID, org.ID, auth.Staff)
-	token := settingsTestLogin(t, pool, "staff@example.com", "correct-password")
-
-	handler := newSettingsTestHandler(pool)
-
-	putBody := settingsRequest{Name: "Acme Org", InvoiceLeadDays: 7}
-	putReq := settingsRequestJSON(t, http.MethodPut, "/api/v1/orgs/acme/settings", token, putBody)
-	rr := doSettingsRequest(handler, putReq)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403, body=%s", rr.Code, rr.Body.String())
-	}
-}
-
 func TestSettingsAuditRedactsPaymentDetails(t *testing.T) {
 	pool := db.TestPool(t)
 	org := webhookTestOrg(t, pool, "acme")

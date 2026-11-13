@@ -1,0 +1,18 @@
+# Dashboard sections follow each module's read permission. Every module is
+# enabled (the default).
+seed:
+  orgs: [acme]
+  users:
+    keeper: {org: acme, role: bookkeeper}
+
+cases:
+  # Bookkeeper holds property, timesheets and reports read but none of the
+  # modules' write permissions; a section gated on a write permission would
+  # be missing here.
+  - name: bookkeeper sees every module section
+    as: keeper
+    request: {method: GET, path: /api/v1/orgs/acme/dashboard}
+    expect:
+      status: 200
+      body:
+        modules: {property: {}, timesheets: {}, reconciliation: {}}

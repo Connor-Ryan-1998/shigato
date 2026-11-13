@@ -1,0 +1,176 @@
+# Contact routes: who may create and edit contacts, org isolation and
+# edit validation.
+seed:
+  orgs: [acme, other]
+  users:
+    owner: {org: acme, role: owner}
+    keeper: {org: acme, role: bookkeeper}
+    tenant: {org: acme, role: tenant, contact: c_tenant}
+  contacts:
+    # Same email as the tenant user, so an edit that followed the email to
+    # the login would be caught.
+    c_tenant: {org: acme, kind: tenant, name: Keep, email: tenant@example.com}
+    c_foreign: {org: other, kind: client, name: Foreign}
+
+cases:
+  - name: bookkeeper and tenant cannot create contacts
+    as: [keeper, tenant]
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/contacts
+      body: {kind: client, name: Sneaky}
+    expect: {status: 403}
+    unchanged: [contacts, audit_log]
+
+  - name: anonymous cannot list contacts
+    as: anonymous
+    request: {method: GET, path: /api/v1/orgs/acme/contacts}
+    expect: {status: 401}
+
+  # CSRF is the outermost middleware, so 401 (not 403) proves the runner
+  # sent X-Shigoto-CSRF on an anonymous unsafe request.
+  - name: anonymous cannot create contacts
+    as: anonymous
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/contacts
+      body: {kind: client, name: Anon Client}
+    expect: {status: 401}
+    unchanged: [contacts, audit_log]
+
+  - name: owner creates a contact
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/contacts
+      body: {kind: client, name: New Client}
+    expect:
+      status: 201
+      body: {kind: client, name: New Client}
+
+  # Editing: a foreign, missing or malformed id is a plain 404 that
+  # changes nothing.
+  - name: owner cannot edit a foreign org's contact
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_foreign}"
+      body: {name: Attack}
+    expect: {status: 404, body: {error: not found}}
+    unchanged: [contacts, audit_log]
+
+  - name: owner cannot edit a missing contact
+    as: owner
+    request:
+      method: PUT
+      path: /api/v1/orgs/acme/contacts/99999999
+      body: {name: Attack}
+    expect: {status: 404, body: {error: not found}}
+    unchanged: [contacts, audit_log]
+
+  - name: owner cannot edit a malformed contact id
+    as: owner
+    request:
+      method: PUT
+      path: /api/v1/orgs/acme/contacts/bad
+      body: {name: Attack}
+    expect: {status: 404, body: {error: not found}}
+    unchanged: [contacts, audit_log]
+
+  - name: edit rejects an empty name
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: ""}
+    expect: {status: 422, body: {error: "name is required"}}
+    unchanged: [contacts, audit_log]
+
+  - name: edit rejects a blank name
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: "   "}
+    expect: {status: 422, body: {error: "name is required"}}
+    unchanged: [contacts, audit_log]
+
+  - name: edit rejects an invalid email
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Keep, email: not-email}
+    expect: {status: 422, body: {error: "email must be a valid address without a display name"}}
+    unchanged: [contacts, audit_log]
+
+  - name: edit rejects a display-name email
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Keep, email: "Person <person@example.com>"}
+    expect: {status: 422, body: {error: "email must be a valid address without a display name"}}
+    unchanged: [contacts, audit_log]
+
+  # kind and provider_customer_ref are not editable fields at all.
+  - name: edit rejects changing kind
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Keep, kind: supplier}
+    expect: {status: 400, body: {error: "invalid request body"}}
+    unchanged: [contacts, audit_log]
+
+  - name: edit rejects changing the provider reference
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Keep, provider_customer_ref: cus_attack}
+    expect: {status: 400, body: {error: "invalid request body"}}
+    unchanged: [contacts, audit_log]
+
+  - name: bookkeeper and tenant cannot edit contacts
+    as: [keeper, tenant]
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Attack}
+    expect: {status: 403}
+    unchanged: [contacts, audit_log]
+
+  - name: anonymous cannot edit contacts
+    as: anonymous
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Attack}
+    expect: {status: 401}
+    unchanged: [contacts, audit_log]
+
+  - name: edit without the CSRF header is refused
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Attack}
+      headers: {X-Shigoto-CSRF: ""}
+    expect: {status: 403}
+    unchanged: [contacts, audit_log]
+
+  # Editing a tenant contact's email must not move the linked portal
+  # user's login identity or membership.
+  - name: owner edits a contact without touching its portal identity
+    as: owner
+    isolate: true
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/contacts/{c_tenant}"
+      body: {name: Updated, email: new@example.com}
+    expect:
+      status: 200
+      body: {id: "{c_tenant}", kind: tenant, name: Updated, email: new@example.com}
+    unchanged: [users, memberships]

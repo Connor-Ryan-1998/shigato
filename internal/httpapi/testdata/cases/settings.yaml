@@ -1,0 +1,18 @@
+# Org settings routes. The full role/org matrix for PUT /settings lives in
+# security.yaml; this file holds settings-specific cases.
+seed:
+  orgs: [acme]
+  users:
+    staff: {org: acme, role: staff}
+
+cases:
+  # Staff holds invoices_write but not org_admin. The body is valid, so a
+  # 403 here is the permission check, not validation.
+  - name: staff cannot change org settings
+    as: staff
+    request:
+      method: PUT
+      path: /api/v1/orgs/acme/settings
+      body: {name: Acme Org, invoice_lead_days: 7}
+    expect: {status: 403, body: {error: forbidden}}
+    unchanged: [orgs, audit_log]

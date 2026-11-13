@@ -1,0 +1,155 @@
+# Member and invite routes: who may invite, last-owner protection, org
+# isolation and invite acceptance failures. Multi-step invite flows (create
+# then accept, single use, emailed links) stay in members_integration_test.go.
+seed:
+  orgs: [acme, solo, beta]
+  users:
+    owner: {org: acme, role: owner}
+    owner2: {org: acme, role: owner}
+    staff: {org: acme, role: staff}
+    keeper: {org: acme, role: bookkeeper}
+    tenant: {org: acme, role: tenant, contact: c_tenant}
+    solo_owner: {org: solo, role: owner}
+    beta_owner: {org: beta, role: owner}
+    beta_staff: {org: beta, role: staff}
+  contacts:
+    c_tenant: {org: acme, kind: tenant, name: Tina Tenant}
+  invites:
+    iv_beta: {org: beta, email: betainvitee@example.com, role: staff, token: beta-invite-token}
+    iv_expired: {org: acme, email: expired@example.com, role: staff, token: expired-invite-token, expired: true}
+    iv_new: {org: acme, email: invitee@example.com, role: staff, token: new-user-invite-token}
+    # beta_owner@example.com already has an account (in beta).
+    iv_existing: {org: acme, email: beta_owner@example.com, role: staff, token: existing-user-invite-token}
+
+cases:
+  # solo has exactly one owner.
+  - name: last owner cannot be demoted
+    as: solo_owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/solo/members/{solo_owner}"
+      body: {role: staff}
+    expect: {status: 409, body: {error: "an organisation needs at least one owner"}}
+    unchanged: [memberships, audit_log]
+
+  - name: last owner cannot be removed
+    as: solo_owner
+    request: {method: DELETE, path: "/api/v1/orgs/solo/members/{solo_owner}"}
+    expect: {status: 409, body: {error: "an organisation needs at least one owner"}}
+    unchanged: [memberships, audit_log]
+
+  - name: owner can be demoted while a second owner remains
+    as: owner
+    isolate: true
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/members/{owner}"
+      body: {role: staff}
+    expect: {status: 204}
+
+  - name: owner cannot change a foreign org's member
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/members/{beta_staff}"
+      body: {role: staff}
+    expect: {status: 404, body: {error: not found}}
+    unchanged: [memberships, audit_log]
+
+  - name: owner cannot remove a foreign org's member
+    as: owner
+    request: {method: DELETE, path: "/api/v1/orgs/acme/members/{beta_staff}"}
+    expect: {status: 404, body: {error: not found}}
+    unchanged: [memberships, audit_log]
+
+  # Portal roles are tied to a contact; they cannot become staff roles.
+  - name: owner cannot give a portal member a staff role
+    as: owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/members/{tenant}"
+      body: {role: staff}
+    expect: {status: 409, body: {error: "this member's role is managed through portal access, not here"}}
+    unchanged: [memberships, audit_log]
+
+  - name: non-owners cannot invite
+    as: [staff, keeper, tenant]
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invites
+      body: {email: nope@example.com, role: staff}
+    expect: {status: 403, body: {error: forbidden}}
+    unchanged: [invites, audit_log]
+
+  - name: invite rejects an invalid email
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invites
+      body: {email: not-an-email, role: staff}
+    expect: {status: 422, body: {error: "email is not a valid address"}}
+    unchanged: [invites, audit_log]
+
+  - name: invite rejects an existing member
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invites
+      body: {email: staff@example.com, role: bookkeeper}
+    expect: {status: 409, body: {error: "this person is already a member of this organisation"}}
+    unchanged: [invites, audit_log]
+
+  # With no mailer configured the invite is created, link-only.
+  - name: invite without a mailer is not emailed
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/invites
+      body: {email: nomailer@example.com, role: staff}
+    expect: {status: 201, body: {emailed: false}}
+
+  - name: owner cannot revoke a foreign org's invite
+    as: owner
+    request: {method: DELETE, path: "/api/v1/orgs/acme/invites/{iv_beta}"}
+    expect: {status: 404, body: {error: not found}}
+    unchanged: [invites, audit_log]
+
+  - name: expired invite details say expired
+    as: anonymous
+    request: {method: GET, path: /api/v1/invites/expired-invite-token}
+    expect: {status: 200, body: {email: expired@example.com, expired: true}}
+
+  - name: expired invite cannot be accepted
+    as: anonymous
+    request:
+      method: POST
+      path: /api/v1/invites/expired-invite-token/accept
+      body: {name: Late, password: a-very-long-password}
+    expect: {status: 410, body: {error: "this invite has already been used or has expired"}}
+    unchanged: [invites, users, memberships, audit_log]
+
+  # A failed accept rolls back, so the invite stays unused and acceptable.
+  - name: signed-in user with another email cannot accept
+    as: beta_owner
+    request: {method: POST, path: /api/v1/invites/new-user-invite-token/accept}
+    expect: {status: 409, body: {error: "this invite is for a different email address"}}
+    unchanged: [invites, users, memberships, audit_log]
+
+  - name: anonymous accept for an existing account is refused
+    as: anonymous
+    request:
+      method: POST
+      path: /api/v1/invites/existing-user-invite-token/accept
+      body: {name: Existing, password: a-very-long-password}
+    expect: {status: 409, body: {error: "sign in first, then open the link again"}}
+    unchanged: [invites, users, memberships, audit_log]
+
+  - name: accept rejects a short password
+    as: anonymous
+    request:
+      method: POST
+      path: /api/v1/invites/new-user-invite-token/accept
+      body: {name: Short, password: too-short}
+    expect: {status: 422, body: {error: "password must be at least 12 characters"}}
+    unchanged: [invites, users, memberships, audit_log]

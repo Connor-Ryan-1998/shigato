@@ -41,7 +41,7 @@ type File struct {
 
 // Seed is the data created before a file's cases run. Every map key is a
 // seed name; names are unique across Users, Contacts, Invoices, Properties,
-// Leases and Projects and resolve to row IDs in `{name}` tokens.
+// Leases, Projects and Invites and resolve to row IDs in `{name}` tokens.
 type Seed struct {
 	Orgs       []string                `yaml:"orgs"`
 	Modules    map[string]bool         `yaml:"modules"` // nil: all enabled
@@ -51,6 +51,7 @@ type Seed struct {
 	Properties map[string]SeedProperty `yaml:"properties"`
 	Leases     map[string]SeedLease    `yaml:"leases"`
 	Projects   map[string]SeedProject  `yaml:"projects"`
+	Invites    map[string]SeedInvite   `yaml:"invites"`
 	Settings   map[string]SeedSettings `yaml:"settings"` // key is the org slug
 }
 
@@ -100,6 +101,18 @@ type SeedLease struct {
 type SeedProject struct {
 	Org    string `yaml:"org"`
 	Client string `yaml:"client"`
+}
+
+// SeedInvite is an outstanding staff invite to Org for Email with Role.
+// Token is the plaintext invite token, written literally into accept paths
+// (`/api/v1/invites/<token>`); it must be unique within the file. Expired
+// makes the invite already past its expiry.
+type SeedInvite struct {
+	Org     string `yaml:"org"`
+	Email   string `yaml:"email"`
+	Role    string `yaml:"role"`
+	Token   string `yaml:"token"`
+	Expired bool   `yaml:"expired"`
 }
 
 // SeedSettings sets org flags directly.
@@ -164,6 +177,8 @@ var methods = []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
 
 var roles = []string{"owner", "staff", "bookkeeper", "tenant", "client"}
 
+var inviteRoles = []string{"owner", "staff", "bookkeeper"}
+
 // Load reads and strictly decodes path (unknown keys fail), then validates it.
 func Load(path string) (File, error) {
 	data, err := os.ReadFile(path)
@@ -200,6 +215,7 @@ func (s Seed) seedNames() map[string]string {
 	add("properties", sortedKeys(s.Properties))
 	add("leases", sortedKeys(s.Leases))
 	add("projects", sortedKeys(s.Projects))
+	add("invites", sortedKeys(s.Invites))
 	return names
 }
 
@@ -246,6 +262,7 @@ func (f File) Validate() error {
 		{"properties", sortedKeys(s.Properties)},
 		{"leases", sortedKeys(s.Leases)},
 		{"projects", sortedKeys(s.Projects)},
+		{"invites", sortedKeys(s.Invites)},
 	} {
 		for _, k := range group.keys {
 			if prev, dup := seen[k]; dup {
@@ -325,6 +342,26 @@ func (f File) Validate() error {
 		where := "projects." + name
 		checkOrg(where, p.Org)
 		checkContact(where, "client", p.Client, p.Org)
+	}
+	tokens := map[string]string{}
+	for _, name := range sortedKeys(s.Invites) {
+		inv := s.Invites[name]
+		where := "invites." + name
+		checkOrg(where, inv.Org)
+		if inv.Email == "" {
+			seedErr("%s: email is required", where)
+		}
+		if !slices.Contains(inviteRoles, inv.Role) {
+			seedErr("%s: role %q must be one of %s", where, inv.Role, strings.Join(inviteRoles, ", "))
+		}
+		switch prev, dup := tokens[inv.Token]; {
+		case inv.Token == "":
+			seedErr("%s: token is required", where)
+		case dup:
+			seedErr("%s: token %q is already used by invites.%s", where, inv.Token, prev)
+		default:
+			tokens[inv.Token] = name
+		}
 	}
 	for _, org := range sortedKeys(s.Settings) {
 		checkOrg("settings."+org, org)

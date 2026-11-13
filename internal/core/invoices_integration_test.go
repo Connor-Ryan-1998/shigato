@@ -1,8 +1,8 @@
 //go:build integration
 
 // Package core_test exercises core's invoice/payment flows, plus tests that
-// go through the real HTTP handlers (for the cross-org 404, validation and
-// the QLD pay-options rule) via testkit, which imports httpapi and so needs
+// go through the real HTTP handlers (zero-total issue and Stripe as a
+// pay option) via testkit, which imports httpapi and so needs
 // an external test package to avoid an import cycle.
 package core_test
 
@@ -429,24 +429,11 @@ func TestCreateDraftInvoiceStoresPropertyID(t *testing.T) {
 	}
 }
 
-func TestCrossOrgInvoice404(t *testing.T) {
-	e := testkit.New(t)
-	orgA := e.Org("org-a")
-	orgB := e.Org("org-b")
-	contactA := e.Contact(orgA).ID
-	invID := e.Invoice(orgA, contactA, testkit.Issued(time.Now())).ID
-
-	owner := e.User("owner-b@example.com")
-	e.Member(owner, orgB, auth.Owner)
-
-	rr := e.Login(owner, e.Handler()).Do(http.MethodGet, fmt.Sprintf("/api/v1/orgs/org-b/invoices/%d", invID), nil)
-
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404, body=%s", rr.Code, rr.Body)
-	}
-}
-
-func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
+// TestRentInvoiceStripeCountsAsPayOption checks that configured Stripe
+// keys count toward a rent invoice's two pay options: bank details plus
+// Stripe clear the bar. The no-options 422 and the bank-plus-PayID 200 are
+// cases in internal/httpapi/testdata/cases/invoices.yaml.
+func TestRentInvoiceStripeCountsAsPayOption(t *testing.T) {
 	e := testkit.New(t)
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
@@ -454,36 +441,10 @@ func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
 	owner := e.User("owner@example.com")
 	e.Member(owner, org, auth.Owner)
 
-	// testkit's handler GetEnv returns "" for everything: os.Getenv would
-	// let a Stripe env var set in the test runner's own shell silently
-	// change which pay-options branch this test exercises.
-	s := e.Login(owner, e.Handler())
-
-	issueDraft := func(source string) testkit.Response {
-		draftID := e.Invoice(org, contactID, testkit.Source(source)).ID
-		return s.Do(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil)
-	}
-
-	// No bank, no PayID, no Stripe config: fewer than 2 pay options.
-	if rr := issueDraft("rent"); rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("issue with no pay options: status = %d, want 422, body=%s", rr.Code, rr.Body)
-	}
-
-	// Bank details plus a PayID: 2 pay options.
-	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2, payid=$3 WHERE id=$4",
-		"062-000", "12345678", "owner@payid.example", org.ID); err != nil {
-		t.Fatalf("updating org bank details: %v", err)
-	}
-
-	if rr := issueDraft("rent"); rr.Code != http.StatusOK {
-		t.Fatalf("issue with bank + PayID: status = %d, want 200, body=%s", rr.Code, rr.Body)
-	}
-
-	// Drop back to one pay option (no bank/PayID), but add Stripe keys:
-	// bank details + Stripe keys configured should also clear the bar.
-	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2, payid=NULL WHERE id=$3",
+	// Bank details only: one pay option without Stripe.
+	if _, err := pool.Exec(ctx, "UPDATE orgs SET bank_bsb=$1, bank_account=$2 WHERE id=$3",
 		"062-000", "12345678", org.ID); err != nil {
-		t.Fatalf("clearing org payid: %v", err)
+		t.Fatalf("updating org bank details: %v", err)
 	}
 	getenv := func(key string) string {
 		switch key {
@@ -499,127 +460,40 @@ func TestRentInvoiceNeedsTwoPayOptions(t *testing.T) {
 	// Stripe credentials; the issue route's automatic send afterwards
 	// goes through the handler's Payments, which is overridden here to a Fake so
 	// this test makes no real network call to Stripe.
-	s = e.Login(owner, e.Handler(
+	s := e.Login(owner, e.Handler(
 		testkit.GetEnv(getenv),
 		testkit.Payments(func(string) (payments.Provider, error) { return &payments.Fake{Secret: "whsec_test_dummy"}, nil }),
 	))
 
-	if rr := issueDraft("rent"); rr.Code != http.StatusOK {
+	draftID := e.Invoice(org, contactID, testkit.Source("rent")).ID
+	if rr := s.Do(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil); rr.Code != http.StatusOK {
 		t.Fatalf("issue with bank details + Stripe keys configured: status = %d, want 200, body=%s", rr.Code, rr.Body)
 	}
 }
 
-// TestInvoiceValidation422 covers the invalid inputs creating and issuing
-// an invoice must reject with 422 rather than persist.
-func TestInvoiceValidation422(t *testing.T) {
+// TestIssueZeroTotalInvoice422 checks that a zero-total draft can be
+// created but not issued: there's nothing to collect, and a provider would
+// reject (or zero-pay) it. The create-time validation 422s are cases in
+// internal/httpapi/testdata/cases/invoices.yaml.
+func TestIssueZeroTotalInvoice422(t *testing.T) {
 	e := testkit.New(t)
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
 	owner := e.User("owner@example.com")
 	e.Member(owner, org, auth.Owner)
-
 	s := e.Login(owner, e.Handler())
-	post := func(path, body string) testkit.Response {
-		return s.Do(http.MethodPost, path, strings.NewReader(body))
+
+	draftID := e.Invoice(org, contactID, testkit.Amount(0)).ID
+	if rr := s.Do(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), nil); rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body)
 	}
-
-	okLine := `{"description":"x","quantity_milli":1000,"unit_amount":100,"gst_code":"GST"}`
-	cases := []struct {
-		name, lines string
-		dueInDays   int
-	}{
-		{"empty lines", ``, 14},
-		{"zero quantity", `{"description":"x","quantity_milli":0,"unit_amount":100,"gst_code":"GST"}`, 14},
-		{"negative quantity", `{"description":"x","quantity_milli":-1,"unit_amount":100,"gst_code":"GST"}`, 14},
-		{"negative unit_amount", `{"description":"x","quantity_milli":1000,"unit_amount":-1,"gst_code":"GST"}`, 14},
-		{"bad gst_code", `{"description":"x","quantity_milli":1000,"unit_amount":100,"gst_code":"VAT"}`, 14},
-		{"negative due_in_days", okLine, -1},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"contact_id":%d,"source":"manual","due_in_days":%d,"lines":[%s]}`, contactID, tc.dueInDays, tc.lines)
-			if rr := post("/api/v1/orgs/acme/invoices", body); rr.Code != http.StatusUnprocessableEntity {
-				t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body)
-			}
-		})
-	}
-
-	// A zero-total draft can be created but not issued: there's nothing to
-	// collect, and a provider would reject (or zero-pay) it.
-	t.Run("issue zero total", func(t *testing.T) {
-		// Build through a copy of e bound to the subtest's t, so a setup
-		// failure stops this subtest rather than its parent.
-		se := *e
-		se.T = t
-		draftID := se.Invoice(org, contactID, testkit.Amount(0)).ID
-		if rr := post(fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/issue", draftID), ""); rr.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422, body=%s", rr.Code, rr.Body)
-		}
-		inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
-		if err != nil {
-			t.Fatalf("GetInvoice: %v", err)
-		}
-		if inv.Status != "draft" || inv.Number != nil {
-			t.Fatalf("status=%s number=%v, want draft with no number", inv.Status, inv.Number)
-		}
-	})
-}
-
-// TestCreateDraftRejectsHugeQuantity covers CreateDraftInvoice's upper
-// quantity_milli bound: one over 10,000,000 is rejected rather than
-// risking LineAmount's multiplication overflowing.
-func TestCreateDraftRejectsHugeQuantity(t *testing.T) {
-	e := testkit.New(t)
-	pool, ctx := e.Pool, e.Ctx
-	org := e.Org("acme")
-	contactID := e.Contact(org).ID
-
-	_, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
-		ContactID: contactID,
-		Source:    "manual",
-		DueInDays: 14,
-		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: 10_000_001, UnitAmount: 100, GSTCode: "N-T"},
-		},
-	})
-	if !errors.Is(err, core.ErrInvalidInput) {
-		t.Fatalf("err = %v, want ErrInvalidInput", err)
-	}
-}
-
-// TestCreateDraftAcceptsMaxQuantityAndUnitAmount covers the max corner of
-// both bounds at once (quantity_milli 10,000,000, unit_amount
-// 100,000,000,000): LineAmount's intermediate quantityMilli*unit
-// multiplication is exactly 1e18, within int64 range, so it must compute
-// the correct amount rather than silently wrapping.
-func TestCreateDraftAcceptsMaxQuantityAndUnitAmount(t *testing.T) {
-	e := testkit.New(t)
-	pool, ctx := e.Pool, e.Ctx
-	org := e.Org("acme")
-	contactID := e.Contact(org).ID
-
-	const quantityMilli = 10_000_000
-	const unitAmount = 100_000_000_000
-	// LineAmount = quantityMilli * unit / 1000 (exact, no rounding needed).
-	const wantAmount = quantityMilli * unitAmount / 1000
-
-	inv, err := core.CreateDraftInvoice(ctx, pool, org.ID, core.NewInvoice{
-		ContactID: contactID,
-		Source:    "manual",
-		DueInDays: 14,
-		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: quantityMilli, UnitAmount: unitAmount, GSTCode: "N-T"},
-		},
-	})
+	inv, err := core.GetInvoice(ctx, pool, org.ID, draftID)
 	if err != nil {
-		t.Fatalf("CreateDraftInvoice: %v", err)
+		t.Fatalf("GetInvoice: %v", err)
 	}
-	if len(inv.Lines) != 1 || inv.Lines[0].Amount != core.Cents(wantAmount) {
-		t.Fatalf("line amount = %v, want %d (no overflow)", inv.Lines, wantAmount)
-	}
-	if inv.Total != core.Cents(wantAmount) {
-		t.Fatalf("total = %d, want %d", inv.Total, wantAmount)
+	if inv.Status != "draft" || inv.Number != nil {
+		t.Fatalf("status=%s number=%v, want draft with no number", inv.Status, inv.Number)
 	}
 }
 
