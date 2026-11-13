@@ -127,6 +127,14 @@ func (e *Env) Anonymous(h http.Handler) Session {
 	return Session{env: e, h: h}
 }
 
+// Resume returns a Session that sends the existing session token to h and
+// reports failures to e.T. It lets a subtest reuse a session started under
+// its parent without failing the parent from the subtest's goroutine. An
+// empty token is anonymous.
+func (e *Env) Resume(token string, h http.Handler) Session {
+	return Session{Token: token, env: e, h: h}
+}
+
 // Response is a recorded HTTP response.
 type Response struct {
 	Code   int
@@ -147,6 +155,14 @@ func (r Response) JSON(v any) {
 // unless the session is anonymous. body is JSON-encoded unless it is nil or
 // an io.Reader, which is sent as-is.
 func (s Session) Do(method, path string, body any) Response {
+	s.env.T.Helper()
+	return s.DoWith(method, path, body, nil)
+}
+
+// DoWith is Do plus extra request headers, set after the defaults so they
+// can override Content-Type or X-Shigoto-CSRF. An empty value deletes the
+// header.
+func (s Session) DoWith(method, path string, body any, headers map[string]string) Response {
 	t := s.env.T
 	t.Helper()
 	var reader io.Reader
@@ -165,6 +181,13 @@ func (s Session) Do(method, path string, body any) Response {
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Shigoto-CSRF", "1")
+	for k, v := range headers {
+		if v == "" {
+			req.Header.Del(k)
+			continue
+		}
+		req.Header.Set(k, v)
+	}
 	if s.Token != "" {
 		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: s.Token})
 	}

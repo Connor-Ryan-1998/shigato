@@ -67,6 +67,49 @@ func TestAnonymousGets401(t *testing.T) {
 	}
 }
 
+func TestDoWithOverridesDefaultHeaders(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	s := e.Login(owner, e.Handler())
+	body := map[string]any{"kind": "client", "name": "X"}
+
+	if r := s.DoWith(http.MethodPost, "/api/v1/orgs/acme/contacts", body, map[string]string{"X-Shigoto-CSRF": ""}); r.Code != http.StatusForbidden {
+		t.Fatalf("POST without CSRF = %d, want 403; body %s", r.Code, r.Body)
+	}
+	if r := s.DoWith(http.MethodPost, "/api/v1/orgs/acme/contacts", body, map[string]string{"Origin": "https://evil.example"}); r.Code != http.StatusForbidden {
+		t.Fatalf("POST with foreign Origin = %d, want 403; body %s", r.Code, r.Body)
+	}
+	if n := e.Count("contacts", ""); n != 0 {
+		t.Fatalf("rejected POSTs left %d contacts", n)
+	}
+	if r := s.DoWith(http.MethodPost, "/api/v1/orgs/acme/contacts", body, nil); r.Code != http.StatusCreated {
+		t.Fatalf("POST with default headers = %d, want 201; body %s", r.Code, r.Body)
+	}
+}
+
+func TestResumeReusesSessionToken(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	owner := e.User("owner@example.com")
+	e.Member(owner, org, auth.Owner)
+	h := e.Handler()
+	s := e.Login(owner, h)
+
+	t.Run("child", func(t *testing.T) {
+		child := *e
+		child.T = t
+		r := child.Resume(s.Token, h).Do(http.MethodGet, "/api/v1/orgs/acme/contacts", nil)
+		if r.Code != http.StatusOK {
+			t.Fatalf("resumed GET contacts = %d, want 200; body %s", r.Code, r.Body)
+		}
+		if r := child.Resume("", h).Do(http.MethodGet, "/api/v1/orgs/acme/contacts", nil); r.Code != http.StatusUnauthorized {
+			t.Fatalf("empty-token GET contacts = %d, want 401", r.Code)
+		}
+	})
+}
+
 func TestModulesOptionDisables(t *testing.T) {
 	e := testkit.New(t)
 	org := e.Org("acme")
