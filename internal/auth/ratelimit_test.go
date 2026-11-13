@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,5 +246,28 @@ func TestIPRateLimitKey(t *testing.T) {
 				t.Errorf("ipRateLimitKey(%q) = %q, want %q", c.ip, got, c.want)
 			}
 		})
+	}
+}
+
+// TestLoginRateLimitRetryAfterCoversBothKeys checks LoginHandler reports the
+// later of the email and IP keys' Retry-After when both are blocked. It
+// never reaches the database, so it runs as a unit test.
+func TestLoginRateLimitRetryAfterCoversBothKeys(t *testing.T) {
+	now := time.Now()
+	a := New(nil, false, WithClock(func() time.Time { return now }))
+	for i := 0; i < loginEmailLimit; i++ {
+		a.limiter.Allow("email:blocked@example.com", loginEmailLimit, loginWindow)
+	}
+	now = now.Add(time.Minute)
+	for i := 0; i < loginIPLimit; i++ {
+		a.limiter.Allow("ip:192.0.2.5", loginIPLimit, loginWindow)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
+		strings.NewReader(`{"email":"blocked@example.com","password":"wrong-password"}`))
+	req.RemoteAddr = "192.0.2.5:12345"
+	a.LoginHandler(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "900" {
+		t.Fatalf("status=%d Retry-After=%q, want 429 and 900", rr.Code, rr.Header().Get("Retry-After"))
 	}
 }

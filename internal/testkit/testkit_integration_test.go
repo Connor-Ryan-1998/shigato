@@ -408,3 +408,20 @@ func TestInviteTokenResolves(t *testing.T) {
 		}
 	}
 }
+
+func TestResponseCookiesParsesSetCookie(t *testing.T) {
+	e := testkit.New(t)
+	e.User("staffer@example.com", testkit.WithPassword("correct-password"))
+	r := e.Anonymous(e.Handler()).Do(http.MethodPost, "/api/v1/auth/login",
+		map[string]string{"email": "staffer@example.com", "password": "correct-password"})
+	if r.Code != http.StatusNoContent {
+		t.Fatalf("login = %d, body %s", r.Code, r.Body)
+	}
+	cookies := r.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != auth.SessionCookieName || cookies[0].Value == "" {
+		t.Fatalf("Cookies() = %+v, want one non-empty %s cookie", cookies, auth.SessionCookieName)
+	}
+	if got := (testkit.Response{}).Cookies(); len(got) != 0 {
+		t.Fatalf("Cookies() of a response with no headers = %+v, want none", got)
+	}
+}

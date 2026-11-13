@@ -1,9 +1,8 @@
 //go:build integration
 
-package auth
+package auth_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,73 +11,34 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"shigoto/internal/core"
-	"shigoto/internal/db"
+	"shigoto/internal/auth"
+	"shigoto/internal/testkit"
 )
 
-func createTestOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
-	t.Helper()
-	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
-	if err != nil {
-		t.Fatalf("CreateOrg(%s): %v", slug, err)
-	}
-	return org
-}
-
-func createTestUser(t *testing.T, pool *pgxpool.Pool, email, password string) int64 {
-	t.Helper()
-	hash, err := HashPassword(password)
-	if err != nil {
-		t.Fatalf("hashPassword: %v", err)
-	}
-	var userID int64
-	err = pool.QueryRow(context.Background(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
-		email, email, hash,
-	).Scan(&userID)
-	if err != nil {
-		t.Fatalf("inserting user %s: %v", email, err)
-	}
-	return userID
-}
-
-func addMembership(t *testing.T, pool *pgxpool.Pool, userID, orgID int64, role Role) {
-	t.Helper()
-	_, err := pool.Exec(context.Background(),
-		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)",
-		userID, orgID, string(role),
-	)
-	if err != nil {
-		t.Fatalf("adding membership: %v", err)
-	}
-}
-
 func TestLoginWrongPasswordGeneric(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
 
-	createTestUser(t, pool, "known@example.com", "correct-password")
+	e.User("known@example.com", testkit.WithPassword("correct-password"))
 
-	_, err1 := Login(ctx, pool, "known@example.com", "wrong-password")
-	_, err2 := Login(ctx, pool, "unknown@example.com", "whatever-password")
+	_, err1 := auth.Login(ctx, pool, "known@example.com", "wrong-password")
+	_, err2 := auth.Login(ctx, pool, "unknown@example.com", "whatever-password")
 
-	if err1 != ErrInvalidCredentials {
+	if err1 != auth.ErrInvalidCredentials {
 		t.Errorf("wrong password: err = %v, want ErrInvalidCredentials", err1)
 	}
-	if err2 != ErrInvalidCredentials {
+	if err2 != auth.ErrInvalidCredentials {
 		t.Errorf("unknown email: err = %v, want ErrInvalidCredentials", err2)
 	}
 }
 
 func TestLoginSucceedsAndLogoutRevokes(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
 
-	createTestUser(t, pool, "staffer@example.com", "correct-password")
+	e.User("staffer@example.com", testkit.WithPassword("correct-password"))
 
-	token, err := Login(ctx, pool, "staffer@example.com", "correct-password")
+	token, err := auth.Login(ctx, pool, "staffer@example.com", "correct-password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -86,44 +46,50 @@ func TestLoginSucceedsAndLogoutRevokes(t *testing.T) {
 		t.Fatal("Login returned empty token")
 	}
 
-	if _, err := userIDForToken(ctx, pool, token); err != nil {
+	if _, err := auth.UserIDForToken(ctx, pool, token); err != nil {
 		t.Fatalf("session should be valid right after login: %v", err)
 	}
 
-	if err := Logout(ctx, pool, token); err != nil {
+	if err := auth.Logout(ctx, pool, token); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 
-	if _, err := userIDForToken(ctx, pool, token); err == nil {
+	if _, err := auth.UserIDForToken(ctx, pool, token); err == nil {
 		t.Fatal("session should be gone after logout")
 	}
 }
 
-func TestExpiredSession401(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
+// probeMux mounts a RequireOrg(PermReportsRead) probe route on a, so a test
+// can check whether a session token still authenticates.
+func probeMux(a *auth.Auth) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/orgs/{org}/probe", a.RequireOrg(auth.PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	return mux
+}
 
-	org := createTestOrg(t, pool, "acme")
-	userID := createTestUser(t, pool, "owner@example.com", "correct-password")
-	addMembership(t, pool, userID, org.ID, Owner)
+func TestExpiredSession401(t *testing.T) {
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+
+	org := e.Org("acme")
+	owner := e.User("owner@example.com", testkit.WithPassword("correct-password"))
+	e.Member(owner, org, auth.Owner)
 
 	token := "expiredtoken0000000000000000000000000000000000000000000000000"
 	_, err := pool.Exec(ctx,
 		"INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() - interval '1 hour')",
-		hashToken(token), userID,
+		auth.HashToken(token), owner.ID,
 	)
 	if err != nil {
 		t.Fatalf("inserting expired session: %v", err)
 	}
 
-	a := New(pool, false)
-	mux := http.NewServeMux()
-	mux.Handle("/api/v1/orgs/{org}/probe", a.RequireOrg(PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})))
+	mux := probeMux(auth.New(pool, false))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/probe", nil)
-	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -133,10 +99,10 @@ func TestExpiredSession401(t *testing.T) {
 }
 
 func TestLoginHandlerSetsSecureCookieOnlyWhenConfigured(t *testing.T) {
-	pool := db.TestPool(t)
-	createTestUser(t, pool, "staffer@example.com", "correct-password")
+	e := testkit.New(t)
+	e.User("staffer@example.com", testkit.WithPassword("correct-password"))
 
-	a := New(pool, true)
+	a := auth.New(e.Pool, true)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
 		strings.NewReader(`{"email":"staffer@example.com","password":"correct-password"}`))
 	rr := httptest.NewRecorder()
@@ -147,8 +113,8 @@ func TestLoginHandlerSetsSecureCookieOnlyWhenConfigured(t *testing.T) {
 	}
 
 	cookies := rr.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != SessionCookieName {
-		t.Fatalf("cookies = %+v, want one %s cookie", cookies, SessionCookieName)
+	if len(cookies) != 1 || cookies[0].Name != auth.SessionCookieName {
+		t.Fatalf("cookies = %+v, want one %s cookie", cookies, auth.SessionCookieName)
 	}
 	if !cookies[0].Secure {
 		t.Error("cookie should be Secure when secureCookies is true")
@@ -169,13 +135,13 @@ func loginRequest(email, password string) *http.Request {
 // TestLoginRateLimitedByEmail checks global-constraints.md's "at most 5
 // failed logins per email per 15 minutes": a 6th attempt (even with the
 // correct password) is 429'd, and the limit lifts once the window has
-// passed.
+// passed. It is the test that the login endpoint is wired to the limiter.
 func TestLoginRateLimitedByEmail(t *testing.T) {
-	pool := db.TestPool(t)
-	createTestUser(t, pool, "ratelimited@example.com", "correct-password")
+	e := testkit.New(t)
+	e.User("ratelimited@example.com", testkit.WithPassword("correct-password"))
 
 	now := time.Now()
-	a := New(pool, false, WithClock(func() time.Time { return now }))
+	a := auth.New(e.Pool, false, auth.WithClock(func() time.Time { return now }))
 
 	for i := 0; i < 5; i++ {
 		rr := httptest.NewRecorder()
@@ -217,10 +183,10 @@ func TestLoginRateLimitedByEmail(t *testing.T) {
 // RemoteAddr (httptest.NewRequest's default), get a 21st attempt 429'd
 // regardless of which email it names.
 func TestLoginRateLimitedByIP(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
 
 	now := time.Now()
-	a := New(pool, false, WithClock(func() time.Time { return now }))
+	a := auth.New(e.Pool, false, auth.WithClock(func() time.Time { return now }))
 
 	for i := 0; i < 20; i++ {
 		rr := httptest.NewRecorder()
@@ -246,11 +212,11 @@ func TestLoginRateLimitedByIP(t *testing.T) {
 // doesn't zero out the counter - so the failures on both sides of it still
 // add up to the limit.
 func TestLoginSuccessDoesNotResetRateLimit(t *testing.T) {
-	pool := db.TestPool(t)
-	createTestUser(t, pool, "resets-nothing@example.com", "correct-password")
+	e := testkit.New(t)
+	e.User("resets-nothing@example.com", testkit.WithPassword("correct-password"))
 
 	now := time.Now()
-	a := New(pool, false, WithClock(func() time.Time { return now }))
+	a := auth.New(e.Pool, false, auth.WithClock(func() time.Time { return now }))
 
 	for i := 0; i < 4; i++ {
 		rr := httptest.NewRecorder()
@@ -286,10 +252,10 @@ func TestLoginSuccessDoesNotResetRateLimit(t *testing.T) {
 // key is built from the lowercased address, so varying the case of repeated
 // failed attempts can't be used to dodge the limit.
 func TestLoginRateLimitEmailIsCaseInsensitive(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
 
 	now := time.Now()
-	a := New(pool, false, WithClock(func() time.Time { return now }))
+	a := auth.New(e.Pool, false, auth.WithClock(func() time.Time { return now }))
 
 	emails := []string{
 		"Mixed-Case@Example.com",
@@ -314,17 +280,17 @@ func TestLoginRateLimitEmailIsCaseInsensitive(t *testing.T) {
 }
 
 func TestLoginEmailBlockedAttemptsCountAgainstIP(t *testing.T) {
-	pool := db.TestPool(t)
+	e := testkit.New(t)
 	now := time.Now()
-	a := New(pool, false, WithClock(func() time.Time { return now }))
-	for i := 0; i < loginEmailLimit; i++ {
+	a := auth.New(e.Pool, false, auth.WithClock(func() time.Time { return now }))
+	for i := 0; i < auth.LoginEmailLimit; i++ {
 		rr := httptest.NewRecorder()
 		a.LoginHandler(rr, loginRequest("blocked@example.com", "wrong-password"))
 		if rr.Code != http.StatusUnauthorized {
 			t.Fatalf("prime email attempt %d: %d", i, rr.Code)
 		}
 	}
-	for i := 0; i < loginIPLimit; i++ {
+	for i := 0; i < auth.LoginIPLimit; i++ {
 		req := loginRequest("blocked@example.com", "wrong-password")
 		req.RemoteAddr = "192.0.2.5:12345"
 		rr := httptest.NewRecorder()
@@ -342,42 +308,23 @@ func TestLoginEmailBlockedAttemptsCountAgainstIP(t *testing.T) {
 	}
 }
 
-func TestLoginRateLimitRetryAfterCoversBothKeys(t *testing.T) {
-	now := time.Now()
-	a := New(nil, false, WithClock(func() time.Time { return now }))
-	for i := 0; i < loginEmailLimit; i++ {
-		a.limiter.Allow("email:blocked@example.com", loginEmailLimit, loginWindow)
-	}
-	now = now.Add(time.Minute)
-	for i := 0; i < loginIPLimit; i++ {
-		a.limiter.Allow("ip:192.0.2.5", loginIPLimit, loginWindow)
-	}
-	rr := httptest.NewRecorder()
-	req := loginRequest("blocked@example.com", "wrong-password")
-	req.RemoteAddr = "192.0.2.5:12345"
-	a.LoginHandler(rr, req)
-	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "900" {
-		t.Fatalf("status=%d Retry-After=%q, want 429 and 900", rr.Code, rr.Header().Get("Retry-After"))
-	}
-}
-
 func TestLogoutHandlerRevokesSession(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
 
-	org := createTestOrg(t, pool, "acme")
-	userID := createTestUser(t, pool, "staffer@example.com", "correct-password")
-	addMembership(t, pool, userID, org.ID, Owner)
+	org := e.Org("acme")
+	staffer := e.User("staffer@example.com", testkit.WithPassword("correct-password"))
+	e.Member(staffer, org, auth.Owner)
 
-	token, err := Login(ctx, pool, "staffer@example.com", "correct-password")
+	token, err := auth.Login(ctx, pool, "staffer@example.com", "correct-password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 
-	a := New(pool, false)
+	a := auth.New(pool, false)
 
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
-	logoutReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+	logoutReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	logoutRR := httptest.NewRecorder()
 	a.LogoutHandler(logoutRR, logoutReq)
 
@@ -385,15 +332,10 @@ func TestLogoutHandlerRevokesSession(t *testing.T) {
 		t.Fatalf("logout status = %d, want %d, body=%s", logoutRR.Code, http.StatusNoContent, logoutRR.Body.String())
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/api/v1/orgs/{org}/probe", a.RequireOrg(PermReportsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})))
-
 	probeReq := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/acme/probe", nil)
-	probeReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+	probeReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	probeRR := httptest.NewRecorder()
-	mux.ServeHTTP(probeRR, probeReq)
+	probeMux(a).ServeHTTP(probeRR, probeReq)
 
 	if probeRR.Code != http.StatusUnauthorized {
 		t.Errorf("status after logout = %d, want %d", probeRR.Code, http.StatusUnauthorized)

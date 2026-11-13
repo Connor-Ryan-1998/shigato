@@ -1,217 +1,28 @@
 //go:build integration
 
 // Package portal_test exercises the portal API and magic-link sign-in
-// through the real HTTP handlers, so it needs to import httpapi alongside
-// portal, auth, core and property without an import cycle (internal/httpapi
-// itself imports internal/portal).
+// through the real HTTP handlers, so it needs to import httpapi (via
+// testkit) alongside portal, auth and core without an import cycle
+// (internal/httpapi itself imports internal/portal).
 package portal_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"shigoto/internal/auth"
-	"shigoto/internal/config"
 	"shigoto/internal/core"
-	"shigoto/internal/db"
-	"shigoto/internal/httpapi"
 	"shigoto/internal/mail"
-	"shigoto/internal/property"
+	"shigoto/internal/testkit"
 )
 
-const sessionCookieName = "shigoto_session"
-
-// --- fixtures and small helpers ---
-
-func createOrg(t *testing.T, pool *pgxpool.Pool, slug string) core.Org {
-	t.Helper()
-	org, err := core.CreateOrg(context.Background(), pool, slug, slug+" org")
-	if err != nil {
-		t.Fatalf("CreateOrg(%s): %v", slug, err)
-	}
-	return org
-}
-
-func createContact(t *testing.T, pool *pgxpool.Pool, orgID int64, kind, name, email string) core.Contact {
-	t.Helper()
-	c, err := core.CreateContact(context.Background(), pool, orgID, core.Contact{Kind: kind, Name: name, Email: email})
-	if err != nil {
-		t.Fatalf("CreateContact: %v", err)
-	}
-	return c
-}
-
-func createDraft(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, totalCents int64) int64 {
-	t.Helper()
-	inv, err := core.CreateDraftInvoice(context.Background(), pool, orgID, core.NewInvoice{
-		ContactID: contactID,
-		Source:    "manual",
-		DueInDays: 14,
-		Lines: []core.NewLine{
-			{Description: "line", QuantityMilli: 1000, UnitAmount: core.Cents(totalCents), GSTCode: "N-T"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateDraftInvoice: %v", err)
-	}
-	return inv.ID
-}
-
-// createIssuedInvoice creates and issues a draft invoice for contactID,
-// returning its id.
-func createIssuedInvoice(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, totalCents int64) int64 {
-	t.Helper()
-	draftID := createDraft(t, pool, orgID, contactID, totalCents)
-
-	ctx := context.Background()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	inv, err := core.IssueInvoice(ctx, tx, orgID, draftID, time.Now())
-	if err != nil {
-		t.Fatalf("IssueInvoice: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	return inv.ID
-}
-
-// createVoidInvoice creates, issues, then voids an invoice for contactID.
-func createVoidInvoice(t *testing.T, pool *pgxpool.Pool, orgID, contactID int64, totalCents int64) int64 {
-	t.Helper()
-	id := createIssuedInvoice(t, pool, orgID, contactID, totalCents)
-
-	ctx := context.Background()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := core.VoidInvoice(ctx, tx, orgID, id); err != nil {
-		t.Fatalf("VoidInvoice: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	return id
-}
-
-func createProperty(t *testing.T, pool *pgxpool.Pool, orgID int64) int64 {
-	t.Helper()
-	p, err := property.CreateProperty(context.Background(), pool, orgID, property.Property{Name: "1 Test St", Address: "1 Test St, Testville", Residential: true})
-	if err != nil {
-		t.Fatalf("CreateProperty: %v", err)
-	}
-	return p.ID
-}
-
-func createLease(t *testing.T, pool *pgxpool.Pool, orgID, propertyID, tenantContactID int64) property.Lease {
-	t.Helper()
-	l, err := property.CreateLease(context.Background(), pool, orgID, property.NewLease{
-		PropertyID: propertyID,
-		StartDate:  time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC),
-		Frequency:  property.Weekly,
-		RentAmount: 50000,
-		Tenants:    []property.NewLeaseTenant{{ContactID: tenantContactID, Primary: true}},
-	})
-	if err != nil {
-		t.Fatalf("CreateLease: %v", err)
-	}
-	return l
-}
-
-// createMembershipUser inserts a passwordless user (the shape portal-invite
-// leaves behind) and a tenant/client membership tied to contactID.
-func createMembershipUser(t *testing.T, pool *pgxpool.Pool, orgID int64, role, email string, contactID int64) int64 {
-	t.Helper()
-	var userID int64
-	if err := pool.QueryRow(context.Background(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, NULL) RETURNING id", email, email,
-	).Scan(&userID); err != nil {
-		t.Fatalf("inserting portal user: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		"INSERT INTO memberships (user_id, org_id, role, contact_id) VALUES ($1, $2, $3, $4)",
-		userID, orgID, role, contactID,
-	); err != nil {
-		t.Fatalf("adding portal membership: %v", err)
-	}
-	return userID
-}
-
-// signInPortalUser creates a passwordless user with a tenant/client
-// membership tied to contactID, then signs it in via a fresh magic link
-// (minted directly through auth.RequestMagicLink, bypassing email) and
-// returns the resulting session token - the only way a portal user ever
-// gets a session.
-func signInPortalUser(t *testing.T, pool *pgxpool.Pool, h http.Handler, orgID int64, role, email string, contactID int64) string {
-	t.Helper()
-	createMembershipUser(t, pool, orgID, role, email, contactID)
-
-	token, err := auth.RequestMagicLink(context.Background(), pool, email)
-	if err != nil {
-		t.Fatalf("RequestMagicLink: %v", err)
-	}
-	if token == "" {
-		t.Fatalf("RequestMagicLink returned no token for eligible portal user %s", email)
-	}
-
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": token})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("verify magic link status = %d, body %s", rr.Code, rr.Body.String())
-	}
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			return c.Value
-		}
-	}
-	t.Fatalf("verify magic link response set no session cookie")
-	return ""
-}
-
-func createStaffUser(t *testing.T, pool *pgxpool.Pool, email, password string, orgID int64, role string) int64 {
-	t.Helper()
-	hash, err := auth.HashPassword(password)
-	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
-	}
-	var userID int64
-	if err := pool.QueryRow(context.Background(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id", email, email, hash,
-	).Scan(&userID); err != nil {
-		t.Fatalf("inserting staff user: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3)", userID, orgID, role,
-	); err != nil {
-		t.Fatalf("adding staff membership: %v", err)
-	}
-	return userID
-}
-
-func staffLogin(t *testing.T, pool *pgxpool.Pool, email, password string) string {
-	t.Helper()
-	token, err := auth.Login(context.Background(), pool, email, password)
-	if err != nil {
-		t.Fatalf("Login(%s): %v", email, err)
-	}
-	return token
-}
+// --- package-specific helpers ---
 
 // mailSink is a *mail.Mailer that records every sent message instead of
 // talking SMTP, safe for concurrent Send calls: requestMagicLink (Ruling 61)
@@ -243,12 +54,6 @@ func (s *mailSink) reset() {
 	s.sent = nil
 }
 
-func (s *mailSink) messages() []mail.Message {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]mail.Message(nil), s.sent...)
-}
-
 // waitForMailCount polls sink until it holds at least want messages, failing
 // the test if timeout passes first. requestMagicLink sends its email from a
 // detached goroutine (Ruling 61), so a test expecting mail can't just check
@@ -267,120 +72,111 @@ func waitForMailCount(t *testing.T, sink *mailSink, want int, timeout time.Durat
 	}
 }
 
-func newTestHandler(pool *pgxpool.Pool, mailer *mail.Mailer, opts ...auth.Option) http.Handler {
-	a := auth.New(pool, false, opts...)
-	return httpapi.New(httpapi.Deps{
-		Pool:   pool,
-		Auth:   a,
-		Cfg:    config.Config{Modules: map[string]bool{}, BaseURL: "https://shigoto.example"},
-		GetEnv: func(string) string { return "" },
-		Mailer: mailer,
-	})
+// sessionToken returns the session cookie r set, or "" if it set none.
+func sessionToken(r testkit.Response) string {
+	for _, c := range r.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			return c.Value
+		}
+	}
+	return ""
 }
 
-func doJSON(t *testing.T, h http.Handler, method, url, token string, body any) *httptest.ResponseRecorder {
-	t.Helper()
-	var reader *bytes.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			t.Fatalf("marshaling body: %v", err)
-		}
-		reader = bytes.NewReader(b)
-	} else {
-		reader = bytes.NewReader(nil)
+// issueThenVoid issues a draft for contactID then voids it, returning its id.
+func issueThenVoid(e *testkit.Env, org core.Org, contactID int64, totalCents int64) int64 {
+	e.T.Helper()
+	id := e.Invoice(org, contactID, testkit.Amount(totalCents), testkit.Issued(time.Now())).ID
+	tx, err := e.Pool.Begin(e.Ctx)
+	if err != nil {
+		e.T.Fatalf("begin: %v", err)
 	}
-	req := httptest.NewRequest(method, url, reader)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Shigoto-CSRF", "1")
-	if token != "" {
-		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	defer func() { _ = tx.Rollback(e.Ctx) }()
+	if _, err := core.VoidInvoice(e.Ctx, tx, org.ID, id); err != nil {
+		e.T.Fatalf("VoidInvoice: %v", err)
 	}
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	return rr
+	if err := tx.Commit(e.Ctx); err != nil {
+		e.T.Fatalf("commit: %v", err)
+	}
+	return id
 }
 
 // insertExpiredMagicLink inserts a magic_links row that's already past its
 // expiry, bypassing the 15-minute TTL auth.RequestMagicLink always applies.
-func insertExpiredMagicLink(t *testing.T, pool *pgxpool.Pool, userID int64, token string) {
-	t.Helper()
+func insertExpiredMagicLink(e *testkit.Env, userID int64, token string) {
+	e.T.Helper()
 	sum := sha256.Sum256([]byte(token))
-	if _, err := pool.Exec(context.Background(),
+	if _, err := e.Pool.Exec(e.Ctx,
 		"INSERT INTO magic_links (token_hash, user_id, expires_at) VALUES ($1, $2, now() - interval '1 minute')",
 		sum[:], userID,
 	); err != nil {
-		t.Fatalf("insertExpiredMagicLink: %v", err)
+		e.T.Fatalf("insertExpiredMagicLink: %v", err)
 	}
 }
 
 // --- tests ---
 
 func TestPortalMembershipContactScopesAcrossOrgs(t *testing.T) {
-	pool := db.TestPool(t)
-	ctx := context.Background()
-	h := newTestHandler(pool, nil)
-	var token string
-	var userID, firstOrgID int64
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	h := e.Handler()
+	var s testkit.Session
+	var user testkit.User
+	var firstOrgID int64
 	for _, slug := range []string{"alpha", "beta"} {
-		org := createOrg(t, pool, slug)
-		own := createContact(t, pool, org.ID, "tenant", "Shared tenant", "shared@example.com")
-		neighbor := createContact(t, pool, org.ID, "tenant", "Private neighbor", "neighbor@example.com")
-		ownInvoice := createIssuedInvoice(t, pool, org.ID, own.ID, 10000)
-		otherInvoice := createIssuedInvoice(t, pool, org.ID, neighbor.ID, 20000)
-		prop := createProperty(t, pool, org.ID)
-		ownLease := createLease(t, pool, org.ID, prop, own.ID)
-		createLease(t, pool, org.ID, prop, neighbor.ID)
-		if token == "" {
+		org := e.Org(slug)
+		own := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Shared tenant"), testkit.Email("shared@example.com"))
+		neighbor := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Private neighbor"), testkit.Email("neighbor@example.com"))
+		ownInvoice := e.Invoice(org, own.ID, testkit.Amount(10000), testkit.Issued(time.Now())).ID
+		otherInvoice := e.Invoice(org, neighbor.ID, testkit.Amount(20000), testkit.Issued(time.Now())).ID
+		prop := e.Property(org).ID
+		ownLease := e.Lease(org, prop, own.ID)
+		e.Lease(org, prop, neighbor.ID)
+		if s.Token == "" {
 			firstOrgID = org.ID
-			token = signInPortalUser(t, pool, h, org.ID, "tenant", "shared@example.com", own.ID)
-			if err := pool.QueryRow(ctx, "SELECT id FROM users WHERE email='shared@example.com'").Scan(&userID); err != nil {
-				t.Fatal(err)
-			}
+			user = e.PortalUser("shared@example.com", org, auth.Tenant, own.ID)
+			s = e.Login(user, h)
 		} else {
-			if _, err := pool.Exec(ctx, "INSERT INTO memberships (user_id,org_id,role,contact_id) VALUES ($1,$2,'tenant',$3)", userID, org.ID, own.ID); err != nil {
+			if _, err := pool.Exec(ctx, "INSERT INTO memberships (user_id,org_id,role,contact_id) VALUES ($1,$2,'tenant',$3)", user.ID, org.ID, own.ID); err != nil {
 				t.Fatal(err)
 			}
 		}
 		base := "/api/v1/portal/" + slug
 		for path, wantID := range map[string]int64{"/invoices": ownInvoice, "/leases": ownLease.ID} {
-			rr := doJSON(t, h, "GET", base+path, token, nil)
+			rr := s.Do("GET", base+path, nil)
 			var rows []struct {
 				ID int64 `json:"id"`
 			}
 			if rr.Code != 200 {
-				t.Fatalf("%s: %d %s", base+path, rr.Code, rr.Body.String())
+				t.Fatalf("%s: %d %s", base+path, rr.Code, rr.Body)
 			}
-			if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
-				t.Fatal(err)
-			}
+			rr.JSON(&rows)
 			if len(rows) != 1 || rows[0].ID != wantID {
 				t.Fatalf("%s exposed wrong contact: %+v", base+path, rows)
 			}
 		}
 		for id, want := range map[int64]int{ownInvoice: 200, otherInvoice: 404} {
-			rr := doJSON(t, h, "GET", base+"/invoices/"+itoa(id), token, nil)
+			rr := s.Do("GET", base+"/invoices/"+strconv.FormatInt(id, 10), nil)
 			if rr.Code != want {
 				t.Fatalf("invoice %d: %d want %d", id, rr.Code, want)
 			}
-			if want == 404 && strings.TrimSpace(rr.Body.String()) != `{"error":"not found"}` {
+			if want == 404 && strings.TrimSpace(string(rr.Body)) != `{"error":"not found"}` {
 				t.Fatal("foreign contact detail leaked")
 			}
 		}
 	}
-	if _, err := pool.Exec(ctx, "DELETE FROM memberships WHERE user_id=$1 AND org_id=$2", userID, firstOrgID); err != nil {
+	if _, err := pool.Exec(ctx, "DELETE FROM memberships WHERE user_id=$1 AND org_id=$2", user.ID, firstOrgID); err != nil {
 		t.Fatal(err)
 	}
 	for slug, want := range map[string]int{"alpha": 404, "beta": 200} {
-		if rr := doJSON(t, h, "GET", "/api/v1/portal/"+slug+"/invoices", token, nil); rr.Code != want {
+		if rr := s.Do("GET", "/api/v1/portal/"+slug+"/invoices", nil); rr.Code != want {
 			t.Fatalf("after revoke %s: %d want %d", slug, rr.Code, want)
 		}
 	}
-	sum := sha256.Sum256([]byte(token))
+	sum := sha256.Sum256([]byte(s.Token))
 	if _, err := pool.Exec(ctx, "UPDATE sessions SET expires_at=now()-interval '1 minute' WHERE token_hash=$1", sum[:]); err != nil {
 		t.Fatal(err)
 	}
-	if rr := doJSON(t, h, "GET", "/api/v1/portal/beta/invoices", token, nil); rr.Code != 401 {
+	if rr := s.Do("GET", "/api/v1/portal/beta/invoices", nil); rr.Code != 401 {
 		t.Fatalf("expired session: %d want 401", rr.Code)
 	}
 }
@@ -389,82 +185,78 @@ func TestPortalMembershipContactScopesAcrossOrgs(t *testing.T) {
 // invoice is neither listed nor readable by its own contact (drafts are
 // covered in portal.yaml).
 func TestPortalHidesVoid(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
+	e := testkit.New(t)
+	org := e.Org("acme")
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant"), testkit.Email("tenant@example.com"))
 
-	voidID := createVoidInvoice(t, pool, org.ID, tenant.ID, 6000)
-	openID := createIssuedInvoice(t, pool, org.ID, tenant.ID, 7000)
+	voidID := issueThenVoid(e, org, tenant.ID, 6000)
+	openID := e.Invoice(org, tenant.ID, testkit.Amount(7000), testkit.Issued(time.Now())).ID
 
-	h := newTestHandler(pool, nil)
-	token := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
+	h := e.Handler()
+	s := e.Login(e.PortalUser("tenant@example.com", org, auth.Tenant, tenant.ID), h)
 
-	rr := doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices", token, nil)
+	rr := s.Do(http.MethodGet, "/api/v1/portal/acme/invoices", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("list status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("list status = %d, body %s", rr.Code, rr.Body)
 	}
 	var invoices []map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &invoices); err != nil {
-		t.Fatalf("decoding invoices: %v", err)
-	}
+	rr.JSON(&invoices)
 	if len(invoices) != 1 || int64(invoices[0]["id"].(float64)) != openID {
 		t.Fatalf("portal invoice list = %+v, want only the open invoice %d", invoices, openID)
 	}
 
-	rr = doJSON(t, h, http.MethodGet, "/api/v1/portal/acme/invoices/"+itoa(voidID), token, nil)
+	rr = s.Do(http.MethodGet, "/api/v1/portal/acme/invoices/"+strconv.FormatInt(voidID, 10), nil)
 	if rr.Code != http.StatusNotFound {
-		t.Errorf("void invoice detail status = %d, want 404, body %s", rr.Code, rr.Body.String())
+		t.Errorf("void invoice detail status = %d, want 404, body %s", rr.Code, rr.Body)
 	}
 }
 
 func TestMagicLinkSingleUseAndExpiry(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-	userID := createMembershipUser(t, pool, org.ID, "tenant", "tenant@example.com", tenant.ID)
+	e := testkit.New(t)
+	org := e.Org("acme")
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant"), testkit.Email("tenant@example.com"))
+	user := e.PortalUser("tenant@example.com", org, auth.Tenant, tenant.ID)
 
-	h := newTestHandler(pool, nil)
+	anon := e.Anonymous(e.Handler())
 
-	token, err := auth.RequestMagicLink(context.Background(), pool, "tenant@example.com")
+	token, err := auth.RequestMagicLink(e.Ctx, e.Pool, "tenant@example.com")
 	if err != nil || token == "" {
 		t.Fatalf("RequestMagicLink: token=%q err=%v", token, err)
 	}
 
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": token})
+	rr := anon.Do(http.MethodPost, "/api/v1/auth/magic/verify", map[string]string{"token": token})
 	if rr.Code != http.StatusOK {
-		t.Fatalf("first verify status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("first verify status = %d, body %s", rr.Code, rr.Body)
 	}
 	var resp map[string]string
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decoding verify response: %v", err)
-	}
+	rr.JSON(&resp)
 	if resp["redirect"] != "/portal" {
 		t.Errorf("verify redirect = %q, want /portal", resp["redirect"])
 	}
 
 	// Single use: the same token fails the second time.
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": token})
+	rr = anon.Do(http.MethodPost, "/api/v1/auth/magic/verify", map[string]string{"token": token})
 	if rr.Code != http.StatusGone {
-		t.Fatalf("second verify status = %d, want 410, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("second verify status = %d, want 410, body %s", rr.Code, rr.Body)
 	}
 
 	// Expiry: a magic link past its TTL also 410s.
-	insertExpiredMagicLink(t, pool, userID, "expired-test-token")
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": "expired-test-token"})
+	insertExpiredMagicLink(e, user.ID, "expired-test-token")
+	rr = anon.Do(http.MethodPost, "/api/v1/auth/magic/verify", map[string]string{"token": "expired-test-token"})
 	if rr.Code != http.StatusGone {
-		t.Fatalf("expired verify status = %d, want 410, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("expired verify status = %d, want 410, body %s", rr.Code, rr.Body)
 	}
 }
 
 func TestMagicRequestNoEnumeration(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-	createMembershipUser(t, pool, org.ID, "tenant", "tenant@example.com", tenant.ID)
-	createStaffUser(t, pool, "staffonly@example.com", "correct-password", org.ID, "staff")
+	e := testkit.New(t)
+	org := e.Org("acme")
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant"), testkit.Email("tenant@example.com"))
+	e.PortalUser("tenant@example.com", org, auth.Tenant, tenant.ID)
+	e.Member(e.User("staffonly@example.com", testkit.WithPassword("correct-password")), org, auth.Staff)
 
 	sink := &mailSink{}
-	h := newTestHandler(pool, sink.mailer())
+	h := e.Handler(testkit.Mailer(sink.mailer()))
 
 	cases := []struct {
 		name  string
@@ -476,12 +268,14 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sink.reset()
-			rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": tc.email})
+			child := *e
+			child.T = t
+			rr := child.Anonymous(h).Do(http.MethodPost, "/api/v1/auth/magic", map[string]string{"email": tc.email})
 			if rr.Code != http.StatusAccepted {
-				t.Fatalf("status = %d, want 202, body %s", rr.Code, rr.Body.String())
+				t.Fatalf("status = %d, want 202, body %s", rr.Code, rr.Body)
 			}
-			if strings.TrimSpace(rr.Body.String()) != "{}" {
-				t.Errorf("body = %q, want {}", rr.Body.String())
+			if strings.TrimSpace(string(rr.Body)) != "{}" {
+				t.Errorf("body = %q, want {}", rr.Body)
 			}
 			// Nothing eligible means requestMagicLink never spawns the
 			// send goroutine at all, so this is deterministic with no wait.
@@ -495,12 +289,12 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 	// mail does go out - asynchronously (Ruling 61), so wait for it rather
 	// than checking immediately after the HTTP call returns.
 	sink.reset()
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": "tenant@example.com"})
+	rr := e.Anonymous(h).Do(http.MethodPost, "/api/v1/auth/magic", map[string]string{"email": "tenant@example.com"})
 	if rr.Code != http.StatusAccepted {
-		t.Fatalf("eligible email status = %d, want 202, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("eligible email status = %d, want 202, body %s", rr.Code, rr.Body)
 	}
-	if strings.TrimSpace(rr.Body.String()) != "{}" {
-		t.Errorf("eligible email body = %q, want {}", rr.Body.String())
+	if strings.TrimSpace(string(rr.Body)) != "{}" {
+		t.Errorf("eligible email body = %q, want {}", rr.Body)
 	}
 	waitForMailCount(t, sink, 1, 2*time.Second)
 	if n := sink.count(); n != 1 {
@@ -509,22 +303,22 @@ func TestMagicRequestNoEnumeration(t *testing.T) {
 }
 
 func TestMagicRateLimit(t *testing.T) {
-	pool := db.TestPool(t)
-	h := newTestHandler(pool, (&mailSink{}).mailer())
+	e := testkit.New(t)
+	anon := e.Anonymous(e.Handler(testkit.Mailer((&mailSink{}).mailer())))
 
 	const email = "ratelimited@example.com"
 	for i := 0; i < 5; i++ {
-		rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": email})
+		rr := anon.Do(http.MethodPost, "/api/v1/auth/magic", map[string]string{"email": email})
 		if rr.Code != http.StatusAccepted {
-			t.Fatalf("request %d status = %d, want 202, body %s", i+1, rr.Code, rr.Body.String())
+			t.Fatalf("request %d status = %d, want 202, body %s", i+1, rr.Code, rr.Body)
 		}
 	}
 
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic", "", map[string]string{"email": email})
+	rr := anon.Do(http.MethodPost, "/api/v1/auth/magic", map[string]string{"email": email})
 	if rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("6th request status = %d, want 429, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("6th request status = %d, want 429, body %s", rr.Code, rr.Body)
 	}
-	if rr.Header().Get("Retry-After") == "" {
+	if rr.Header.Get("Retry-After") == "" {
 		t.Errorf("429 response has no Retry-After header")
 	}
 }
@@ -534,57 +328,46 @@ func TestMagicRateLimit(t *testing.T) {
 // must still be rejected if the user has since gained a staff membership
 // (any org) - a magic link must never yield a staff session.
 func TestMagicLinkVerifyRejectsNewlyStaffUser(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-	createMembershipUser(t, pool, org.ID, "tenant", "tenant@example.com", tenant.ID)
+	e := testkit.New(t)
+	org := e.Org("acme")
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant"), testkit.Email("tenant@example.com"))
+	user := e.PortalUser("tenant@example.com", org, auth.Tenant, tenant.ID)
 
-	token, err := auth.RequestMagicLink(context.Background(), pool, "tenant@example.com")
+	token, err := auth.RequestMagicLink(e.Ctx, e.Pool, "tenant@example.com")
 	if err != nil || token == "" {
 		t.Fatalf("RequestMagicLink: token=%q err=%v", token, err)
 	}
 
 	// The user gains a staff membership (in a second org) after the token
 	// was issued but before it's verified.
-	other := createOrg(t, pool, "beta")
-	var userID int64
-	if err := pool.QueryRow(context.Background(), "SELECT id FROM users WHERE email = $1", "tenant@example.com").Scan(&userID); err != nil {
-		t.Fatalf("looking up user: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		"INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'staff')", userID, other.ID,
-	); err != nil {
-		t.Fatalf("adding staff membership: %v", err)
-	}
+	e.Member(user, e.Org("beta"), auth.Staff)
 
-	h := newTestHandler(pool, nil)
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": token})
+	rr := e.Anonymous(e.Handler()).Do(http.MethodPost, "/api/v1/auth/magic/verify", map[string]string{"token": token})
 	if rr.Code != http.StatusGone {
-		t.Fatalf("verify status = %d, want 410, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("verify status = %d, want 410, body %s", rr.Code, rr.Body)
 	}
-	if len(rr.Result().Cookies()) != 0 {
-		t.Errorf("verify response set a session cookie for a now-staff user: %+v", rr.Result().Cookies())
+	if len(rr.Cookies()) != 0 {
+		t.Errorf("verify response set a session cookie for a now-staff user: %+v", rr.Cookies())
 	}
 }
 
 func TestPortalInviteCreatesMembership(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
-	createStaffUser(t, pool, "owner@example.com", "correct-password", org.ID, "owner")
-	ownerToken := staffLogin(t, pool, "owner@example.com", "correct-password")
+	e := testkit.New(t)
+	pool, ctx := e.Pool, e.Ctx
+	org := e.Org("acme")
+	owner := e.User("owner@example.com", testkit.WithPassword("correct-password"))
+	e.Member(owner, org, auth.Owner)
 
-	tenant := createContact(t, pool, org.ID, "tenant", "New Tenant", "newtenant@example.com")
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("New Tenant"), testkit.Email("newtenant@example.com"))
 
-	h := newTestHandler(pool, nil)
+	s := e.Login(owner, e.Handler())
 
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(tenant.ID)+"/portal-invite", ownerToken, nil)
+	rr := s.Do(http.MethodPost, "/api/v1/orgs/acme/contacts/"+strconv.FormatInt(tenant.ID, 10)+"/portal-invite", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("portal-invite status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("portal-invite status = %d, body %s", rr.Code, rr.Body)
 	}
 	var resp map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
+	rr.JSON(&resp)
 	if resp["emailed"] != false {
 		t.Errorf("emailed = %v, want false (no mailer configured)", resp["emailed"])
 	}
@@ -594,7 +377,7 @@ func TestPortalInviteCreatesMembership(t *testing.T) {
 
 	var role string
 	var contactID int64
-	if err := pool.QueryRow(context.Background(), `
+	if err := pool.QueryRow(ctx, `
 		SELECT m.role, m.contact_id FROM memberships m
 		JOIN users u ON u.id = m.user_id
 		WHERE u.email = 'newtenant@example.com' AND m.org_id = $1`, org.ID,
@@ -605,37 +388,30 @@ func TestPortalInviteCreatesMembership(t *testing.T) {
 		t.Errorf("new membership role/contact_id = %s/%d, want tenant/%d", role, contactID, tenant.ID)
 	}
 
-	var auditCount int
-	if err := pool.QueryRow(context.Background(), `
-		SELECT count(*) FROM audit_log
-		WHERE org_id = $1 AND entity = 'membership' AND action = 'portal_invite'`, org.ID,
-	).Scan(&auditCount); err != nil {
-		t.Fatalf("counting audit rows: %v", err)
-	}
-	if auditCount < 1 {
+	if auditCount := e.Count("audit_log", "org_id = $1 AND entity = 'membership' AND action = 'portal_invite'", org.ID); auditCount < 1 {
 		t.Errorf("audit rows for portal_invite = %d, want at least 1", auditCount)
 	}
 
 	// Re-inviting the same contact is idempotent.
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(tenant.ID)+"/portal-invite", ownerToken, nil)
+	rr = s.Do(http.MethodPost, "/api/v1/orgs/acme/contacts/"+strconv.FormatInt(tenant.ID, 10)+"/portal-invite", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("re-invite status = %d, want 200, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("re-invite status = %d, want 200, body %s", rr.Code, rr.Body)
 	}
 
 	// A different contact sharing the same email conflicts (409): the
 	// matching user already belongs to this org under a different contact.
-	conflicting := createContact(t, pool, org.ID, "client", "Conflicting Client", "newtenant@example.com")
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(conflicting.ID)+"/portal-invite", ownerToken, nil)
+	conflicting := e.Contact(org, testkit.Kind("client"), testkit.Name("Conflicting Client"), testkit.Email("newtenant@example.com"))
+	rr = s.Do(http.MethodPost, "/api/v1/orgs/acme/contacts/"+strconv.FormatInt(conflicting.ID, 10)+"/portal-invite", nil)
 	if rr.Code != http.StatusConflict {
-		t.Fatalf("conflicting contact invite status = %d, want 409, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("conflicting contact invite status = %d, want 409, body %s", rr.Code, rr.Body)
 	}
 
 	// A contact whose email belongs to an existing staff member also
 	// conflicts.
-	staffContact := createContact(t, pool, org.ID, "client", "Staff Contact", "owner@example.com")
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/orgs/acme/contacts/"+itoa(staffContact.ID)+"/portal-invite", ownerToken, nil)
+	staffContact := e.Contact(org, testkit.Kind("client"), testkit.Name("Staff Contact"), testkit.Email("owner@example.com"))
+	rr = s.Do(http.MethodPost, "/api/v1/orgs/acme/contacts/"+strconv.FormatInt(staffContact.ID, 10)+"/portal-invite", nil)
 	if rr.Code != http.StatusConflict {
-		t.Fatalf("staff-email contact invite status = %d, want 409, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("staff-email contact invite status = %d, want 409, body %s", rr.Code, rr.Body)
 	}
 }
 
@@ -644,127 +420,113 @@ func TestPortalInviteCreatesMembership(t *testing.T) {
 // accepting a staff invite with OIDC disabled must supply a password, and
 // can log in with it afterwards.
 func TestStaffInviteAcceptByPasswordlessUserRequiresPassword(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
+	e := testkit.New(t)
+	org := e.Org("acme")
 	// A second org: CreateInvite rejects inviting an email already a member
 	// of the target org (any role), so the staff invite below targets an
 	// org the portal user doesn't already belong to.
-	staffOrg := createOrg(t, pool, "beta")
-	ownerID := createStaffUser(t, pool, "owner@example.com", "correct-password", staffOrg.ID, "owner")
+	staffOrg := e.Org("beta")
+	owner := e.User("owner@example.com", testkit.WithPassword("correct-password"))
+	e.Member(owner, staffOrg, auth.Owner)
 
-	h := newTestHandler(pool, nil)
+	h := e.Handler()
 
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-	portalToken := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant"), testkit.Email("tenant@example.com"))
+	portal := e.Login(e.PortalUser("tenant@example.com", org, auth.Tenant, tenant.ID), h)
 
-	_, inviteToken, err := auth.CreateInvite(context.Background(), pool, staffOrg.ID, "tenant@example.com", "staff", ownerID)
+	_, inviteToken, err := auth.CreateInvite(e.Ctx, e.Pool, staffOrg.ID, "tenant@example.com", "staff", owner.ID)
 	if err != nil {
 		t.Fatalf("CreateInvite: %v", err)
 	}
 
 	// GET invite details while signed in as the passwordless user: OIDC is
 	// disabled on this handler, so needs_password must be true.
-	rr := doJSON(t, h, http.MethodGet, "/api/v1/invites/"+inviteToken, portalToken, nil)
+	rr := portal.Do(http.MethodGet, "/api/v1/invites/"+inviteToken, nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET invite details status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("GET invite details status = %d, body %s", rr.Code, rr.Body)
 	}
 	var details map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &details); err != nil {
-		t.Fatalf("decoding invite details: %v", err)
-	}
+	rr.JSON(&details)
 	if details["needs_password"] != true {
 		t.Errorf("needs_password = %v, want true for a passwordless user with OIDC disabled", details["needs_password"])
 	}
 
 	// Accepting without a password fails.
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", portalToken, nil)
+	rr = portal.Do(http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", nil)
 	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("accept without password status = %d, want 422, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("accept without password status = %d, want 422, body %s", rr.Code, rr.Body)
 	}
 
 	// Accepting with a valid password succeeds, in the same transaction
 	// (the earlier failed attempt rolled back the token consumption).
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", portalToken,
+	rr = portal.Do(http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept",
 		map[string]string{"password": "a-very-long-password"})
 	if rr.Code != http.StatusOK {
-		t.Fatalf("accept with password status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("accept with password status = %d, body %s", rr.Code, rr.Body)
 	}
 
 	// The password now works for ordinary password login.
-	if _, err := auth.Login(context.Background(), pool, "tenant@example.com", "a-very-long-password"); err != nil {
+	if _, err := auth.Login(e.Ctx, e.Pool, "tenant@example.com", "a-very-long-password"); err != nil {
 		t.Fatalf("Login after accepting with a password: %v", err)
 	}
 }
 
 // TestAcceptInviteRevokesOtherSessions covers Ruling 64 (security): session
-// S1 (a portal magic-link session) and S2 (another magic-link session, for
-// the same passwordless user) both exist; accepting a staff invite as S2
-// must kill S1 and start a fresh replacement session for S2's request.
+// S1 and S2 (a portal magic-link session) both exist for the same
+// passwordless user; accepting a staff invite as S2 must kill S1 and start
+// a fresh replacement session for S2's request.
 func TestAcceptInviteRevokesOtherSessions(t *testing.T) {
-	pool := db.TestPool(t)
-	org := createOrg(t, pool, "acme")
+	e := testkit.New(t)
+	org := e.Org("acme")
 	// A second org: CreateInvite rejects inviting an email already a member
 	// of the target org (any role), so the staff invite below targets an
 	// org the portal user doesn't already belong to.
-	staffOrg := createOrg(t, pool, "beta")
-	ownerID := createStaffUser(t, pool, "owner@example.com", "correct-password", staffOrg.ID, "owner")
+	staffOrg := e.Org("beta")
+	owner := e.User("owner@example.com", testkit.WithPassword("correct-password"))
+	e.Member(owner, staffOrg, auth.Owner)
 
-	h := newTestHandler(pool, nil)
+	h := e.Handler()
 
-	tenant := createContact(t, pool, org.ID, "tenant", "Tenant", "tenant@example.com")
-	s1 := signInPortalUser(t, pool, h, org.ID, "tenant", "tenant@example.com", tenant.ID)
+	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant"), testkit.Email("tenant@example.com"))
+	s1 := e.Login(e.PortalUser("tenant@example.com", org, auth.Tenant, tenant.ID), h)
 
-	magicToken2, err := auth.RequestMagicLink(context.Background(), pool, "tenant@example.com")
+	magicToken2, err := auth.RequestMagicLink(e.Ctx, e.Pool, "tenant@example.com")
 	if err != nil || magicToken2 == "" {
 		t.Fatalf("RequestMagicLink for second session: token=%q err=%v", magicToken2, err)
 	}
-	rr := doJSON(t, h, http.MethodPost, "/api/v1/auth/magic/verify", "", map[string]string{"token": magicToken2})
+	rr := e.Anonymous(h).Do(http.MethodPost, "/api/v1/auth/magic/verify", map[string]string{"token": magicToken2})
 	if rr.Code != http.StatusOK {
-		t.Fatalf("verify second magic link status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("verify second magic link status = %d, body %s", rr.Code, rr.Body)
 	}
-	var s2 string
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			s2 = c.Value
-		}
-	}
+	s2 := sessionToken(rr)
 	if s2 == "" {
 		t.Fatalf("second magic link verify set no session cookie")
 	}
 
 	// Sanity: both sessions work before the invite is accepted.
-	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s1, nil); rr.Code != http.StatusOK {
-		t.Fatalf("s1 GET /me before accept status = %d, body %s", rr.Code, rr.Body.String())
+	if rr := s1.Do(http.MethodGet, "/api/v1/me", nil); rr.Code != http.StatusOK {
+		t.Fatalf("s1 GET /me before accept status = %d, body %s", rr.Code, rr.Body)
 	}
 
-	_, inviteToken, err := auth.CreateInvite(context.Background(), pool, staffOrg.ID, "tenant@example.com", "staff", ownerID)
+	_, inviteToken, err := auth.CreateInvite(e.Ctx, e.Pool, staffOrg.ID, "tenant@example.com", "staff", owner.ID)
 	if err != nil {
 		t.Fatalf("CreateInvite: %v", err)
 	}
 
-	rr = doJSON(t, h, http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept", s2,
+	rr = e.Resume(s2, h).Do(http.MethodPost, "/api/v1/invites/"+inviteToken+"/accept",
 		map[string]string{"password": "a-very-long-password"})
 	if rr.Code != http.StatusOK {
-		t.Fatalf("accept via s2 status = %d, body %s", rr.Code, rr.Body.String())
+		t.Fatalf("accept via s2 status = %d, body %s", rr.Code, rr.Body)
 	}
-	var s2New string
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			s2New = c.Value
-		}
-	}
+	s2New := sessionToken(rr)
 	if s2New == "" {
 		t.Fatalf("accept response set no replacement session cookie")
 	}
 
-	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s1, nil); rr.Code != http.StatusUnauthorized {
+	if rr := s1.Do(http.MethodGet, "/api/v1/me", nil); rr.Code != http.StatusUnauthorized {
 		t.Fatalf("s1 GET /me after accept status = %d, want 401 (revoked)", rr.Code)
 	}
-	if rr := doJSON(t, h, http.MethodGet, "/api/v1/me", s2New, nil); rr.Code != http.StatusOK {
-		t.Fatalf("s2's replacement session GET /me status = %d, want 200, body %s", rr.Code, rr.Body.String())
+	if rr := e.Resume(s2New, h).Do(http.MethodGet, "/api/v1/me", nil); rr.Code != http.StatusOK {
+		t.Fatalf("s2's replacement session GET /me status = %d, want 200, body %s", rr.Code, rr.Body)
 	}
-}
-
-func itoa(id int64) string {
-	return strconv.FormatInt(id, 10)
 }

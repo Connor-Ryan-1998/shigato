@@ -188,6 +188,11 @@ func (r Response) JSON(v any) {
 	}
 }
 
+// Cookies parses the response's Set-Cookie headers.
+func (r Response) Cookies() []*http.Cookie {
+	return (&http.Response{Header: r.Header}).Cookies()
+}
+
 // Do sends a request with JSON and CSRF headers, plus the session cookie
 // unless the session is anonymous. body is JSON-encoded unless it is nil or
 // an io.Reader, which is sent as-is.
