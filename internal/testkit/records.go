@@ -147,6 +147,12 @@ func Commercial() PropertyOption {
 	return func(p *property.Property) { p.Residential = false }
 }
 
+// Residential makes the property residential (the default), for tests
+// whose assertions depend on residency.
+func Residential() PropertyOption {
+	return func(p *property.Property) { p.Residential = true }
+}
+
 // PropertyName sets the property name.
 func PropertyName(n string) PropertyOption {
 	return func(p *property.Property) { p.Name = n }
@@ -233,6 +239,11 @@ func ProjectName(n string) ProjectOption { return func(p *timesheets.Project) { 
 // ProjectRate sets the project's hourly rate.
 func ProjectRate(c core.Cents) ProjectOption {
 	return func(p *timesheets.Project) { p.HourlyRate = c }
+}
+
+// ProjectGST sets the project's GST code (GST, FRE, N-T...).
+func ProjectGST(code string) ProjectOption {
+	return func(p *timesheets.Project) { p.GSTCode = core.GSTCode(code) }
 }
 
 // ProjectStatus sets the project status (pending, in_progress, ...).

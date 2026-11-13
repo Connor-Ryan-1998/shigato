@@ -118,7 +118,7 @@ func TestExpenseResidentialForcedINP(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	e.Settings(org, testkit.GSTRegistered(true))
-	propertyID := e.Property(org).ID
+	propertyID := e.Property(org, testkit.Residential()).ID
 	repairs := categoryByName(t, pool, org.ID, "Repairs & maintenance")
 	water := categoryByName(t, pool, org.ID, "Water")
 

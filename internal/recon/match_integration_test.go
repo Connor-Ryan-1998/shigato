@@ -74,7 +74,7 @@ func TestMatchInvoicePaysAndUnmatchReverts(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
-	inv := e.Invoice(org, contactID, testkit.Amount(50000), testkit.Issued(time.Now()))
+	inv := e.Invoice(org, contactID, testkit.Amount(50000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	lineID := testBankLineID(t, pool, org.ID, 50000, testkit.Date("2026-11-02"), "Transfer INV payment")
 
 	tx, err := pool.Begin(ctx)
@@ -135,7 +135,7 @@ func TestMatchInvoiceConcurrent(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
-	inv := e.Invoice(org, contactID, testkit.Amount(20000), testkit.Issued(time.Now()))
+	inv := e.Invoice(org, contactID, testkit.Amount(20000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	lineID := testBankLineID(t, pool, org.ID, 20000, testkit.Date("2026-11-02"), "Transfer")
 
 	var wg sync.WaitGroup
@@ -185,7 +185,7 @@ func TestMatchInvoiceRejectsDebit422(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
-	inv := e.Invoice(org, contactID, testkit.Amount(20000), testkit.Issued(time.Now()))
+	inv := e.Invoice(org, contactID, testkit.Amount(20000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	lineID := testBankLineID(t, pool, org.ID, -20000, testkit.Date("2026-11-02"), "Payment out")
 
 	tx, err := pool.Begin(ctx)
@@ -256,8 +256,8 @@ func TestSuggestRanksPaymentReference(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
-	match := e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now()))
-	other := e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now()))
+	match := e.Invoice(org, contactID, testkit.Amount(30000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
+	other := e.Invoice(org, contactID, testkit.Amount(30000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	_ = other
 	lineID := testBankLineID(t, pool, org.ID, 30000, testkit.Date("2026-11-04"), "Transfer "+match.PaymentReference)
 
@@ -286,11 +286,11 @@ func TestAutoMatchOnlyUnambiguous(t *testing.T) {
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
 
-	clean := e.Invoice(org, contactID, testkit.Amount(40000), testkit.Issued(time.Now()))
+	clean := e.Invoice(org, contactID, testkit.Amount(40000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	testBankLineID(t, pool, org.ID, 40000, testkit.Date("2026-11-05"), "Transfer "+clean.PaymentReference)
 
-	e.Invoice(org, contactID, testkit.Amount(25000), testkit.Issued(time.Now()))
-	e.Invoice(org, contactID, testkit.Amount(25000), testkit.Issued(time.Now()))
+	e.Invoice(org, contactID, testkit.Amount(25000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
+	e.Invoice(org, contactID, testkit.Amount(25000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	testBankLineID(t, pool, org.ID, 25000, testkit.Date("2026-11-05"), "Generic transfer, no reference")
 
 	matched, err := recon.AutoMatch(ctx, pool, org.ID)
@@ -357,7 +357,7 @@ func TestAutoMatchRouteAuditsActor(t *testing.T) {
 	s := e.Login(owner, e.Handler())
 	ctx := e.Ctx
 	contactID := e.Contact(org).ID
-	inv := e.Invoice(org, contactID, testkit.Amount(15000), testkit.Issued(time.Now()))
+	inv := e.Invoice(org, contactID, testkit.Amount(15000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	testBankLineID(t, pool, org.ID, 15000, testkit.Date("2026-11-07"), "Transfer "+inv.PaymentReference)
 
 	rr := s.Do(http.MethodPost, "/api/v1/orgs/acme/reconcile/auto", nil)
@@ -388,7 +388,7 @@ func TestUnmatchAuditRecordsDeletedPayment(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
-	inv := e.Invoice(org, contactID, testkit.Amount(12000), testkit.Issued(time.Now()))
+	inv := e.Invoice(org, contactID, testkit.Amount(12000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	lineID := testBankLineID(t, pool, org.ID, 12000, testkit.Date("2026-11-08"), "Transfer")
 
 	tx, err := pool.Begin(ctx)
@@ -537,9 +537,9 @@ func TestReferenceMatchIgnoresPunctuationAndCase(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	contactID := e.Contact(org).ID
-	spaced := e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now()))
-	e.Invoice(org, contactID, testkit.Amount(30000), testkit.Issued(time.Now())) // same amount, other reference
-	joined := e.Invoice(org, contactID, testkit.Amount(45000), testkit.Issued(time.Now()))
+	spaced := e.Invoice(org, contactID, testkit.Amount(30000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
+	e.Invoice(org, contactID, testkit.Amount(30000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now())) // same amount, other reference
+	joined := e.Invoice(org, contactID, testkit.Amount(45000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 
 	spacedLine := testBankLineID(t, pool, org.ID, 30000, testkit.Date("2026-11-04"),
 		"Transfer "+strings.ToLower(strings.ReplaceAll(spaced.PaymentReference, "-", " ")))
@@ -577,7 +577,7 @@ func TestMatchInvoiceOtherOrgInvoice404(t *testing.T) {
 	pool, ctx := e.Pool, e.Ctx
 	org := e.Org("acme")
 	other := e.Org("other")
-	otherInv := e.Invoice(other, e.Contact(other).ID, testkit.Amount(20000), testkit.Issued(time.Now()))
+	otherInv := e.Invoice(other, e.Contact(other).ID, testkit.Amount(20000), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	lineID := testBankLineID(t, pool, org.ID, 20000, testkit.Date("2026-11-02"), "Transfer "+otherInv.PaymentReference)
 
 	err := module.RunInTx(ctx, pool, func(tx pgx.Tx) error {

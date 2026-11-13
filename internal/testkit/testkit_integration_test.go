@@ -537,3 +537,28 @@ func TestHandlerStoresFilesInTempDir(t *testing.T) {
 		t.Fatalf("upload stored under the working directory: stat %d: %v", org.ID, err)
 	}
 }
+
+func TestResidentialOption(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	if p := e.Property(org, testkit.Commercial(), testkit.Residential()); !p.Residential {
+		t.Fatalf("Residential after Commercial: Residential = false, want true")
+	}
+	if p := e.Property(org, testkit.PropertyName("2 Shop St"), testkit.Commercial()); p.Residential {
+		t.Fatalf("Commercial: Residential = true, want false")
+	}
+}
+
+func TestProjectGSTOption(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	client := e.Contact(org)
+	p := e.Project(org, client.ID, testkit.ProjectGST("FRE"))
+	got, err := timesheets.GetProject(e.Ctx, e.Pool, org.ID, p.ID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if got.GSTCode != core.FRE {
+		t.Fatalf("GSTCode = %q, want FRE", got.GSTCode)
+	}
+}

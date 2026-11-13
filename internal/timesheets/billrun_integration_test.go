@@ -67,11 +67,11 @@ func TestRunBillingGroupsByTask(t *testing.T) {
 	clientA := e.Contact(org, testkit.Name("Client A")).ID
 	clientB := e.Contact(org, testkit.Name("Client B")).ID
 
-	p1 := e.Project(org, clientA, testkit.ProjectName("P1"), testkit.ProjectRate(12000))
-	p2 := e.Project(org, clientA, testkit.ProjectName("P2"), testkit.ProjectRate(9500))
+	p1 := e.Project(org, clientA, testkit.ProjectName("P1"), testkit.ProjectRate(12000), testkit.ProjectGST("GST"))
+	p2 := e.Project(org, clientA, testkit.ProjectName("P2"), testkit.ProjectRate(9500), testkit.ProjectGST("GST"))
 	t1 := e.Task(org, p1.ID, testkit.TaskName("T1"))
 	t2 := e.Task(org, p2.ID, testkit.TaskName("T2"))
-	pB := e.Project(org, clientB, testkit.ProjectName("PB"), testkit.ProjectRate(10000))
+	pB := e.Project(org, clientB, testkit.ProjectName("PB"), testkit.ProjectRate(10000), testkit.ProjectGST("GST"))
 	tB := e.Task(org, pB.ID, testkit.TaskName("TB"))
 
 	nov15 := testkit.Date("2026-11-15")
@@ -465,7 +465,7 @@ func TestRunBillingZeroTotal422(t *testing.T) {
 	org := e.Org("acme")
 	userID := e.User("entries-zero-total@example.com").ID
 	client := e.Contact(org, testkit.Name("A Client")).ID
-	proj := e.Project(org, client, testkit.ProjectName("Pro bono"), testkit.ProjectRate(1))
+	proj := e.Project(org, client, testkit.ProjectName("Pro bono"), testkit.ProjectRate(1), testkit.ProjectGST("GST"))
 	task := e.Task(org, proj.ID, testkit.TaskName("Build"))
 
 	from := testkit.Date("2026-11-01")

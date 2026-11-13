@@ -29,7 +29,7 @@ import (
 // provider_ref), returning the invoice id and payment id.
 func testStripePayment(e *testkit.Env, org core.Org, contactID int64, totalCents int64, paidOn time.Time, providerRef string) (invoiceID, paymentID int64) {
 	e.T.Helper()
-	inv := e.Invoice(org, contactID, testkit.Amount(totalCents), testkit.Issued(time.Now()))
+	inv := e.Invoice(org, contactID, testkit.Amount(totalCents), testkit.InvoiceGST("N-T"), testkit.Issued(time.Now()))
 	payment, _, err := core.RecordPayment(e.Ctx, e.Pool, org.ID, core.NewPayment{
 		InvoiceID: inv.ID, Amount: core.Cents(totalCents), PaidOn: paidOn, Method: "stripe", ProviderRef: providerRef,
 	})

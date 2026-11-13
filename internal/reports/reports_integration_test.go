@@ -168,7 +168,7 @@ func TestBASTiesToDetail(t *testing.T) {
 
 	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
 	client := e.Contact(org, testkit.Name("Client")).ID
-	resProperty := e.Property(org, testkit.PropertyName("1 Rental St")).ID
+	resProperty := e.Property(org, testkit.PropertyName("1 Rental St"), testkit.Residential()).ID
 
 	// Rent: $500, INP (residential), paid in full.
 	rentInv := e.Invoice(org, tenant, testkit.Source("rent"), testkit.Amount(50000), testkit.InvoiceGST("INP"), testkit.LineProperty(resProperty), testkit.Issued(testkit.Date("2026-07-01")))
