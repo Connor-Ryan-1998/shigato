@@ -22,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"shigoto/internal/auth"
-	"shigoto/internal/config"
 	"shigoto/internal/core"
 	"shigoto/internal/importers"
 	"shigoto/internal/module"
@@ -109,16 +108,6 @@ func testExpense(t *testing.T, pool *pgxpool.Pool, orgID, categoryID int64, amou
 	}
 }
 
-// noModules disables every toggleable module: reports are core and must
-// work regardless.
-func noModules() testkit.HandlerOption {
-	off := map[string]bool{}
-	for _, name := range config.Known {
-		off[name] = false
-	}
-	return testkit.Modules(off)
-}
-
 // basFiguresBody mirrors the API's snake_case/"1a"/"1b" BAS figure keys
 // (see reports.BASFigures.MarshalJSON), used for both figures_cents and
 // figures_dollars.
@@ -163,7 +152,7 @@ func TestBASTiesToDetail(t *testing.T) {
 	org := e.Org("acme")
 	owner := e.User("owner@example.com")
 	e.Member(owner, org, auth.Owner)
-	s := e.Login(owner, e.Handler(noModules()))
+	s := e.Login(owner, e.Handler(testkit.OnlyModules()))
 	e.Settings(org, testkit.GSTRegistered(true))
 
 	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
@@ -260,7 +249,7 @@ func TestPnLByProperty(t *testing.T) {
 	org := e.Org("acme")
 	owner := e.User("owner@example.com")
 	e.Member(owner, org, auth.Owner)
-	s := e.Login(owner, e.Handler(noModules()))
+	s := e.Login(owner, e.Handler(testkit.OnlyModules()))
 	e.Settings(org, testkit.GSTRegistered(true))
 	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
 	client := e.Contact(org, testkit.Name("Client")).ID
@@ -329,7 +318,7 @@ func TestTransactionsCSV(t *testing.T) {
 	org := e.Org("acme")
 	owner := e.User("owner@example.com")
 	e.Member(owner, org, auth.Owner)
-	s := e.Login(owner, e.Handler(noModules()))
+	s := e.Login(owner, e.Handler(testkit.OnlyModules()))
 	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
 	repairsCat := testCategoryID(t, pool, org.ID, "Repairs & maintenance")
 
@@ -418,7 +407,7 @@ func TestReportsExcludeDraftAndVoid(t *testing.T) {
 	org := e.Org("acme")
 	owner := e.User("owner@example.com")
 	e.Member(owner, org, auth.Owner)
-	s := e.Login(owner, e.Handler(noModules()))
+	s := e.Login(owner, e.Handler(testkit.OnlyModules()))
 	e.Settings(org, testkit.GSTRegistered(true))
 	tenant := e.Contact(org, testkit.Kind("tenant"), testkit.Name("Tenant")).ID
 

@@ -58,6 +58,7 @@ type invoiceConfig struct {
 	gstCode    string
 	propertyID *int64
 	source     string
+	dueIn      int
 	issue      *time.Time
 }
 
@@ -81,6 +82,9 @@ func LineProperty(propertyID int64) InvoiceOption {
 	return func(c *invoiceConfig) { c.propertyID = &propertyID }
 }
 
+// DueIn sets the invoice's payment term: due days after its issue date.
+func DueIn(days int) InvoiceOption { return func(c *invoiceConfig) { c.dueIn = days } }
+
 // Source sets the invoice source (manual, rent, timesheet...).
 func Source(s string) InvoiceOption { return func(c *invoiceConfig) { c.source = s } }
 
@@ -90,17 +94,17 @@ func Issued(today time.Time) InvoiceOption {
 }
 
 // Invoice creates an invoice to contactID with one line. Defaults: a
-// 1000-cent N-T (GST-free) manual draft due in 14 days, untagged.
+// 1000-cent N-T (GST-free) manual draft due 14 days after issue, untagged.
 func (e *Env) Invoice(org core.Org, contactID int64, opts ...InvoiceOption) core.Invoice {
 	e.T.Helper()
-	c := invoiceConfig{amount: 1000, gstCode: "N-T", source: "manual"}
+	c := invoiceConfig{amount: 1000, gstCode: "N-T", source: "manual", dueIn: 14}
 	for _, opt := range opts {
 		opt(&c)
 	}
 	inv, err := core.CreateDraftInvoice(e.Ctx, e.Pool, org.ID, core.NewInvoice{
 		ContactID: contactID,
 		Source:    c.source,
-		DueInDays: 14,
+		DueInDays: c.dueIn,
 		Lines: []core.NewLine{
 			{Description: "line", QuantityMilli: 1000, UnitAmount: c.amount, GSTCode: c.gstCode, PropertyID: c.propertyID},
 		},

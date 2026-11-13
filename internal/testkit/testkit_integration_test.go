@@ -602,3 +602,16 @@ func TestOwnerSessionReadsOrg(t *testing.T) {
 		t.Fatalf("owner GET settings = %d, want 200; body %s", r.Code, r.Body)
 	}
 }
+
+func TestDueInSetsInvoiceTerm(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	c := e.Contact(org)
+	for _, days := range []int{0, 30} {
+		inv := e.Invoice(org, c.ID, testkit.DueIn(days), testkit.Issued(testkit.Date("2026-02-01")))
+		want := testkit.Date("2026-02-01").AddDate(0, 0, days)
+		if inv.DueInDays != days || inv.DueDate == nil || !inv.DueDate.Equal(want) {
+			t.Fatalf("DueIn(%d): due_in %d due date %v, want %d and %s", days, inv.DueInDays, inv.DueDate, days, want.Format("2006-01-02"))
+		}
+	}
+}

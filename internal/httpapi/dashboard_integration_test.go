@@ -31,15 +31,11 @@ func backdateDueDate(e *testkit.Env, org core.Org, invoiceID int64, days int) {
 }
 
 // issuedDueIn creates and issues today a one-line, GST-free manual invoice
-// for totalCents, then moves its due date to dueInDays after the issue
-// date (testkit drafts use a 14-day term).
+// for totalCents, due dueInDays after today.
 func issuedDueIn(e *testkit.Env, org core.Org, contactID, totalCents int64, dueInDays int) core.Invoice {
 	e.T.Helper()
-	inv := e.Invoice(org, contactID, testkit.Amount(totalCents), testkit.InvoiceGST("N-T"), testkit.Source("manual"), testkit.Issued(time.Now()))
-	if dueInDays != 14 {
-		backdateDueDate(e, org, inv.ID, 14-dueInDays)
-	}
-	return inv
+	return e.Invoice(org, contactID, testkit.Amount(totalCents), testkit.InvoiceGST("N-T"), testkit.Source("manual"),
+		testkit.DueIn(dueInDays), testkit.Issued(time.Now()))
 }
 
 // recordPayment records a cash payment of amount on invoiceID, paid today.

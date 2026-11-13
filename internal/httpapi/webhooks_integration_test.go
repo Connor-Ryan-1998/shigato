@@ -62,9 +62,11 @@ func fakeWebhookBody(t *testing.T, id, kind, invoiceRef, paymentRef string, amou
 	return body
 }
 
-// stripeSig is the Stripe-Signature request header carrying sig.
+// stripeSig is the request headers a Stripe webhook delivery carries: a
+// Stripe-Signature of sig and neither the JSON Content-Type nor the CSRF
+// header that testkit sends by default (empty values delete them).
 func stripeSig(sig string) map[string]string {
-	return map[string]string{"Stripe-Signature": sig}
+	return map[string]string{"Stripe-Signature": sig, "Content-Type": "", "X-Shigoto-CSRF": ""}
 }
 
 func TestWebhookPaysInvoice(t *testing.T) {
@@ -284,7 +286,7 @@ func TestSendPastDueRejected(t *testing.T) {
 
 	// Issued 30 days ago on a 14-day term: due 16 days ago, never sent.
 	draftID := e.Invoice(org, contact.ID, testkit.Amount(1000), testkit.InvoiceGST("N-T"), testkit.Source("manual"),
-		testkit.Issued(time.Now().AddDate(0, 0, -30))).ID
+		testkit.DueIn(14), testkit.Issued(time.Now().AddDate(0, 0, -30))).ID
 
 	rr := owner.Do(http.MethodPost, fmt.Sprintf("/api/v1/orgs/acme/invoices/%d/send", draftID), nil)
 	if rr.Code != http.StatusConflict || !strings.Contains(string(rr.Body), "due date has passed; void and reissue") {
