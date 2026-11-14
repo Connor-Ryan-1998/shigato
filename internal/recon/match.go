@@ -112,8 +112,10 @@ func MatchInvoice(ctx context.Context, tx core.Querier, orgID, lineID, invoiceID
 	// Lock and check the invoice ourselves (rather than relying solely on
 	// RecordPayment's own lock) because RecordPayment only rejects
 	// draft/void; a bank match additionally requires the invoice be open
-	// - not already paid - so a stray reconciliation can't silently stack
-	// a second payment onto a settled invoice.
+	// or written off (uncollectible) - not already paid - so a stray
+	// reconciliation can't silently stack a second payment onto a settled
+	// invoice. Only this explicit match accepts uncollectible invoices;
+	// Suggest and AutoMatch keep to open ones.
 	var invStatus string
 	err = tx.QueryRow(ctx, `SELECT status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, invoiceID).Scan(&invStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -122,7 +124,7 @@ func MatchInvoice(ctx context.Context, tx core.Querier, orgID, lineID, invoiceID
 	if err != nil {
 		return core.Payment{}, err
 	}
-	if invStatus != "open" {
+	if invStatus != "open" && invStatus != "uncollectible" {
 		return core.Payment{}, core.ErrInvalidState
 	}
 
@@ -299,7 +301,8 @@ type deletedPayment struct {
 // payments this module created (method bank_transfer or payid) are
 // deleted - a payout link recorded by a later task's Stripe webhook flow
 // is untouched. If deleting a payment leaves a previously-paid invoice
-// below its total, that invoice is reopened. Any linked expense is
+// below its total, that invoice is reopened (or restored to uncollectible
+// if it had been written off; reopened_invoice_ids lists both). Any linked expense is
 // unlinked, and any ignore reason is cleared. The audit diff records
 // exactly what was deleted/reopened/unlinked, since this is the one
 // action in the package that hard-deletes money-moving rows.
@@ -367,7 +370,9 @@ func Unmatch(ctx context.Context, tx core.Querier, orgID, lineID int64) error {
 			return err
 		}
 		if sum < total {
-			if _, err := tx.Exec(ctx, `UPDATE invoices SET status = 'open' WHERE org_id = $1 AND id = $2`, orgID, invID); err != nil {
+			// A written-off invoice goes back to uncollectible, never
+			// silently back to an open debt.
+			if _, err := tx.Exec(ctx, `UPDATE invoices SET status = CASE WHEN written_off THEN 'uncollectible' ELSE 'open' END WHERE org_id = $1 AND id = $2`, orgID, invID); err != nil {
 				return err
 			}
 			reopened = append(reopened, invID)

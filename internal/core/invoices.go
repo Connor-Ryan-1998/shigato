@@ -113,12 +113,16 @@ type Invoice struct {
 	PaymentReference string
 	ProviderRef      string
 	ProviderURL      string
-	Lines            []InvoiceLine
+	// WrittenOff is set while the invoice is (or, once paid, was) marked
+	// uncollectible, so a later payment reversal restores 'uncollectible'
+	// rather than reinstating the debt as 'open'.
+	WrittenOff bool
+	Lines      []InvoiceLine
 }
 
 const invoiceColumns = `id, org_id, contact_id, number, source, status, issue_date, due_date,
 	due_in_days, due_on, currency, subtotal, gst_total, total, payment_reference,
-	coalesce(provider_ref,''), coalesce(provider_url,'')`
+	coalesce(provider_ref,''), coalesce(provider_url,''), written_off`
 
 func scanInvoice(row pgx.Row) (Invoice, error) {
 	var inv Invoice
@@ -126,7 +130,7 @@ func scanInvoice(row pgx.Row) (Invoice, error) {
 	var subtotal, gstTotal, total int64
 	err := row.Scan(&inv.ID, &inv.OrgID, &inv.ContactID, &number, &inv.Source, &inv.Status,
 		&inv.IssueDate, &inv.DueDate, &inv.DueInDays, &inv.DueOn, &inv.Currency, &subtotal, &gstTotal, &total,
-		&inv.PaymentReference, &inv.ProviderRef, &inv.ProviderURL)
+		&inv.PaymentReference, &inv.ProviderRef, &inv.ProviderURL, &inv.WrittenOff)
 	if err != nil {
 		return Invoice{}, err
 	}
@@ -424,8 +428,43 @@ func IssueInvoice(ctx context.Context, tx Querier, orgID, id int64, today time.T
 	return GetInvoice(ctx, tx, orgID, id)
 }
 
-// VoidInvoice voids an 'open' or 'draft' invoice, keeping its number (an
-// 'open' invoice has one; a 'draft' never did). Any other status returns
+// MarkInvoiceUncollectible writes off an 'open' invoice: status becomes
+// 'uncollectible' and written_off is set. Any other status returns
+// ErrInvalidState. It locks the invoice row; run it in the caller's
+// transaction alongside the audit entry and any provider call.
+func MarkInvoiceUncollectible(ctx context.Context, tx Querier, orgID, id int64) (Invoice, error) {
+	return transitionInvoice(ctx, tx, orgID, id, "open", "uncollectible", true)
+}
+
+// ReinstateInvoice reverses a write-off: an 'uncollectible' invoice becomes
+// 'open' again and written_off is cleared. Any other status returns
+// ErrInvalidState.
+func ReinstateInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, error) {
+	return transitionInvoice(ctx, tx, orgID, id, "uncollectible", "open", false)
+}
+
+// transitionInvoice locks invoice id, checks it is in status from, and
+// moves it to status to with written_off set to writtenOff.
+func transitionInvoice(ctx context.Context, tx Querier, orgID, id int64, from, to string, writtenOff bool) (Invoice, error) {
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM invoices WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Invoice{}, ErrNotFound
+	}
+	if err != nil {
+		return Invoice{}, err
+	}
+	if status != from {
+		return Invoice{}, ErrInvalidState
+	}
+	if _, err := tx.Exec(ctx, `UPDATE invoices SET status = $1, written_off = $2 WHERE org_id = $3 AND id = $4`, to, writtenOff, orgID, id); err != nil {
+		return Invoice{}, err
+	}
+	return GetInvoice(ctx, tx, orgID, id)
+}
+
+// VoidInvoice voids a 'draft', 'open' or 'uncollectible' invoice, keeping its
+// number (only a 'draft' never had one). Any other status returns
 // ErrInvalidState. Discarding a draft this way (rather than deleting it)
 // keeps it visible for audit purposes and lets billing.Void's single code
 // path unlock its time entries and skip the provider call (a draft never
@@ -447,7 +486,7 @@ func VoidInvoice(ctx context.Context, tx Querier, orgID, id int64) (Invoice, err
 	if err != nil {
 		return Invoice{}, err
 	}
-	if status != "open" && status != "draft" {
+	if status != "open" && status != "draft" && status != "uncollectible" {
 		return Invoice{}, ErrInvalidState
 	}
 
