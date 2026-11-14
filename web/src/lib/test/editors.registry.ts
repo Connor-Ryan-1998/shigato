@@ -13,6 +13,7 @@ import BillingRunDialog from '../modules/timesheets/BillingRunDialog.svelte';
 import PropertyDetailsPage from '../../routes/[org]/properties/[id]/+page.svelte';
 import InsuranceDialog from '../modules/property/InsuranceDialog.svelte';
 import DepreciationItemDialog from '../modules/property/DepreciationItemDialog.svelte';
+import Item21MappingDialog from '../modules/property/Item21MappingDialog.svelte';
 import PropertyNotesPage from '../../routes/[org]/properties/[id]/notes/+page.svelte';
 
 export const components = {
@@ -21,6 +22,7 @@ export const components = {
 	DepreciationItemDialog,
 	ExpenseNewPage,
 	InsuranceDialog,
+	Item21MappingDialog,
 	InvoiceNewPage,
 	InvoicePage,
 	LeaseNewPage,

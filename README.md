@@ -290,3 +290,21 @@ on reset; uploaded bytes are not deleted from disk by this command.
 All money is represented in cents as `int64`. GST is calculated per invoice or expense line and rounded half away from zero to the cent. The rounding rule for n/d is: for n≥0, use (2n+d)/(2d); for n<0, negate, compute, and negate the result. This ensures that 0.5 cents rounds away from zero in both directions.
 
 Rent, charge and `opening_arrears` amounts on a lease are entered GST-exclusive. Residential rent is input-taxed (`INP`), so no GST is added. For non-residential property, GST is added on top when the org is GST-registered (`GST`); otherwise the line is GST-free (`FRE`). A non-residential rent of $500.00 therefore bills $550.00 for a registered org.
+
+## Rental property tax reports
+
+Each property has a page (pencil icon on the Properties list) with Details,
+Bills, Depreciation and Notes tabs. Bills are the expenses tagged to the
+property; there is no separate bill record. Depreciation items hold the yearly
+amounts from a quantity surveyor's report (or the owner's own figures); Shigoto
+records them and never calculates depreciation.
+
+Reports → Rental property tax produces, per financial year (named by its end
+year, following the org's `fy_start_month`), an Accountant report and an
+Item 21 (ATO rental schedule) report, each as a printable page or CSV. Rent is
+counted when received; bond payments are excluded. Expenses land on the Item 21
+label set on their category (Reports → Item 21 labels); unmapped categories
+count as Sundry with a warning. Expense lines in `capital` categories are never
+deductions: claim them through depreciation items, which feed Capital
+allowances (plant and equipment) or Capital works deductions. Amounts assume
+100% ownership.

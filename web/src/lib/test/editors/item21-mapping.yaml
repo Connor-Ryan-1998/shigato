@@ -1,0 +1,19 @@
+id: item21-mapping
+component: Item21MappingDialog
+props: {open: true, org: acme}
+callbacks: [onsaved]
+api:
+  GET /api/v1/orgs/acme/categories:
+    - {id: 2, name: Council rates, type: expense, default_gst_code: N-T, capital: false, item21_label: council_rates}
+    - {id: 3, name: Rent, type: income, default_gst_code: INP, capital: false, item21_label: null}
+ready: Choose where each expense category appears on the ATO rental schedule.
+fill: {Council rates: land_tax}
+submit: Save labels
+request: PUT /api/v1/orgs/acme/categories/2
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

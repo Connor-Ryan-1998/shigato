@@ -6,6 +6,9 @@
 	import FilterBar from '../../../lib/components/FilterBar.svelte';
 	import Field from '../../../lib/components/Field.svelte';
 	import Button from '../../../lib/components/Button.svelte';
+	import { session } from '../../../lib/session.svelte';
+	import Item21MappingDialog from '../../../lib/modules/property/Item21MappingDialog.svelte';
+	import { fyOptions } from '../../../lib/modules/property/fy';
 
 	type PnLGroup = {
 		key: string;
@@ -113,6 +116,27 @@
 	$effect(() => {
 		pnlParams;
 		loadPnl();
+	});
+
+	// Rental property tax reports (property module).
+	const org = $derived(page.params.org ?? '');
+	const rentalEnabled = $derived(session.modules.includes('property'));
+	const member = $derived(session.currentOrg?.slug === org ? session.currentOrg : null);
+	const canMapLabels = $derived(session.modules.includes('reconciliation') && (member?.perms.includes('recon_write') ?? false));
+	const rentalFYOptions = fyOptions(fyEndYear, 10);
+	let rentalFY = $state(String(fyEndYear));
+	let rentalProperty = $state('');
+	let rentalProperties = $state<{ id: number; name: string }[]>([]);
+	let labelsOpen = $state(false);
+	let rentalSeq = 0;
+	const rentalQuery = $derived(new URLSearchParams({ fy: rentalFY, ...(rentalProperty ? { property_id: rentalProperty } : {}) }).toString());
+	$effect(() => {
+		if (!rentalEnabled || !org) return;
+		const seq = ++rentalSeq;
+		const slug = org;
+		api<{ id: number; name: string }[]>('GET', `/api/v1/orgs/${slug}/properties`)
+			.then((list) => { if (seq === rentalSeq && slug === org) rentalProperties = list; })
+			.catch(() => { if (seq === rentalSeq) rentalProperties = []; });
 	});
 	$effect(() => {
 		basParams;
@@ -242,3 +266,33 @@
 		<p>Loading…</p>
 	{/if}
 </section>
+
+{#if rentalEnabled}
+<section class="mb-8" aria-labelledby="rental-heading">
+	<h2 id="rental-heading" class="mb-3 text-lg font-semibold">Rental property tax</h2>
+	<p class="mb-3 text-base-content/70">End-of-year rental figures: rent counted when received, bills by Item 21 label, and recorded depreciation.</p>
+	<FilterBar label="Rental report filters">
+		<Field label="Financial year" id="rental-fy">
+			<select class="select" id="rental-fy" bind:value={rentalFY}>
+				{#each rentalFYOptions as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+			</select>
+		</Field>
+		<Field label="Property" id="rental-property">
+			<select class="select" id="rental-property" bind:value={rentalProperty}>
+				<option value="">All properties</option>
+				{#each rentalProperties as p (p.id)}<option value={String(p.id)}>{p.name}</option>{/each}
+			</select>
+		</Field>
+	</FilterBar>
+	<p class="my-3 flex flex-wrap gap-4">
+		<a class="link link-primary" href={`/${org}/reports/rental?kind=item21&${rentalQuery}`}>Item 21 view</a>
+		<a class="link link-primary" href={`/api/v1/orgs/${org}/rental-reports/item21?${rentalQuery}&format=csv`} download>Item 21 CSV</a>
+		<a class="link link-primary" href={`/${org}/reports/rental?kind=accountant&${rentalQuery}`}>Accountant view</a>
+		<a class="link link-primary" href={`/api/v1/orgs/${org}/rental-reports/accountant?${rentalQuery}&format=csv`} download>Accountant CSV</a>
+	</p>
+	{#if canMapLabels}
+		<Button variant="secondary" onclick={() => (labelsOpen = true)}>Item 21 labels</Button>
+		<Item21MappingDialog bind:open={labelsOpen} {org} onsaved={() => {}} />
+	{/if}
+</section>
+{/if}

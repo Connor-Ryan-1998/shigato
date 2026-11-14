@@ -83,8 +83,8 @@
 	class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-box focus:bg-base-100 focus:px-4 focus:py-2 focus:shadow"
 >Skip to content</a>
 
-<div class="grid min-h-screen grid-cols-1 grid-rows-[auto_1fr] bg-base-200 md:grid-cols-[16rem_1fr]">
-	<header class="navbar col-span-full flex-wrap gap-2 border-b border-base-300 bg-base-100 px-4">
+<div class="grid min-h-screen grid-cols-1 grid-rows-[auto_1fr] bg-base-200 md:grid-cols-[16rem_1fr] print:block print:bg-white">
+	<header class="navbar col-span-full flex-wrap gap-2 border-b border-base-300 bg-base-100 px-4 print:hidden">
 		<button
 			type="button"
 			class="btn btn-square btn-ghost md:hidden"
@@ -127,7 +127,7 @@
 		</div>
 	</header>
 
-	<nav class="hidden border-r border-base-300 bg-base-100 py-2 md:block" aria-label="Primary">
+	<nav class="hidden border-r border-base-300 bg-base-100 py-2 md:block print:hidden" aria-label="Primary">
 		{@render navList()}
 	</nav>
 

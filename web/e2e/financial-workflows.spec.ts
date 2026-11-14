@@ -198,7 +198,7 @@ test('property and lease persist and expose their ledger', async ({ page }) => {
 	await page.getByRole('button', { name: 'New property', exact: true }).click();
 	await page.getByLabel('Name', { exact: true }).fill('Finance cottage');
 	await page.getByRole('button', { name: 'Create property', exact: true }).click();
-	await expect(page.getByRole('cell', { name: 'Finance cottage', exact: true })).toBeVisible();
+	await expect(page.getByRole('link', { name: 'Edit Finance cottage', exact: true })).toBeVisible();
 	await page.getByRole('link', { name: 'New lease', exact: true }).click();
 	await page.getByLabel('Start', { exact: true }).fill(today);
 	await page.getByLabel('Rent ($)', { exact: true }).fill('500');
@@ -213,6 +213,28 @@ test('property and lease persist and expose their ledger', async ({ page }) => {
 	await api(page.request, 'POST', '/rent-run');
 	const ledger = await api<{ unissued: number }>(page.request, 'GET', `/leases/${id}/ledger`);
 	expect(ledger.unissued).toBe(50000);
+});
+
+test('property details persist and reach the Item 21 report', async ({ page }) => {
+	await page.goto(`${base}/finance/properties`);
+	await page.getByRole('button', { name: 'New property', exact: true }).click();
+	await page.getByLabel('Name', { exact: true }).fill('Details cottage');
+	await page.getByRole('button', { name: 'Create property', exact: true }).click();
+	await page.getByRole('link', { name: 'Edit Details cottage', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Details cottage', exact: true })).toBeVisible();
+	await page.getByLabel('Purchase price ($)', { exact: true }).fill('650000');
+	await page.getByRole('button', { name: 'Save details', exact: true }).click();
+	await expect(page.getByText('Details saved.')).toBeVisible();
+	await page.reload();
+	await expect(page.getByLabel('Purchase price ($)', { exact: true })).toHaveValue('650000.00');
+	await page.getByRole('link', { name: 'Notes', exact: true }).click();
+	await page.getByLabel('Notes', { exact: true }).fill('Gate code 1234');
+	await page.getByRole('button', { name: 'Save notes', exact: true }).click();
+	await expect(page.getByText('Notes saved.')).toBeVisible();
+	await page.getByRole('link', { name: 'Depreciation', exact: true }).click();
+	await page.getByRole('link', { name: 'Item 21 report', exact: true }).click();
+	await expect(page.getByRole('heading', { name: /^Item 21 rental schedule FY/ })).toBeVisible();
+	await expect(page.getByRole('table', { name: 'Details cottage' })).toContainText('Net rent');
 });
 
 test('bank credit pays an invoice and reaches report and CSV', async ({ page }) => {

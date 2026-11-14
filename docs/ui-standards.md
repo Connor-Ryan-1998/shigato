@@ -205,7 +205,12 @@ screens that need no route-specific rewrite.
 | `[org]/invoices/new/+page.svelte` | Dedicated guarded editor; shared contact dialog | `+page.test.ts`, `lib/test/editors/invoice-new-contact.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/invoices/[id]/+page.svelte` | Existing detail/actions retained; protected shared payment dialog; reason dialog for write-off/reinstate | `+page.test.ts`, `lib/test/editors/invoice-payment.yaml`, `lib/test/editors/invoice-uncollectible.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/contacts/+page.svelte` | List/filter/state layout; reused contact dialog | `+page.svelte.test.ts`, `lib/test/editors/contact-dialog-*.yaml`, `e2e/financial-workflows.spec.ts` |
-| `[org]/properties/+page.svelte` | List, explicit property dialog, New lease navigation | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/properties/+page.svelte` | List, explicit property dialog, pencil edit link, New lease navigation | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/properties/[id]/+layout.svelte` | Shared back/header; section tab links (Details, Bills, Depreciation, Notes) | `+layout.svelte.test.ts` |
+| `[org]/properties/[id]/+page.svelte` | Guarded details page editor; tenancy summary; protected insurance dialog | `+page.svelte.test.ts`, `lib/test/editors/property-details.yaml`, `lib/test/editors/insurance-dialog.yaml`, `e2e/financial-workflows.spec.ts` |
+| `[org]/properties/[id]/bills/+page.svelte` | FY filter in URL; property-filtered expense table and category totals | `+page.svelte.test.ts` |
+| `[org]/properties/[id]/depreciation/+page.svelte` | FY filter in URL; FY totals; protected item dialog | `+page.svelte.test.ts`, `lib/test/editors/depreciation-item-dialog.yaml` |
+| `[org]/properties/[id]/notes/+page.svelte` | Guarded single-textarea page editor | `+page.svelte.test.ts`, `lib/test/editors/property-notes.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/leases/new/+page.svelte` | New dedicated guarded lease editor | `+page.svelte.test.ts`, `lib/test/editors/lease-new.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/leases/[id]/+page.svelte` | Short action dialogs; warning panel remains on detail page | `+page.svelte.test.ts`, `+page.test.ts`, `lib/test/editors/lease-rent-change.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/expenses/+page.svelte` | List/filter/state layout; New expense navigation | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
@@ -213,7 +218,8 @@ screens that need no route-specific rewrite.
 | `[org]/expenses/[id]/+page.svelte` | Shared back/header/table; stored IDs remain fallback for missing names | `+page.svelte.test.ts` |
 | `[org]/reconciliation/+page.svelte` | Shared filters/pagination; contextual matching drawer retained | module `LineDrawer.test.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/reconciliation/accounts/+page.svelte` | Shared back/header; protected account/import dialogs | module `ImportDialog.svelte`; import API covered by `e2e/financial-workflows.spec.ts` |
-| `[org]/reports/+page.svelte` | Shared filter surfaces; financial tables, grouping, CSV retained | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/reports/+page.svelte` | Shared filter surfaces; financial tables, grouping, CSV retained; rental section with protected Item 21 labels dialog | `+page.test.ts`, `lib/test/editors/item21-mapping.yaml`, `e2e/financial-workflows.spec.ts` |
+| `[org]/reports/rental/+page.svelte` | Printable report view (app chrome hidden in print); CSV link | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/settings/+page.svelte` | Grouped draft with Save/Cancel and navigation protection | `+page.svelte.test.ts`, `lib/test/editors/settings-page.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/settings/members/+page.svelte` | Existing stable background-refresh list; protected invite dialogs | `+page.test.ts`, module invite/table tests |
 | `portal/+page.svelte` | Shared header; picker/single-org redirect retained | `e2e/portal.spec.ts` |

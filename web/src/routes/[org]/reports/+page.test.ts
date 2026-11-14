@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { apiMock } from "../../../lib/test/mock-api";
 import { setPage } from "../../../lib/test/app.svelte";
+import { session } from "../../../lib/session.svelte";
+import { signIn } from "../../../lib/test/session";
 import { render, screen } from "@testing-library/svelte";
 
 import Page from "./+page.svelte";
@@ -105,5 +107,36 @@ describe("reports page", () => {
     expect(paths).toContain(
       "/api/v1/orgs/acme/reports/bas/detail?period=FY2027-Q2&field=1A",
     );
+  });
+
+  it("hides rental reports without the property module", async () => {
+    session.setModules([]);
+    apiMock.mockImplementation((_m: string, p: string) => route(p));
+    render(Page);
+    await screen.findByText("Net");
+    expect(screen.queryByRole("heading", { name: "Rental property tax" })).toBeNull();
+  });
+
+  it("links rental reports for the chosen year and property", async () => {
+    signIn();
+    session.setModules(["property", "reconciliation"]);
+    apiMock.mockImplementation((_m: string, p: string) =>
+      p.endsWith("/properties") ? Promise.resolve([{ id: 3, name: "Cottage" }]) : route(p),
+    );
+    render(Page);
+    expect(await screen.findByRole("heading", { name: "Rental property tax" })).toBeTruthy();
+    const property = (await screen.findByLabelText("Property")) as HTMLSelectElement;
+    await vi.waitFor(() => expect(property.options.length).toBe(2));
+    property.value = "3";
+    property.dispatchEvent(new Event("change"));
+    await vi.waitFor(() =>
+      expect(screen.getByRole("link", { name: "Item 21 view" }).getAttribute("href")).toBe(
+        "/acme/reports/rental?kind=item21&fy=2027&property_id=3",
+      ),
+    );
+    expect(screen.getByRole("link", { name: "Accountant CSV" }).getAttribute("href")).toBe(
+      "/api/v1/orgs/acme/rental-reports/accountant?fy=2027&property_id=3&format=csv",
+    );
+    expect(screen.getByRole("button", { name: "Item 21 labels" })).toBeTruthy();
   });
 });
