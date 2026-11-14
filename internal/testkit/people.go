@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -246,4 +247,36 @@ func (s Session) DoWith(method, path string, body any, headers map[string]string
 	rec := httptest.NewRecorder()
 	s.h.ServeHTTP(rec, req)
 	return Response{Code: rec.Code, Header: rec.Header(), Body: rec.Body.Bytes(), t: t}
+}
+
+// Upload posts data as the multipart "file" field named filename to path.
+func (s Session) Upload(path, filename string, data []byte) Response {
+	s.env.T.Helper()
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, err := w.CreateFormFile("file", filename)
+	if err == nil {
+		_, err = part.Write(data)
+	}
+	if err == nil {
+		err = w.Close()
+	}
+	if err != nil {
+		s.env.T.Fatalf("building multipart body: %v", err)
+	}
+	return s.DoWith(http.MethodPost, path, &body, map[string]string{"Content-Type": w.FormDataContentType()})
+}
+
+// PNG is a minimal valid 1x1 PNG, enough for http.DetectContentType to
+// sniff it as image/png.
+var PNG = []byte{
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+	0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+	0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
+	0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
+	0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+	0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+	0x42, 0x60, 0x82,
 }

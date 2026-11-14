@@ -5,6 +5,7 @@
 		arrears_total: number;
 		unissued_total: number;
 		bonds_unlodged_overdue: number;
+		insurance_renewing_soon: number;
 	};
 </script>
 
@@ -28,6 +29,10 @@
 		<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
 			<dt class="text-base-content/70">Bonds overdue to lodge</dt>
 			<dd class="m-0 font-semibold tabular-nums">{data.bonds_unlodged_overdue}</dd>
+		</div>
+		<div class="flex justify-between gap-4 border-t border-base-300 py-2 first:border-t-0">
+			<dt class="text-base-content/70">Insurance renewing within 30 days</dt>
+			<dd class="m-0 font-semibold tabular-nums">{data.insurance_renewing_soon}</dd>
 		</div>
 	</dl>
 </section>

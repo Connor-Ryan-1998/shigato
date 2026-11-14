@@ -126,3 +126,17 @@ cases:
       status: 200
       body: {name: 1 Let St, current_tenancy: {lease_id: "{l_let}", rent: 50000, frequency: weekly, primary_tenant_name: Tenant One}}
 
+
+  - name: bookkeeper cannot add an insurance policy
+    as: keeper
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/properties/{p_vacant}/insurance"
+      body: {insurer: X, type: landlord, start_date: "2026-01-01", renewal_date: "2027-01-01"}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+    unchanged: [insurance_policies, audit_log]
+
+  - name: another org cannot list a property's insurance
+    as: other_owner
+    request: {method: GET, path: "/api/v1/orgs/other/properties/{p_vacant}/insurance"}
+    expect: {status: 404, body: {error: not found}, exact: true}

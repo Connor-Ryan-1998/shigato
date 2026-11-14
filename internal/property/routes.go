@@ -29,6 +29,9 @@ type propertyDashboard struct {
 	ArrearsTotal         int64 `json:"arrears_total"`
 	UnissuedTotal        int64 `json:"unissued_total"`
 	BondsUnlodgedOverdue int   `json:"bonds_unlodged_overdue"`
+	// InsuranceRenewingSoon counts properties whose current insurance
+	// policy renews within the next 30 days.
+	InsuranceRenewingSoon int `json:"insurance_renewing_soon"`
 }
 
 // dashboardSection builds the property module's dashboard section: arrears
@@ -73,14 +76,21 @@ func dashboardSection(ctx context.Context, q core.Querier, orgID int64, today ti
 		}
 	}
 
+	renewing, err := InsuranceRenewingSoon(ctx, q, orgID, today)
+	if err != nil {
+		return nil, err
+	}
+
 	return propertyDashboard{
-		ArrearsTotal:         int64(arrears),
-		UnissuedTotal:        int64(unissued),
-		BondsUnlodgedOverdue: bondsUnlodgedOverdue,
+		InsuranceRenewingSoon: renewing,
+		ArrearsTotal:          int64(arrears),
+		UnissuedTotal:         int64(unissued),
+		BondsUnlodgedOverdue:  bondsUnlodgedOverdue,
 	}, nil
 }
 
 func registerRoutes(mux *http.ServeMux, d module.Deps) {
+	registerDetailRoutes(mux, d)
 	mux.Handle("POST /api/v1/orgs/{org}/properties",
 		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			createProperty(w, r, d)
