@@ -11,8 +11,6 @@ import (
 	"shigoto/internal/testkit"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 func TestUpdatePropertyRoundTrips(t *testing.T) {
 	e := testkit.New(t)
 	org := e.Org("acme")

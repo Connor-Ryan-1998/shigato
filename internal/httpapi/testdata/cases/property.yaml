@@ -140,3 +140,28 @@ cases:
     as: other_owner
     request: {method: GET, path: "/api/v1/orgs/other/properties/{p_vacant}/insurance"}
     expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: bookkeeper cannot add a depreciation item
+    as: keeper
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/properties/{p_vacant}/depreciation"
+      body: {name: Aircon, type: plant_equipment, installed_on: "2026-08-10", amounts: [], document_ids: []}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+    unchanged: [depreciation_items, audit_log]
+
+  - name: another org cannot list a property's depreciation
+    as: other_owner
+    request: {method: GET, path: "/api/v1/orgs/other/properties/{p_vacant}/depreciation"}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: owner adds a depreciation item
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/properties/{p_vacant}/depreciation"
+      body: {name: Aircon, type: plant_equipment, installed_on: "2026-08-10", cost: 320000, notes: "", amounts: [{fy: 2027, amount: 45000}], document_ids: []}
+    expect:
+      status: 201
+      body: {name: Aircon, type: plant_equipment, amounts: [{fy: 2027, amount: 45000}], documents: []}
