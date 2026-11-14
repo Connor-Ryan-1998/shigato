@@ -42,8 +42,8 @@ func TestCSVSafe(t *testing.T) {
 		"":         "",
 	}
 	for in, want := range cases {
-		if got := csvSafe(in); got != want {
-			t.Errorf("csvSafe(%q) = %q, want %q", in, got, want)
+		if got := CSVSafe(in); got != want {
+			t.Errorf("CSVSafe(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

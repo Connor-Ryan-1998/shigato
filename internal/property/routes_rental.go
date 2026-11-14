@@ -243,7 +243,7 @@ func writeRentalCSV(w http.ResponseWriter, kind string, fy int, props []rentalPr
 		_ = cw.Write([]string{"property", "label", "amount"})
 		for _, rp := range props {
 			res := Item21(rp.Income, rp.Bills, rp.Depreciation, fy)
-			name := rp.Property.Name
+			name := reports.CSVSafe(rp.Property.Name)
 			_ = cw.Write([]string{name, "Gross rent", formatDollars(res.GrossRent)})
 			_ = cw.Write([]string{name, "Other rental related income", formatDollars(res.OtherIncome)})
 			for _, l := range orderedDeductions(res) {
@@ -255,14 +255,15 @@ func writeRentalCSV(w http.ResponseWriter, kind string, fy int, props []rentalPr
 	}
 
 	_ = cw.Write([]string{"property", "section", "date", "category", "item21_label", "description", "supplier", "incl_gst", "gst", "ex_gst", "receipt"})
+	safe := reports.CSVSafe
 	for _, rp := range props {
-		name := rp.Property.Name
+		name := safe(rp.Property.Name)
 		for _, row := range rp.Income {
 			desc := fmt.Sprintf("Invoice %d", row.InvoiceID)
 			if row.InvoiceNumber != nil {
 				desc = fmt.Sprintf("Invoice #%d", *row.InvoiceNumber)
 			}
-			_ = cw.Write([]string{name, "income", row.PaidOn.Format(dateLayout), row.Category, "", desc, "",
+			_ = cw.Write([]string{name, "income", row.PaidOn.Format(dateLayout), safe(row.Category), "", desc, "",
 				formatDollars(row.Incl), formatDollars(row.GST), formatDollars(row.Ex), ""})
 		}
 		for _, b := range rp.Bills {
@@ -274,8 +275,8 @@ func writeRentalCSV(w http.ResponseWriter, kind string, fy int, props []rentalPr
 			} else {
 				label = string(core.Item21Sundry)
 			}
-			_ = cw.Write([]string{name, section, b.SpentOn.Format(dateLayout), b.Category, label, b.Description, b.Supplier,
-				formatDollars(b.Incl), formatDollars(b.GST), formatDollars(b.Ex), b.ReceiptName})
+			_ = cw.Write([]string{name, section, b.SpentOn.Format(dateLayout), safe(b.Category), label, safe(b.Description), safe(b.Supplier),
+				formatDollars(b.Incl), formatDollars(b.GST), formatDollars(b.Ex), safe(b.ReceiptName)})
 		}
 		for _, item := range rp.Depreciation {
 			amount := item.AmountFor(fy)
@@ -286,7 +287,7 @@ func writeRentalCSV(w http.ResponseWriter, kind string, fy int, props []rentalPr
 			if item.Type == "capital_works" {
 				label = core.Item21CapitalWorks
 			}
-			_ = cw.Write([]string{name, "depreciation", item.InstalledOn.Format(dateLayout), item.Type, string(label), item.Name, "",
+			_ = cw.Write([]string{name, "depreciation", item.InstalledOn.Format(dateLayout), item.Type, string(label), safe(item.Name), "",
 				formatDollars(amount), "0.00", formatDollars(amount), ""})
 		}
 	}

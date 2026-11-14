@@ -442,12 +442,12 @@ func basDetailHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 
 // --- CSV ---
 
-// csvSafe guards against formula injection by prefixing a single quote to
+// CSVSafe guards against formula injection by prefixing a single quote to
 // any text cell starting with =, +, -, @, tab or carriage return, which
 // spreadsheet software would otherwise treat as a formula. Only applied to free text cells
 // (descriptions/categories/references/names), never to the numeric amount
 // columns.
-func csvSafe(s string) string {
+func CSVSafe(s string) string {
 	if s != "" && strings.ContainsAny(s[:1], "=+-@\t\r") {
 		return "'" + s
 	}
@@ -517,18 +517,18 @@ func transactionsCSVHandler(w http.ResponseWriter, r *http.Request, d module.Dep
 			reference = strconv.Itoa(*row.InvoiceNumber)
 		}
 		rows = append(rows, []string{
-			row.PaidOn.Format(dateLayout), "income", csvSafe(row.Category), string(row.Code),
+			row.PaidOn.Format(dateLayout), "income", CSVSafe(row.Category), string(row.Code),
 			formatCents(row.Incl), formatCents(row.GST), formatCents(row.Ex),
-			csvSafe(propertyIDName(properties, row.PropertyID)), csvSafe(projectIDName(projects, row.ProjectID)),
-			csvSafe(reference),
+			CSVSafe(propertyIDName(properties, row.PropertyID)), CSVSafe(projectIDName(projects, row.ProjectID)),
+			CSVSafe(reference),
 		})
 	}
 	for _, row := range exp {
 		rows = append(rows, []string{
-			row.SpentOn.Format(dateLayout), "expense", csvSafe(row.Category), string(row.Code),
+			row.SpentOn.Format(dateLayout), "expense", CSVSafe(row.Category), string(row.Code),
 			formatCents(row.Incl), formatCents(row.GST), formatCents(row.Ex),
-			csvSafe(propertyIDName(properties, row.PropertyID)), csvSafe(projectIDName(projects, row.ProjectID)),
-			csvSafe(strconv.FormatInt(row.ExpenseID, 10)),
+			CSVSafe(propertyIDName(properties, row.PropertyID)), CSVSafe(projectIDName(projects, row.ProjectID)),
+			CSVSafe(strconv.FormatInt(row.ExpenseID, 10)),
 		})
 	}
 
@@ -580,14 +580,14 @@ func pnlCSVHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	rows := [][]string{{"group", "type", "category", "amount"}}
 	for _, g := range groups {
 		for _, cat := range sortedKeys(g.Income) {
-			rows = append(rows, []string{csvSafe(g.Key), "income", csvSafe(cat), formatCents(g.Income[cat])})
+			rows = append(rows, []string{CSVSafe(g.Key), "income", CSVSafe(cat), formatCents(g.Income[cat])})
 		}
 		for _, cat := range sortedKeys(g.Expenses) {
-			rows = append(rows, []string{csvSafe(g.Key), "expense", csvSafe(cat), formatCents(g.Expenses[cat])})
+			rows = append(rows, []string{CSVSafe(g.Key), "expense", CSVSafe(cat), formatCents(g.Expenses[cat])})
 		}
-		rows = append(rows, []string{csvSafe(g.Key), "total", "Total income", formatCents(g.TotalIncome)})
-		rows = append(rows, []string{csvSafe(g.Key), "total", "Total expenses", formatCents(g.TotalExpenses)})
-		rows = append(rows, []string{csvSafe(g.Key), "total", "Net", formatCents(g.Net)})
+		rows = append(rows, []string{CSVSafe(g.Key), "total", "Total income", formatCents(g.TotalIncome)})
+		rows = append(rows, []string{CSVSafe(g.Key), "total", "Total expenses", formatCents(g.TotalExpenses)})
+		rows = append(rows, []string{CSVSafe(g.Key), "total", "Net", formatCents(g.Net)})
 	}
 
 	if err := writeCSV(w, "pnl.csv", rows); err != nil {

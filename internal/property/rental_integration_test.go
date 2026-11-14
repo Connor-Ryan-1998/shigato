@@ -133,3 +133,24 @@ func pay(e *testkit.Env, org core.Org, invoiceID int64, amount core.Cents, on st
 		e.T.Fatalf("RecordPayment: %v", err)
 	}
 }
+
+func TestRentalReportCSVGuardsFormulas(t *testing.T) {
+	e := testkit.New(t)
+	org, s := e.OwnerSession("acme", e.Handler())
+	p := e.Property(org, testkit.PropertyName("=cmd|' /C calc'!A0"))
+	exp := expense(e, org, "Council rates", 80000, testkit.Date("2026-08-01"), &p.ID)
+	if _, err := e.Pool.Exec(e.Ctx, `UPDATE expenses SET description = '@SUM(1+1)' WHERE id = $1`, exp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, kind := range []string{"accountant", "item21"} {
+		rr := s.Do(http.MethodGet, "/api/v1/orgs/acme/rental-reports/"+kind+"?fy=2027&format=csv", nil)
+		body := string(rr.Body)
+		if strings.Contains(body, "\n=cmd") || strings.Contains(body, ",@SUM") {
+			t.Errorf("%s csv has an unguarded formula cell:\n%s", kind, body)
+		}
+		if !strings.Contains(body, "'=cmd") {
+			t.Errorf("%s csv missing guarded property name:\n%s", kind, body)
+		}
+	}
+}
