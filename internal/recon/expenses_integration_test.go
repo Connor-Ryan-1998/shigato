@@ -380,7 +380,7 @@ func TestFileDownloadOtherOrg404(t *testing.T) {
 	e.Member(owner, org, auth.Owner)
 	s := e.Login(owner, e.Handler())
 	other := e.Org("other")
-	otherFile, err := recon.SaveFile(context.Background(), pool, other.ID, t.TempDir(), "receipt.png", bytes.NewReader(pngBytes))
+	otherFile, err := core.SaveFile(context.Background(), pool, other.ID, t.TempDir(), "receipt.png", bytes.NewReader(pngBytes))
 	if err != nil {
 		t.Fatalf("SaveFile: %v", err)
 	}

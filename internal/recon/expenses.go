@@ -106,7 +106,7 @@ func CreateExpense(ctx context.Context, q core.Querier, orgID int64, in NewExpen
 		}
 	}
 	if in.ReceiptFileID != nil {
-		if _, err := GetFile(ctx, q, orgID, *in.ReceiptFileID); err != nil {
+		if _, err := core.GetFile(ctx, q, orgID, *in.ReceiptFileID); err != nil {
 			if errors.Is(err, core.ErrNotFound) {
 				return Expense{}, nil, fmt.Errorf("%w: receipt_file_id not found", core.ErrInvalidInput)
 			}

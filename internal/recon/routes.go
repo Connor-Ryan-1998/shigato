@@ -4,13 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"strconv"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
@@ -506,93 +502,14 @@ func updateCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps
 
 // --- files ---
 
-// sanitizeFilename strips characters that would break or hijack the
-// Content-Disposition header (quotes, CR/LF header injection, and path
-// separators, in case a client ever reads this value as a path), plus any
-// other Unicode control rune (NUL, TAB, DEL/0x7f, etc.) that could confuse
-// a header parser or terminal even without matching one of those specific
-// cases. Falls back to "receipt" if nothing usable remains.
-func sanitizeFilename(name string) string {
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r == '"' || r == '/' || r == '\\':
-			continue
-		case unicode.IsControl(r):
-			continue
-		default:
-			b.WriteRune(r)
-		}
-	}
-	s := strings.TrimSpace(b.String())
-	if s == "" {
-		return "receipt"
-	}
-	return s
-}
-
-type fileResponse struct {
-	ID           int64  `json:"id"`
-	MIME         string `json:"mime"`
-	SizeBytes    int    `json:"size_bytes"`
-	OriginalName string `json:"original_name"`
-}
-
-func fileToResponse(f File) fileResponse {
-	return fileResponse{ID: f.ID, MIME: f.MIME, SizeBytes: f.SizeBytes, OriginalName: f.OriginalName}
-}
-
-// uploadFileHandler handles the multipart receipt upload. The request body
-// is capped at maxFileBytes via http.MaxBytesReader; exceeding it gives
-// 413, checked both at ParseMultipartForm (a declared-too-large body) and
-// around SaveFile (a streamed body that only trips the limit while being
-// read), rather than folding either into the generic 422/500 paths.
 func uploadFileHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes)
-	if err := r.ParseMultipartForm(maxFileBytes); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			module.WriteError(w, http.StatusRequestEntityTooLarge, "file too large")
-			return
-		}
-		module.WriteError(w, http.StatusBadRequest, "invalid multipart body")
+	created, ok := module.HandleUpload(w, r, d, nil)
+	if !ok {
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		module.WriteError(w, http.StatusUnprocessableEntity, "file is required")
-		return
-	}
-	defer file.Close()
-
-	p := auth.From(r.Context())
-	var created File
-	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
-		var err error
-		created, err = SaveFile(r.Context(), tx, p.OrgID, d.Cfg.FilesDir, header.Filename, file)
-		if err != nil {
-			return err
-		}
-		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "file", created.ID, "create", map[string]any{
-			"mime": created.MIME, "size_bytes": created.SizeBytes,
-		})
-	})
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			module.WriteError(w, http.StatusRequestEntityTooLarge, "file too large")
-			return
-		}
-		module.WriteCoreError(w, err)
-		return
-	}
-	module.WriteJSON(w, http.StatusCreated, fileToResponse(created))
+	module.WriteJSON(w, http.StatusCreated, module.FileToResponse(created))
 }
 
-// downloadFileHandler streams the file's bytes with its stored (sniffed)
-// MIME type. X-Content-Type-Options: nosniff stops a browser from
-// second-guessing that type from the content; Content-Disposition forces a
-// download using the sanitized original name rather than the server path.
 func downloadFileHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	id, ok := module.PathID(r)
 	if !ok {
@@ -600,23 +517,12 @@ func downloadFileHandler(w http.ResponseWriter, r *http.Request, d module.Deps) 
 		return
 	}
 	p := auth.From(r.Context())
-	f, err := GetFile(r.Context(), d.Pool, p.OrgID, id)
+	f, err := core.GetFile(r.Context(), d.Pool, p.OrgID, id)
 	if err != nil {
 		module.WriteCoreError(w, err)
 		return
 	}
-	stored, err := os.Open(f.StoredPath(d.Cfg.FilesDir))
-	if err != nil {
-		module.WriteCoreError(w, fmt.Errorf("opening stored file: %w", err))
-		return
-	}
-	defer stored.Close()
-
-	w.Header().Set("Content-Type", f.MIME)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(f.OriginalName)+`"`)
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, stored)
+	module.ServeFile(w, f, d.Cfg.FilesDir)
 }
 
 // --- expenses ---

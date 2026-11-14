@@ -1,8 +1,8 @@
-package recon
+package module
 
 import "testing"
 
-// TestSanitizeFilename covers the characters sanitizeFilename must strip
+// TestSanitizeFilename covers the characters SanitizeFilename must strip
 // before a name is safe to put inside a Content-Disposition header: quotes
 // and path separators (which could otherwise be read as a path), CR/LF
 // (header injection), and other Unicode control runes more generally.
@@ -23,8 +23,8 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sanitizeFilename(tc.in); got != tc.want {
-				t.Errorf("sanitizeFilename(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := SanitizeFilename(tc.in); got != tc.want {
+				t.Errorf("SanitizeFilename(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

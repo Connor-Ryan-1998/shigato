@@ -1,4 +1,4 @@
-package recon
+package core
 
 import (
 	"context"
@@ -14,14 +14,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"shigoto/internal/core"
 )
 
-// maxFileBytes caps a receipt upload, enforced on the whole request body
+// MaxFileBytes caps a receipt upload, enforced on the whole request body
 // via http.MaxBytesReader in the route handler (so it gives 413, not a
 // SaveFile-level 422).
-const maxFileBytes = 10 << 20 // 10 MiB
+const MaxFileBytes = 10 << 20 // 10 MiB
 
 // allowedFileMIME lists the MIME types SaveFile accepts, sniffed from the
 // file's own bytes rather than trusted from the upload's filename or
@@ -70,7 +68,7 @@ func scanFile(row pgx.Row) (File, error) {
 // r's size is bounded by the caller via http.MaxBytesReader on the
 // request body; a read that trips that limit surfaces here as an
 // *http.MaxBytesError, which callers should map to 413 rather than 422.
-func SaveFile(ctx context.Context, q core.Querier, orgID int64, filesDir, name string, r io.Reader) (File, error) {
+func SaveFile(ctx context.Context, q Querier, orgID int64, filesDir, name string, r io.Reader) (File, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return File{}, err
@@ -82,7 +80,7 @@ func SaveFile(ctx context.Context, q core.Querier, orgID int64, filesDir, name s
 	}
 	mime := http.DetectContentType(head)
 	if !allowedFileMIME[mime] {
-		return File{}, fmt.Errorf("%w: unsupported file type %q", core.ErrInvalidInput, mime)
+		return File{}, fmt.Errorf("%w: unsupported file type %q", ErrInvalidInput, mime)
 	}
 
 	sum := sha256.Sum256(data)
@@ -142,24 +140,24 @@ func writeFileAtomic(dest string, data []byte) error {
 }
 
 // GetFileByHash looks up a file by its content hash, scoped to orgID. It
-// returns core.ErrNotFound if no such file exists in that org.
-func GetFileByHash(ctx context.Context, q core.Querier, orgID int64, sha256 []byte) (File, error) {
+// returns ErrNotFound if no such file exists in that org.
+func GetFileByHash(ctx context.Context, q Querier, orgID int64, sha256 []byte) (File, error) {
 	row := q.QueryRow(ctx, `SELECT `+fileColumns+` FROM files WHERE org_id = $1 AND sha256 = $2`, orgID, sha256)
 	f, err := scanFile(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return File{}, core.ErrNotFound
+		return File{}, ErrNotFound
 	}
 	return f, err
 }
 
 // GetFile looks up a file by id, scoped to orgID. It returns
-// core.ErrNotFound if no such file exists in that org - including when the
+// ErrNotFound if no such file exists in that org - including when the
 // id belongs to another org.
-func GetFile(ctx context.Context, q core.Querier, orgID, id int64) (File, error) {
+func GetFile(ctx context.Context, q Querier, orgID, id int64) (File, error) {
 	row := q.QueryRow(ctx, `SELECT `+fileColumns+` FROM files WHERE org_id = $1 AND id = $2`, orgID, id)
 	f, err := scanFile(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return File{}, core.ErrNotFound
+		return File{}, ErrNotFound
 	}
 	return f, err
 }
