@@ -616,3 +616,30 @@ func TestWebhookMetadataFallbackBackfillsRef(t *testing.T) {
 		t.Fatalf("matched_by = %q, want metadata", parsed.MatchedBy)
 	}
 }
+
+// TestWebhookPaysUncollectibleInvoice covers a written-off invoice paid
+// later through Stripe's hosted link: it still records the payment and
+// marks the invoice paid.
+func TestWebhookPaysUncollectibleInvoice(t *testing.T) {
+	e := testkit.New(t)
+	org := e.Org("acme")
+	fake := &payments.Fake{Secret: webhookSecret}
+	invID := webhookContactAndInvoice(e, org, "in_fake_1", 10000)
+	if _, err := core.MarkInvoiceUncollectible(e.Ctx, e.Pool, org.ID, invID); err != nil {
+		t.Fatalf("MarkInvoiceUncollectible: %v", err)
+	}
+	hook := e.Anonymous(e.Handler(testkit.OnlyModules(), fakePayments(map[string]*payments.Fake{"acme": fake})))
+
+	body := fakeWebhookBody(t, "evt_1", "invoice.paid", "in_fake_1", "pi_fake_1", 10000, time.Now())
+	rr := hook.DoWith(http.MethodPost, "/webhooks/stripe/acme", bytes.NewReader(body), stripeSig(fake.Sign(body, time.Now())))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body)
+	}
+	inv, err := core.GetInvoice(e.Ctx, e.Pool, org.ID, invID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if inv.Status != "paid" {
+		t.Fatalf("status = %s, want paid", inv.Status)
+	}
+}

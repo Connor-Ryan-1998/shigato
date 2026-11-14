@@ -42,6 +42,9 @@ type Provider interface {
 	SendInvoice(ctx context.Context, inv core.Invoice, lines []core.InvoiceLine, customerRef string, today time.Time) (ref, hostedURL string, err error)
 	// VoidInvoice voids the provider-side invoice referenced by ref.
 	VoidInvoice(ctx context.Context, ref string) error
+	// MarkUncollectible marks the provider-side invoice referenced by ref
+	// uncollectible (written off). The provider invoice stays payable.
+	MarkUncollectible(ctx context.Context, ref string) error
 	// ParseWebhook verifies payload's signature against sigHeader and
 	// decodes it into an Event. It returns ErrBadSignature if the
 	// signature doesn't match.

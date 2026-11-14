@@ -61,6 +61,14 @@ func registerCoreRoutes(mux *http.ServeMux, d Deps) {
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			voidInvoice(w, r, d)
 		})))
+	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/uncollectible",
+		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			markUncollectible(w, r, d)
+		})))
+	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/reinstate",
+		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reinstateInvoice(w, r, d)
+		})))
 	mux.Handle("POST /api/v1/orgs/{org}/invoices/{id}/payments",
 		d.Auth.RequireOrg(auth.PermPaymentsWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			recordPayment(w, r, d)
@@ -509,6 +517,95 @@ func voidInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
 		return
 	}
 
+	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
+	if err != nil {
+		slog.Error("building invoice response failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// statusChangeRequest is the body of the write-off and reinstate routes.
+type statusChangeRequest struct {
+	Reason string `json:"reason"`
+}
+
+// maxStatusReason bounds a status change's audited reason.
+const maxStatusReason = 500
+
+// readStatusReason parses and validates a status change's reason, writing
+// the error response itself when it returns ok=false.
+func readStatusReason(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var body statusChangeRequest
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return "", false
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		writeError(w, http.StatusUnprocessableEntity, "reason is required")
+		return "", false
+	}
+	if len([]rune(reason)) > maxStatusReason {
+		writeError(w, http.StatusUnprocessableEntity, "reason must be at most 500 characters")
+		return "", false
+	}
+	return reason, true
+}
+
+// markUncollectible handles POST .../invoices/{id}/uncollectible: it writes
+// off an open invoice locally and at its payment provider. See
+// billing.Service.MarkUncollectible.
+func markUncollectible(w http.ResponseWriter, r *http.Request, d Deps) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	reason, ok := readStatusReason(w, r)
+	if !ok {
+		return
+	}
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	inv, err := d.Billing.MarkUncollectible(ctx, p.OrgID, r.PathValue("org"), id, reason)
+	if err != nil {
+		if errors.Is(err, billing.ErrProviderStatusFailed) {
+			slog.Error("marking invoice uncollectible with provider failed", "invoice_id", id, "error", err)
+			writeError(w, http.StatusBadGateway, "failed to update invoice with payment provider")
+			return
+		}
+		writeCoreError(w, err)
+		return
+	}
+	writeInvoice(w, r, d, inv)
+}
+
+// reinstateInvoice handles POST .../invoices/{id}/reinstate: it reopens a
+// written-off invoice. See billing.Service.Reinstate.
+func reinstateInvoice(w http.ResponseWriter, r *http.Request, d Deps) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	reason, ok := readStatusReason(w, r)
+	if !ok {
+		return
+	}
+	p := auth.From(r.Context())
+	ctx := billing.WithActor(r.Context(), p.UserID)
+	inv, err := d.Billing.Reinstate(ctx, p.OrgID, id, reason)
+	if err != nil {
+		writeCoreError(w, err)
+		return
+	}
+	writeInvoice(w, r, d, inv)
+}
+
+// writeInvoice responds 200 with inv's API representation.
+func writeInvoice(w http.ResponseWriter, r *http.Request, d Deps, inv core.Invoice) {
 	resp, err := invoiceToResponse(r.Context(), d.Pool, d.Billing, inv)
 	if err != nil {
 		slog.Error("building invoice response failed", "error", err)

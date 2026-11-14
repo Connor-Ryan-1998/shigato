@@ -46,6 +46,10 @@ type Fake struct {
 	// call and then cleared, to simulate a one-off void failure.
 	VoidInvoiceErr error
 
+	// MarkUncollectibleErr, if set, is returned once by the next
+	// MarkUncollectible call and then cleared.
+	MarkUncollectibleErr error
+
 	// Payouts is keyed by Payout.Ref, settable by tests for GetPayout and
 	// ListPayouts.
 	Payouts map[string]Payout
@@ -61,6 +65,7 @@ type Fake struct {
 	customers   []core.Contact
 	sendInvoice []FakeSendInvoiceCall
 	voided      []string
+	uncollected []string
 
 	// Provider-side objects keyed by idempotency key, modelling Stripe's
 	// replay of a retried write instead of creating a duplicate.
@@ -154,6 +159,28 @@ func (f *Fake) VoidInvoice(_ context.Context, ref string) error {
 
 	f.voided = append(f.voided, ref)
 	return nil
+}
+
+// MarkUncollectible returns MarkUncollectibleErr once if set, otherwise
+// records ref as marked uncollectible.
+func (f *Fake) MarkUncollectible(_ context.Context, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.MarkUncollectibleErr != nil {
+		err := f.MarkUncollectibleErr
+		f.MarkUncollectibleErr = nil
+		return err
+	}
+	f.uncollected = append(f.uncollected, ref)
+	return nil
+}
+
+// MarkedUncollectibleRefs returns the provider_refs MarkUncollectible has
+// successfully marked so far, for test assertions.
+func (f *Fake) MarkedUncollectibleRefs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.uncollected...)
 }
 
 // GetPayout returns the payout registered under f.Payouts[payoutRef], or

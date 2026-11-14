@@ -489,3 +489,29 @@ func TestParseWebhookPaidOnUsesLocation(t *testing.T) {
 		t.Errorf("PaidOn date = %04d-%02d-%02d, want 2025-11-06", y, m, d)
 	}
 }
+
+// TestMarkUncollectibleHitsEndpoint checks MarkUncollectible posts to
+// Stripe's mark_uncollectible endpoint for the given invoice.
+func TestMarkUncollectibleHitsEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id": "in_1", "object": "invoice", "status": "uncollectible"}`)
+	}))
+	defer srv.Close()
+
+	backends := stripego.NewBackendsWithConfig(&stripego.BackendConfig{
+		URL:               stripego.String(srv.URL),
+		MaxNetworkRetries: stripego.Int64(0),
+		HTTPClient:        srv.Client(),
+	})
+	s := &Stripe{client: stripego.NewClient("sk_test_dummy", stripego.WithBackends(backends))}
+
+	if err := s.MarkUncollectible(context.Background(), "in_1"); err != nil {
+		t.Fatalf("MarkUncollectible: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v1/invoices/in_1/mark_uncollectible" {
+		t.Fatalf("request = %s %s, want POST /v1/invoices/in_1/mark_uncollectible", gotMethod, gotPath)
+	}
+}

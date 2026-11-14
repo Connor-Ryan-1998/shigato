@@ -321,6 +321,16 @@ func (s *Stripe) VoidInvoice(ctx context.Context, ref string) error {
 	return nil
 }
 
+// MarkUncollectible marks the Stripe invoice referenced by ref
+// uncollectible. Stripe keeps an uncollectible invoice payable, so a later
+// invoice.paid webhook still records the payment.
+func (s *Stripe) MarkUncollectible(ctx context.Context, ref string) error {
+	if _, err := s.client.V1Invoices.MarkUncollectible(ctx, ref, nil); err != nil {
+		return fmt.Errorf("stripe: marking invoice %s uncollectible: %w", ref, err)
+	}
+	return nil
+}
+
 // paymentRef returns the stable provider_ref to record a webhook's payment
 // against: the payment intent (or charge) id of the invoice's first
 // recorded payment, when Stripe included one. A real invoice.paid webhook

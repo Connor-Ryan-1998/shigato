@@ -30,6 +30,11 @@ var ErrTooFewPayOptions = errors.New("rent and bond invoices need at least 2 pay
 // state error (409/404).
 var ErrProviderVoidFailed = errors.New("void failed with payment provider")
 
+// ErrProviderStatusFailed wraps a payments.Provider error from a status
+// change (MarkUncollectible), so callers can map it to 502 rather than a
+// local-state status.
+var ErrProviderStatusFailed = errors.New("status change failed with payment provider")
+
 // ErrDueDatePassed is returned when sending an invoice to the payment
 // provider after its due date: the provider would present it as already
 // overdue, so it must be voided and reissued instead.
@@ -364,6 +369,73 @@ func (s *Service) Void(ctx context.Context, orgID int64, orgSlug string, invoice
 		if providerErr != nil {
 			return core.Invoice{}, fmt.Errorf("%w: %w", ErrProviderVoidFailed, providerErr)
 		}
+		return core.Invoice{}, err
+	}
+	return inv, nil
+}
+
+// MarkUncollectible writes off an open invoice: locally (status
+// 'uncollectible', written_off set, an audit entry carrying reason) and,
+// if it was sent to a payment provider, there too, all in one
+// transaction. As with Void, a provider failure rolls the local change
+// back so the two sides never disagree; the error then wraps
+// ErrProviderStatusFailed. ctx is detached before any work starts.
+func (s *Service) MarkUncollectible(ctx context.Context, orgID int64, orgSlug string, invoiceID int64, reason string) (core.Invoice, error) {
+	actor := ActorFrom(ctx)
+	ctx, cancel := detach(ctx)
+	defer cancel()
+
+	var inv core.Invoice
+	var providerErr error
+	err := RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		inv, err = core.MarkInvoiceUncollectible(ctx, tx, orgID, invoiceID)
+		if err != nil {
+			return err
+		}
+		if err := core.Audit(ctx, tx, orgID, actor, "invoice", inv.ID, "mark_uncollectible", map[string]any{"reason": reason}); err != nil {
+			return err
+		}
+		if inv.ProviderRef == "" {
+			return nil
+		}
+		provider, err := s.Payments(orgSlug)
+		if err != nil {
+			providerErr = err
+			return err
+		}
+		if err := provider.MarkUncollectible(ctx, inv.ProviderRef); err != nil {
+			providerErr = err
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		if providerErr != nil {
+			return core.Invoice{}, fmt.Errorf("%w: %w", ErrProviderStatusFailed, providerErr)
+		}
+		return core.Invoice{}, err
+	}
+	return inv, nil
+}
+
+// Reinstate reverses a write-off: an uncollectible invoice becomes open
+// again, with an audit entry carrying reason. It is local only. Stripe has
+// no inverse of marking an invoice uncollectible, but keeps such invoices
+// payable, so the provider invoice, its reference and hosted link are left
+// as they are and an invoice.paid webhook still records payment.
+func (s *Service) Reinstate(ctx context.Context, orgID int64, invoiceID int64, reason string) (core.Invoice, error) {
+	actor := ActorFrom(ctx)
+	var inv core.Invoice
+	err := RunInTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		inv, err = core.ReinstateInvoice(ctx, tx, orgID, invoiceID)
+		if err != nil {
+			return err
+		}
+		return core.Audit(ctx, tx, orgID, actor, "invoice", inv.ID, "reinstate", map[string]any{"reason": reason})
+	})
+	if err != nil {
 		return core.Invoice{}, err
 	}
 	return inv, nil

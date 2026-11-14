@@ -8,6 +8,7 @@ seed:
   users:
     owner: {org: acme, role: owner}
     paid_owner: {org: paid, role: owner}
+    keeper: {org: acme, role: bookkeeper}
   contacts:
     c_acme: {org: acme, kind: client, name: Acme Client}
     c_paid: {org: paid, kind: tenant, name: Paid Tenant}
@@ -16,6 +17,7 @@ seed:
     inv_foreign: {org: other, contact: c_foreign, status: issued}
     rent_acme: {org: acme, contact: c_acme, source: rent}
     rent_paid: {org: paid, contact: c_paid, source: rent}
+    issued_acme: {org: acme, contact: c_acme, status: issued, amount: 10000}
 
 cases:
   - name: owner cannot read a foreign org's invoice
@@ -145,3 +147,77 @@ cases:
     isolate: true
     request: {method: POST, path: "/api/v1/orgs/paid/invoices/{rent_paid}/issue"}
     expect: {status: 200, body: {status: open}}
+
+  # Write-off and reinstatement: a reason is required, only an open invoice
+  # can be written off, and only an uncollectible one reinstated.
+  - name: owner cannot write off a foreign org's invoice
+    as: owner
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{inv_foreign}/uncollectible"
+      body: {reason: Insolvent}
+    expect: {status: 404, body: {error: not found}, exact: true}
+    unchanged: [invoices, audit_log]
+
+  - name: write-off needs a reason
+    as: owner
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{issued_acme}/uncollectible"
+      body: {reason: "  "}
+    expect: {status: 422, body: {error: "reason is required"}}
+    unchanged: [invoices, audit_log]
+
+  - name: write-off rejects an over-long reason
+    as: owner
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{issued_acme}/uncollectible"
+      body: {reason: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+    expect: {status: 422, body: {error: "reason must be at most 500 characters"}}
+    unchanged: [invoices, audit_log]
+
+  - name: a draft cannot be written off
+    as: owner
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{rent_acme}/uncollectible"
+      body: {reason: Insolvent}
+    expect: {status: 409}
+    unchanged: [invoices, audit_log]
+
+  - name: an open invoice cannot be reinstated
+    as: owner
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{issued_acme}/reinstate"
+      body: {reason: Paying again}
+    expect: {status: 409}
+    unchanged: [invoices, audit_log]
+
+  - name: bookkeeper cannot write off
+    as: keeper
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{issued_acme}/uncollectible"
+      body: {reason: Insolvent}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+    unchanged: [invoices, audit_log]
+
+  - name: bookkeeper cannot reinstate
+    as: keeper
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{issued_acme}/reinstate"
+      body: {reason: Paying again}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+    unchanged: [invoices, audit_log]
+
+  - name: owner writes off an open invoice
+    as: owner
+    isolate: true
+    request:
+      method: POST
+      path: "/api/v1/orgs/acme/invoices/{issued_acme}/uncollectible"
+      body: {reason: Insolvent}
+    expect: {status: 200, body: {status: uncollectible, written_off: true}}

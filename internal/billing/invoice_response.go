@@ -32,6 +32,7 @@ type InvoiceResponse struct {
 	Number           *int           `json:"number"`
 	Source           string         `json:"source"`
 	Status           string         `json:"status"`
+	WrittenOff       bool           `json:"written_off"`
 	IssueDate        *string        `json:"issue_date"`
 	DueDate          *string        `json:"due_date"`
 	Currency         string         `json:"currency"`
@@ -88,7 +89,7 @@ func (s *Service) InvoiceJSON(ctx context.Context, q core.Querier, inv core.Invo
 	}
 
 	resp := InvoiceResponse{
-		ID: inv.ID, ContactID: inv.ContactID, ContactName: contact.Name, Number: inv.Number, Source: inv.Source, Status: inv.Status,
+		ID: inv.ID, ContactID: inv.ContactID, ContactName: contact.Name, Number: inv.Number, Source: inv.Source, Status: inv.Status, WrittenOff: inv.WrittenOff,
 		Currency: inv.Currency, Subtotal: int64(inv.Subtotal), GSTTotal: int64(inv.GSTTotal), Total: int64(inv.Total),
 		AmountPaid: paid, Outstanding: outstanding,
 		PaymentReference: inv.PaymentReference, PayOptions: InvoicePayOptions(inv, opts), Lines: make([]LineResponse, len(inv.Lines)),
