@@ -22,6 +22,7 @@
 		{ label: 'Open', value: 'open' },
 		{ label: 'Overdue', value: 'overdue' },
 		{ label: 'Paid', value: 'paid' },
+		{ label: 'Uncollectible', value: 'uncollectible' },
 		{ label: 'Void', value: 'void' }
 	];
 

@@ -26,7 +26,8 @@
 		draft: 'info',
 		open: 'warning',
 		paid: 'success',
-		void: 'danger'
+		void: 'danger',
+		uncollectible: 'danger'
 	};
 </script>
 

@@ -203,7 +203,7 @@ screens that need no route-specific rewrite.
 | `[org]/time/+page.svelte` | Shared header/filter/load states; keyboard-operable view trigger | `+page.svelte.test.ts`, `lib/test/editors/log-time-dialog.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/invoices/+page.svelte` | Existing URL status views; shared pagination | `e2e/smoke.spec.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/invoices/new/+page.svelte` | Dedicated guarded editor; shared contact dialog | `+page.test.ts`, `lib/test/editors/invoice-new-contact.yaml`, `e2e/financial-workflows.spec.ts` |
-| `[org]/invoices/[id]/+page.svelte` | Existing detail/actions retained; protected shared payment dialog | `lib/test/editors/invoice-payment.yaml`, `e2e/financial-workflows.spec.ts` |
+| `[org]/invoices/[id]/+page.svelte` | Existing detail/actions retained; protected shared payment dialog; reason dialog for write-off/reinstate | `+page.test.ts`, `lib/test/editors/invoice-payment.yaml`, `lib/test/editors/invoice-uncollectible.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/billing-run/+page.svelte` | Dedicated guarded workflow; retained invoice recovery link | `+page.svelte.test.ts`, `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/contacts/+page.svelte` | List/filter/state layout; reused contact dialog | `+page.svelte.test.ts`, `lib/test/editors/contact-dialog-*.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/properties/+page.svelte` | List, explicit property dialog, New lease navigation | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |

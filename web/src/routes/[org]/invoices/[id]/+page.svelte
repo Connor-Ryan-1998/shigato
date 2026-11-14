@@ -13,6 +13,7 @@
 	import PaymentDialog, {
 		type NewPayment
 	} from '../../../../lib/modules/core/invoices/PaymentDialog.svelte';
+	import InvoiceStatusDialog from '../../../../lib/modules/core/invoices/InvoiceStatusDialog.svelte';
 
 	type Line = {
 		id: number;
@@ -36,6 +37,7 @@
 		contact_name: string;
 		number: number | null;
 		status: string;
+		written_off: boolean;
 		issue_date: string | null;
 		due_date: string | null;
 		subtotal: number;
@@ -53,7 +55,8 @@
 		draft: 'info',
 		open: 'warning',
 		paid: 'success',
-		void: 'danger'
+		void: 'danger',
+		uncollectible: 'danger'
 	};
 
 	const METHOD_LABEL: Record<string, string> = {
@@ -69,6 +72,9 @@
 	let actionBusy = $state(false);
 	let paymentDialogOpen = $state(false);
 	let paymentError = $state('');
+	let statusAction = $state<'uncollectible' | 'reinstate' | null>(null);
+	let statusDialogOpen = $state(false);
+	let statusError = $state('');
 	// True only for a background re-fetch after an action (issue/send/void/
 	// payment) succeeds. Kept separate from loadStatus so a successful
 	// action never drops the already-rendered invoice back to the
@@ -174,6 +180,40 @@
 		});
 	}
 
+	function openStatusDialog(action: 'uncollectible' | 'reinstate') {
+		statusAction = action;
+		statusError = '';
+		statusDialogOpen = true;
+	}
+
+	// Like recordPayment: the dialog stays open and shows the server's
+	// message on failure.
+	async function changeStatus(reason: string) {
+		if (actionBusy || !statusAction) return;
+		actionBusy = true;
+		statusError = '';
+		try {
+			const org = page.params.org;
+			await api('POST', `/api/v1/orgs/${org}/invoices/${page.params.id}/${statusAction}`, { reason });
+			statusDialogOpen = false;
+			await load({ background: true });
+		} catch (e) {
+			statusError = e instanceof ApiError ? e.message : 'Something went wrong.';
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	// The API reports outstanding only for open invoices; a payment on a
+	// written-off one is seeded with its unpaid balance instead.
+	const paymentDefault = $derived(
+		invoice === null
+			? 0
+			: invoice.status === 'uncollectible'
+				? Math.max(invoice.total - invoice.amount_paid, 0)
+				: invoice.outstanding
+	);
+
 	function openPaymentDialog() {
 		paymentError = '';
 		paymentDialogOpen = true;
@@ -251,7 +291,20 @@
 			<Button variant="secondary" disabled={actionBusy} onclick={openPaymentDialog}>
 				Record payment
 			</Button>
+			<Button variant="secondary" disabled={actionBusy} onclick={() => openStatusDialog('uncollectible')}>
+				Mark uncollectible
+			</Button>
 			<Button variant="danger" disabled={actionBusy} onclick={voidInvoice}>Void</Button>
+		{:else if inv.status === 'uncollectible'}
+			<Button variant="secondary" disabled={actionBusy} onclick={openPaymentDialog}>
+				Record payment
+			</Button>
+			<Button variant="secondary" disabled={actionBusy} onclick={() => openStatusDialog('reinstate')}>
+				Reinstate
+			</Button>
+			{#if inv.amount_paid === 0}
+				<Button variant="danger" disabled={actionBusy} onclick={voidInvoice}>Void</Button>
+			{/if}
 		{/if}
 	</section>
 
@@ -301,10 +354,22 @@
 
 	<PaymentDialog
 		bind:open={paymentDialogOpen}
-		outstandingCents={inv.outstanding}
+		outstandingCents={paymentDefault}
 		error={paymentError}
 		busy={actionBusy}
 		onSubmit={recordPayment}
+	/>
+
+	<InvoiceStatusDialog
+		bind:open={statusDialogOpen}
+		title={statusAction === 'reinstate' ? 'Reinstate invoice' : 'Mark uncollectible'}
+		submitLabel={statusAction === 'reinstate' ? 'Reinstate' : 'Mark uncollectible'}
+		description={statusAction === 'reinstate'
+			? `Reopen this invoice as an open debt.${inv.provider_url ? ' The Stripe payment link stays active; Stripe keeps showing it as uncollectible.' : ''}`
+			: `Write this invoice off as a bad debt. It stays payable${inv.provider_url ? ', and Stripe marks it uncollectible too' : ''}.`}
+		error={statusError}
+		busy={actionBusy}
+		onSubmit={changeStatus}
 	/>
 {/if}
 
