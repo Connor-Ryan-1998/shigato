@@ -2,6 +2,19 @@ import type { Component } from 'svelte';
 
 export type ModuleName = 'core' | 'property' | 'timesheets' | 'reconciliation';
 
+// NavGroup is the sidebar section a link appears in. It is a display
+// grouping only: which module owns a link still decides whether it shows.
+export type NavGroup = 'overview' | 'property' | 'projects' | 'finance' | 'admin';
+
+// NAV_GROUPS fixes the sidebar's section order and labels.
+export const NAV_GROUPS: { id: NavGroup; label: string }[] = [
+	{ id: 'overview', label: 'Overview' },
+	{ id: 'property', label: 'Property' },
+	{ id: 'projects', label: 'Projects' },
+	{ id: 'finance', label: 'Finance' },
+	{ id: 'admin', label: 'Admin' }
+];
+
 export type NavItem = {
 	// Relative to /[org].
 	href: string;
@@ -9,6 +22,7 @@ export type NavItem = {
 	// A perm from GET /api/v1/me's perms list, or '' if every signed-in
 	// staff member may see this item regardless of perms.
 	perm: string;
+	group: NavGroup;
 };
 
 export type ModuleManifest = {
@@ -21,33 +35,30 @@ export type ModuleManifest = {
 	dashboardCard?: () => Promise<{ default: Component<any> }>;
 };
 
-// MODULE_ORDER fixes the sidebar's group order: core first (it's not a
-// togglable SHIGOTO_MODULES entry, so it's never in enabledModules), then
-// the three optional modules in a stable, product-chosen order.
+// MODULE_ORDER orders links within a sidebar section: core first (it's
+// not a togglable SHIGOTO_MODULES entry, so it's never in enabledModules),
+// then the optional modules in a stable, product-chosen order.
 const MODULE_ORDER: ModuleName[] = ['core', 'property', 'timesheets', 'reconciliation'];
 
-export type VisibleNavGroup = { module: ModuleManifest; items: NavItem[] };
+export type VisibleNavGroup = { id: NavGroup; label: string; items: NavItem[] };
 
 // visibleNav reduces every module manifest to what one user, in one org,
-// should actually see: core always shows, the others only when enabled,
-// and within a shown module only the nav items whose perm that user holds
-// (an item with perm '' is never gated).
+// should actually see, grouped into sidebar sections: core always counts,
+// the other modules only when enabled, and only the items whose perm that
+// user holds (an item with perm '' is never gated). Sections follow
+// NAV_GROUPS order and empty ones are left out.
 export function visibleNav(
 	manifests: ModuleManifest[],
 	enabledModules: string[],
 	perms: string[]
 ): VisibleNavGroup[] {
 	const byName = new Map(manifests.map((m) => [m.name, m]));
-	const groups: VisibleNavGroup[] = [];
-
+	const items: NavItem[] = [];
 	for (const name of MODULE_ORDER) {
 		const manifest = byName.get(name);
 		if (!manifest) continue;
 		if (name !== 'core' && !enabledModules.includes(name)) continue;
-
-		const items = manifest.nav.filter((item) => item.perm === '' || perms.includes(item.perm));
-		groups.push({ module: manifest, items });
+		items.push(...manifest.nav.filter((item) => item.perm === '' || perms.includes(item.perm)));
 	}
-
-	return groups;
+	return NAV_GROUPS.map((g) => ({ ...g, items: items.filter((item) => item.group === g.id) })).filter((g) => g.items.length > 0);
 }

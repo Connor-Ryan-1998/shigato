@@ -1,81 +1,76 @@
 import { describe, expect, it } from 'vitest';
-import type { ModuleManifest } from './registry';
 import { visibleNav } from './registry';
 import { core } from './core/manifest';
+import { property } from './property/manifest';
 import { reconciliation } from './reconciliation/manifest';
 import { timesheets } from './timesheets/manifest';
 
-const manifests: ModuleManifest[] = [
-	{
-		name: 'core',
-		label: 'Core',
-		nav: [
-			{ href: '', label: 'Dashboard', perm: '' },
-			{ href: 'invoices', label: 'Invoices', perm: 'invoices_read' }
-		]
-	},
-	{
-		name: 'property',
-		label: 'Property',
-		nav: [{ href: 'leases', label: 'Leases', perm: 'property_read' }]
-	},
-	{
-		name: 'timesheets',
-		label: 'Timesheets',
-		nav: []
-	},
-	{
-		name: 'reconciliation',
-		label: 'Reconciliation',
-		nav: [{ href: 'reconciliation', label: 'Reconciliation', perm: 'reports_read' }]
-	}
+const manifests = [core, property, timesheets, reconciliation];
+const ALL_MODULES = ['property', 'timesheets', 'reconciliation'];
+const OWNER_PERMS = [
+	'org_admin', 'contacts_write', 'invoices_write', 'invoices_read', 'payments_write', 'reports_read',
+	'recon_write', 'property_write', 'property_read', 'timesheets_write', 'timesheets_read', 'timesheets_admin'
 ];
 
+const hrefs = (groups: ReturnType<typeof visibleNav>, id: string) =>
+	groups.find((g) => g.id === id)?.items.map((i) => i.href);
+
 describe('visibleNav', () => {
+	it('groups an owner with every module into Overview, Property, Projects, Finance, Admin', () => {
+		const groups = visibleNav(manifests, ALL_MODULES, OWNER_PERMS);
+		expect(groups.map((g) => g.label)).toEqual(['Overview', 'Property', 'Projects', 'Finance', 'Admin']);
+		expect(hrefs(groups, 'overview')).toEqual(['', 'contacts']);
+		expect(hrefs(groups, 'projects')).toEqual(['projects', 'time']);
+		expect(hrefs(groups, 'finance')).toEqual(['invoices', 'reports', 'reconciliation', 'expenses']);
+		expect(hrefs(groups, 'admin')).toEqual(['settings', 'settings/members']);
+	});
+
+	it('drops reconciliation links from Finance when that module is off', () => {
+		const groups = visibleNav(manifests, ['property', 'timesheets'], OWNER_PERMS);
+		expect(hrefs(groups, 'finance')).toEqual(['invoices', 'reports']);
+	});
+
+	it('shows only Overview with the dashboard to a user with no perms', () => {
+		const groups = visibleNav(manifests, ALL_MODULES, []);
+		expect(groups.map((g) => g.id)).toEqual(['overview']);
+		expect(hrefs(groups, 'overview')).toEqual(['']);
+	});
+
+	it('omits Projects when timesheets is disabled', () => {
+		const groups = visibleNav(manifests, ['property', 'reconciliation'], OWNER_PERMS);
+		expect(groups.some((g) => g.id === 'projects')).toBe(false);
+	});
+
+	it('has no standalone billing-run link', () => {
+		const groups = visibleNav(manifests, ALL_MODULES, OWNER_PERMS);
+		expect(groups.flatMap((g) => g.items).some((i) => i.href === 'billing-run')).toBe(false);
+	});
+
 	it.each([
-		{ perms: ['timesheets_read'], hrefs: ['projects', 'time'] },
-		{ perms: ['invoices_write'], hrefs: [] },
-		{ perms: ['timesheets_read', 'invoices_write'], hrefs: ['projects', 'time'] },
-		{ perms: [], hrefs: [] }
-	])('exposes timesheet screens according to permissions: $perms', ({ perms, hrefs }) => {
-		const items = visibleNav([timesheets], ['timesheets'], perms)[0].items;
-		expect(items.map((item) => item.href)).toEqual(hrefs);
+		{ perms: ['timesheets_read'], projects: ['projects', 'time'] },
+		{ perms: ['invoices_write'], projects: undefined }
+	])('exposes timesheet screens according to permissions: $perms', ({ perms, projects }) => {
+		expect(hrefs(visibleNav(manifests, ['timesheets'], perms), 'projects')).toEqual(projects);
 	});
-	it('hides time and project navigation when timesheets is disabled', () => {
-		expect(visibleNav([timesheets], [], ['timesheets_read', 'invoices_write'])).toHaveLength(0);
-	});
+
 	it('shows Expenses only with enabled reconciliation and reports permission', () => {
-		expect(visibleNav([reconciliation], ['reconciliation'], ['reports_read'])[0].items.map((i) => i.href)).toContain('expenses');
-		expect(visibleNav([reconciliation], [], ['reports_read'])).toHaveLength(0);
-		expect(visibleNav([reconciliation], ['reconciliation'], [])[0].items).toHaveLength(0);
-	});
-	it('shows actual Contacts link to readers but not portal users', () => {
-		expect(visibleNav([core], [], ['invoices_read'])[0].items.map((i) => i.href)).toContain('contacts');
-		expect(visibleNav([core], [], [])[0].items.map((i) => i.href)).not.toContain('contacts');
-	});
-	it('shows actual Settings and Members links only for org admins', () => {
-		const owner = visibleNav([core], [], ['org_admin'])[0].items.map((i) => i.href);
-		expect(owner).toContain('settings');
-		expect(owner).toContain('settings/members');
-		const staff = visibleNav([core], [], ['invoices_read'])[0].items.map((i) => i.href);
-		expect(staff).not.toContain('settings');
-		expect(staff).not.toContain('settings/members');
-	});
-	it('hides a disabled module', () => {
-		const groups = visibleNav(manifests, [], ['property_read']);
-		expect(groups.some((g) => g.module.name === 'property')).toBe(false);
+		expect(hrefs(visibleNav(manifests, ['reconciliation'], ['reports_read']), 'finance')).toContain('expenses');
+		expect(hrefs(visibleNav(manifests, [], ['reports_read']), 'finance')).not.toContain('expenses');
+		expect(hrefs(visibleNav(manifests, ['reconciliation'], ['invoices_read']), 'finance')).not.toContain('expenses');
 	});
 
-	it('hides an item the user lacks the perm for', () => {
-		const groups = visibleNav(manifests, ['property'], []);
-		const property = groups.find((g) => g.module.name === 'property');
-		expect(property?.items).toHaveLength(0);
+	it('shows the Contacts link to readers but not portal users', () => {
+		expect(hrefs(visibleNav(manifests, [], ['invoices_read']), 'overview')).toContain('contacts');
+		expect(hrefs(visibleNav(manifests, [], []), 'overview')).not.toContain('contacts');
 	});
 
-	it('always puts core first and includes it even when not "enabled"', () => {
-		const groups = visibleNav(manifests, ['property', 'timesheets', 'reconciliation'], []);
-		expect(groups[0].module.name).toBe('core');
-		// Dashboard has no perm requirement, so it's always visible.
-		expect(groups[0].items.map((i) => i.label)).toContain('Dashboard');
+	it('shows Settings and Members only to org admins', () => {
+		expect(hrefs(visibleNav(manifests, [], ['org_admin']), 'admin')).toEqual(['settings', 'settings/members']);
+		expect(hrefs(visibleNav(manifests, [], ['invoices_read']), 'admin')).toBeUndefined();
+	});
+
+	it('hides a disabled module and a perm-less item', () => {
+		expect(hrefs(visibleNav(manifests, [], ['property_read']), 'property')).toBeUndefined();
+		expect(hrefs(visibleNav(manifests, ['property'], []), 'property')).toBeUndefined();
 	});
 });

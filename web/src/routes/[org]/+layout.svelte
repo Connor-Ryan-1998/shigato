@@ -58,25 +58,23 @@
 </script>
 
 {#snippet navList()}
-	{#each nav as group (group.module.name)}
-		{#if group.module.name === 'core' || group.items.length > 0}
-			<ul class="menu w-full">
-				<li>
-					<details open>
-						<summary class="font-semibold">{group.module.label}</summary>
-						<ul>
-							{#each group.items as item (item.href)}
-								<li>
-									<a href={`/${page.params.org}/${item.href}`} aria-current={activeHref === `/${page.params.org}/${item.href}`.replace(/\/$/, '') ? 'page' : undefined} class:menu-active={activeHref === `/${page.params.org}/${item.href}`.replace(/\/$/, '')} onclick={() => (drawerOpen = false)}
-										>{item.label}</a
-									>
-								</li>
-							{/each}
-						</ul>
-					</details>
-				</li>
-			</ul>
-		{/if}
+	{#each nav as group (group.id)}
+		<ul class="menu w-full">
+			<li>
+				<details open>
+					<summary class="font-semibold">{group.label}</summary>
+					<ul>
+						{#each group.items as item (item.href)}
+							<li>
+								<a href={`/${page.params.org}/${item.href}`} aria-current={activeHref === `/${page.params.org}/${item.href}`.replace(/\/$/, '') ? 'page' : undefined} class:menu-active={activeHref === `/${page.params.org}/${item.href}`.replace(/\/$/, '')} onclick={() => (drawerOpen = false)}
+									>{item.label}</a
+								>
+							</li>
+						{/each}
+					</ul>
+				</details>
+			</li>
+		</ul>
 	{/each}
 {/snippet}
 
