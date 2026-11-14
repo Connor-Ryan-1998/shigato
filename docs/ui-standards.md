@@ -18,7 +18,7 @@ dashboards, reports, and the customer portal.
 | Create/edit a short record | Explicit action opens a dialog | Contact, project, property, time entry |
 | Enter a complex record | Dedicated page with back navigation and Cancel | New invoice, lease, expense |
 | Change settings | Grouped form with Save settings and Cancel | Organisation settings |
-| Complete a contextual operation | Drawer or dedicated workflow, preserving context | Bank-line reconciliation, billing run |
+| Complete a contextual operation | Drawer, dedicated workflow, or bounded dialog with a server-checked preview, preserving context | Bank-line reconciliation, billing run (dialog on Invoices) |
 | Review totals | Sections/cards, labeled filters, semantic financial tables/charts | Dashboard, reports |
 | Authenticate | Compact form using shared fields, buttons, and feedback | Login, invitations |
 | View customer data | The same presentation rules in the separate portal shell | Portal invoices and leases |
@@ -201,10 +201,9 @@ screens that need no route-specific rewrite.
 | `[org]/projects/+page.svelte` | Shared filters/load states; explicit create dialog | `+page.svelte.test.ts` |
 | `[org]/projects/[id]/+page.svelte` | Shared back/header/filters; domain summary/chart/tables retained | `+page.svelte.test.ts`; project dialog `lib/test/editors/project-dialog.yaml` |
 | `[org]/time/+page.svelte` | Shared header/filter/load states; keyboard-operable view trigger | `+page.svelte.test.ts`, `lib/test/editors/log-time-dialog.yaml`, `e2e/financial-workflows.spec.ts` |
-| `[org]/invoices/+page.svelte` | Existing URL status views; shared pagination | `e2e/smoke.spec.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/invoices/+page.svelte` | Existing URL status views; shared pagination; `BillingRunDialog` (timesheets module) with task selection, split and per-invoice results | `+page.test.ts`, `lib/modules/timesheets/BillingRunDialog.test.ts`, `lib/modules/timesheets/billingSelection.test.ts`, `lib/test/editors/billing-run-dialog.yaml`, `e2e/smoke.spec.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/invoices/new/+page.svelte` | Dedicated guarded editor; shared contact dialog | `+page.test.ts`, `lib/test/editors/invoice-new-contact.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/invoices/[id]/+page.svelte` | Existing detail/actions retained; protected shared payment dialog; reason dialog for write-off/reinstate | `+page.test.ts`, `lib/test/editors/invoice-payment.yaml`, `lib/test/editors/invoice-uncollectible.yaml`, `e2e/financial-workflows.spec.ts` |
-| `[org]/billing-run/+page.svelte` | Dedicated guarded workflow; retained invoice recovery link | `+page.svelte.test.ts`, `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/contacts/+page.svelte` | List/filter/state layout; reused contact dialog | `+page.svelte.test.ts`, `lib/test/editors/contact-dialog-*.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/properties/+page.svelte` | List, explicit property dialog, New lease navigation | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
 | `[org]/leases/new/+page.svelte` | New dedicated guarded lease editor | `+page.svelte.test.ts`, `lib/test/editors/lease-new.yaml`, `e2e/financial-workflows.spec.ts` |

@@ -6,7 +6,6 @@ export const timesheets: ModuleManifest = {
   nav: [
     { href: "projects", label: "Projects", perm: "timesheets_read" },
     { href: "time", label: "Time-Logging", perm: "timesheets_read" },
-    { href: "billing-run", label: "Billing run", perm: "invoices_write" },
   ],
   dashboardCard: () => import("./DashboardCard.svelte"),
 };

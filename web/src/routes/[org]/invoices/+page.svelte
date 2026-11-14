@@ -6,6 +6,9 @@
 	import Button from '../../../lib/components/Button.svelte';
 	import EmptyState from '../../../lib/components/EmptyState.svelte';
 	import Pagination from '../../../lib/components/Pagination.svelte';
+	import BillingRunDialog from '../../../lib/modules/timesheets/BillingRunDialog.svelte';
+	import { session } from '../../../lib/session.svelte';
+	import { todayLocal } from '../../../lib/format';
 	import InvoiceTable, {
 		type InvoiceListItem
 	} from '../../../lib/modules/core/invoices/InvoiceTable.svelte';
@@ -37,6 +40,24 @@
 	// earlier request (e.g. the previous tab) could land after a faster
 	// later one and clobber it with stale data.
 	let requestSeq = 0;
+	let billingOpen = $state(false);
+	let billingFrom = $state('');
+	let billingTo = $state('');
+
+	// The billing run belongs to the timesheets module: offered only when
+	// it's enabled and the user may create invoices.
+	const canBill = $derived(
+		session.modules.includes('timesheets') &&
+			session.currentOrg?.slug === page.params.org &&
+			(session.currentOrg?.perms.includes('invoices_write') ?? false)
+	);
+
+	function openBillingRun() {
+		const today = todayLocal();
+		billingFrom = `${today.slice(0, 7)}-01`;
+		billingTo = today;
+		billingOpen = true;
+	}
 
 	const activeTab = $derived(page.url.searchParams.get('status') ?? '');
 	const offset = $derived(Math.max(0, Number(page.url.searchParams.get('offset') ?? '0') || 0));
@@ -93,9 +114,16 @@
 
 <PageHeader title="Invoices">
 	{#snippet actions()}
+		{#if canBill}
+			<Button variant="secondary" onclick={openBillingRun}>Billing run</Button>
+		{/if}
 		<Button onclick={() => goto(`/${page.params.org}/invoices/new`)}>New invoice</Button>
 	{/snippet}
 </PageHeader>
+
+{#if canBill}
+	<BillingRunDialog bind:open={billingOpen} org={page.params.org ?? ''} defaultFrom={billingFrom} defaultTo={billingTo} oncomplete={load} />
+{/if}
 
 <nav class="tabs tabs-border mb-4" aria-label="Invoice status">
 	{#each TABS as tab (tab.value)}

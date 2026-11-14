@@ -1,0 +1,25 @@
+# The billing run, opened from Invoices: client and range load a preview to select from.
+id: billing-run-dialog
+component: BillingRunDialog
+props: {open: true, org: acme, defaultFrom: "2026-11-01", defaultTo: "2026-11-07"}
+modules: [timesheets]
+api:
+  GET /api/v1/orgs/acme/contacts: [{id: 2, name: Client Co, kind: client}]
+  GET /api/v1/orgs/acme/billing-runs/preview?client_contact_id=2&from=2026-11-01&to=2026-11-07:
+    projects:
+      - {project_id: 5, project_name: Website, minutes: 60, amount: 12000, gst_amount: 0,
+         tasks: [{task_id: 51, task_name: Design, minutes: 60, amount: 12000, gst_amount: 0}]}
+    minutes: 60
+    amount: 12000
+    gst_amount: 0
+ready: Design
+fill: {Due in days: "30"}
+submit: Create invoices
+request: POST /api/v1/orgs/acme/billing-runs
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 409
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

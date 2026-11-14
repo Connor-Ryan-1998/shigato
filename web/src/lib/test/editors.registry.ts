@@ -9,8 +9,10 @@ import SettingsPage from '../../routes/[org]/settings/+page.svelte';
 import LeasePage from '../../routes/[org]/leases/[id]/+page.svelte';
 import LeaseNewPage from '../../routes/[org]/leases/new/+page.svelte';
 import ProjectDialog from '../modules/timesheets/ProjectDialog.svelte';
+import BillingRunDialog from '../modules/timesheets/BillingRunDialog.svelte';
 
 export const components = {
+	BillingRunDialog,
 	ContactDialog,
 	ExpenseNewPage,
 	InvoiceNewPage,
