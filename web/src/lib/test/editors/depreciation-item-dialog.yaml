@@ -1,0 +1,14 @@
+id: depreciation-item-create
+component: DepreciationItemDialog
+props: {open: true, org: acme, propertyId: 1, item: null, defaultFY: 2027}
+callbacks: [onsaved]
+fill: {Name: Split-system aircon, Installed on: "2026-08-10", Cost ($): "3200.00"}
+submit: Save item
+request: POST /api/v1/orgs/acme/properties/1/depreciation
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

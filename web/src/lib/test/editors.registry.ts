@@ -12,10 +12,13 @@ import ProjectDialog from '../modules/timesheets/ProjectDialog.svelte';
 import BillingRunDialog from '../modules/timesheets/BillingRunDialog.svelte';
 import PropertyDetailsPage from '../../routes/[org]/properties/[id]/+page.svelte';
 import InsuranceDialog from '../modules/property/InsuranceDialog.svelte';
+import DepreciationItemDialog from '../modules/property/DepreciationItemDialog.svelte';
+import PropertyNotesPage from '../../routes/[org]/properties/[id]/notes/+page.svelte';
 
 export const components = {
 	BillingRunDialog,
 	ContactDialog,
+	DepreciationItemDialog,
 	ExpenseNewPage,
 	InsuranceDialog,
 	InvoiceNewPage,
@@ -25,5 +28,6 @@ export const components = {
 	LogTimeDialog,
 	ProjectDialog,
 	PropertyDetailsPage,
+	PropertyNotesPage,
 	SettingsPage
 } as const;
