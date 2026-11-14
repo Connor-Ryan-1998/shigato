@@ -15,6 +15,8 @@
 	const canReadContacts = $derived(!!member?.perms.includes('invoices_read'));
 	const propertyEnabled = $derived(session.modules.includes('property'));
 	const timesheetsEnabled = $derived(session.modules.includes('timesheets'));
+	// "Add bill" from a property passes ?property_id= to seed the first line.
+	const initialPropertyId = $derived(page.url?.searchParams.get('property_id') ?? '');
 	const optionScope = $derived(`${org}:${canReadContacts}:${propertyEnabled}:${timesheetsEnabled}`);
 	let categories = $state<Category[]>([]);
 	let suppliers = $state<SimpleOption[]>([]);
@@ -91,7 +93,7 @@
 		{#if !categories.some((c) => c.type === 'expense')}<p>No expense categories available. Add an expense category before recording expenses.</p>
 		{:else}
 			<div class="max-w-3xl rounded-box border border-base-300 bg-base-100 p-4">
-				{#key `${optionScope}:${version}`}<ExpenseForm lineDate={todayLocal()} {categories} {suppliers} {properties} {projects} busy={saving} error={saveError} onSubmit={save} onReceiptUpload={uploadReceipt} onchange={() => dirty = true} oncancel={() => { if (allowLeave()) { dirty = false; goto(`/${org}/expenses`); } }} />{/key}
+				{#key `${optionScope}:${version}`}<ExpenseForm lineDate={todayLocal()} {categories} {suppliers} {properties} {projects} {initialPropertyId} busy={saving} error={saveError} onSubmit={save} onReceiptUpload={uploadReceipt} onchange={() => dirty = true} oncancel={() => { if (allowLeave()) { dirty = false; goto(`/${org}/expenses`); } }} />{/key}
 			</div>
 		{/if}
 	</LoadState>

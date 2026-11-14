@@ -219,4 +219,13 @@ describe('Expenses', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 		expect(apiMock).toHaveBeenCalledWith('POST', '/api/v1/orgs/other/expenses', expect.objectContaining({ lines: [{ category_id: 3, amount: 1800 }] }));
 	});
+
+	it('preselects the property named in the URL on the first line', async () => {
+		session.setModules(['reconciliation', 'property']);
+		setPage({ params: { org: 'acme' }, url: '/acme/expenses/new?property_id=3' });
+		apiMock.mockImplementation((m: string, p: string) => p.endsWith('/properties') ? Promise.resolve([{ id: 3, name: 'Cottage' }, { id: 4, name: 'Flat' }]) : route(m, p));
+		render(Page);
+		const select = (await screen.findByLabelText('Property')) as HTMLSelectElement;
+		expect(select.value).toBe('3');
+	});
 });

@@ -69,7 +69,8 @@
 		oncancel,
 		onchange,
 		onReceiptUpload,
-		onSubmit
+		onSubmit,
+		initialPropertyId = ''
 	}: {
 		// When supplied, split lines must sum to the bank debit's magnitude.
 		lineAmountCents?: number;
@@ -89,6 +90,8 @@
 		// (which owns org/api access) supplies the real implementation.
 		onReceiptUpload?: (file: File) => Promise<number>;
 		onSubmit: (expense: NewExpense) => void;
+		// Seeds the first line's property (e.g. "Add bill" from a property).
+		initialPropertyId?: string;
 	} = $props();
 
 	let receiptError = $state('');
@@ -138,7 +141,7 @@
 	let spentOn = $state(untrack(() => lineDate));
 	let supplierId = $state('');
 	let description = $state('');
-	let rows = $state<Row[]>([emptyRow()]);
+	let rows = $state<Row[]>([{ ...emptyRow(), propertyId: untrack(() => initialPropertyId) }]);
 	let receiptFileId = $state<number | undefined>(undefined);
 
 	const categoryOptions = $derived(
