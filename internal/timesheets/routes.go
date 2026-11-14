@@ -172,6 +172,10 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 		d.Auth.RequireOrg(auth.PermTimesheetsRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			listEntries(w, r, d)
 		})))
+	mux.Handle("GET /api/v1/orgs/{org}/billing-runs/preview",
+		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			previewBilling(w, r, d)
+		})))
 	mux.Handle("POST /api/v1/orgs/{org}/billing-runs",
 		d.Auth.RequireOrg(auth.PermInvoicesWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			runBilling(w, r, d)
@@ -806,47 +810,118 @@ func listEntries(w http.ResponseWriter, r *http.Request, d module.Deps) {
 	module.WriteJSON(w, http.StatusOK, resp)
 }
 
-// --- billing runs handler ---
+// --- billing runs handlers ---
+
+type previewTaskResponse struct {
+	TaskID    int64  `json:"task_id"`
+	TaskName  string `json:"task_name"`
+	Minutes   int    `json:"minutes"`
+	Amount    int64  `json:"amount"`
+	GSTAmount int64  `json:"gst_amount"`
+}
+
+type previewProjectResponse struct {
+	ProjectID   int64                 `json:"project_id"`
+	ProjectName string                `json:"project_name"`
+	Minutes     int                   `json:"minutes"`
+	Amount      int64                 `json:"amount"`
+	GSTAmount   int64                 `json:"gst_amount"`
+	Tasks       []previewTaskResponse `json:"tasks"`
+}
+
+type previewResponse struct {
+	Projects  []previewProjectResponse `json:"projects"`
+	Minutes   int                      `json:"minutes"`
+	Amount    int64                    `json:"amount"`
+	GSTAmount int64                    `json:"gst_amount"`
+}
+
+func previewBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	q := r.URL.Query()
+	clientID, err := strconv.ParseInt(q.Get("client_contact_id"), 10, 64)
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "client_contact_id must be an integer")
+		return
+	}
+	from, err := parseDate(q.Get("from"))
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "from must be YYYY-MM-DD")
+		return
+	}
+	to, err := parseDate(q.Get("to"))
+	if err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "to must be YYYY-MM-DD")
+		return
+	}
+
+	p := auth.From(r.Context())
+	preview, err := PreviewBilling(r.Context(), d.Pool, p.OrgID, PreviewInput{ClientContactID: clientID, From: from, To: to})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+
+	resp := previewResponse{Projects: make([]previewProjectResponse, len(preview.Projects))}
+	for i, pp := range preview.Projects {
+		pr := previewProjectResponse{ProjectID: pp.ProjectID, ProjectName: pp.ProjectName, Tasks: make([]previewTaskResponse, len(pp.Tasks))}
+		for j, t := range pp.Tasks {
+			pr.Tasks[j] = previewTaskResponse{TaskID: t.TaskID, TaskName: t.TaskName, Minutes: t.Minutes, Amount: int64(t.Amount), GSTAmount: int64(t.GSTAmount)}
+			pr.Minutes += t.Minutes
+			pr.Amount += int64(t.Amount)
+			pr.GSTAmount += int64(t.GSTAmount)
+		}
+		resp.Projects[i] = pr
+		resp.Minutes += pr.Minutes
+		resp.Amount += pr.Amount
+		resp.GSTAmount += pr.GSTAmount
+	}
+	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+type taskSelectionRequest struct {
+	TaskID  int64 `json:"task_id"`
+	Minutes int   `json:"minutes"`
+	Amount  int64 `json:"amount"`
+}
 
 type billingRunRequest struct {
-	ClientContactID int64  `json:"client_contact_id"`
-	From            string `json:"from"`
-	To              string `json:"to"`
-	DueInDays       int    `json:"due_in_days"`
-	Issue           bool   `json:"issue"`
+	ClientContactID int64                  `json:"client_contact_id"`
+	From            string                 `json:"from"`
+	To              string                 `json:"to"`
+	DueInDays       int                    `json:"due_in_days"`
+	Issue           bool                   `json:"issue"`
+	Split           string                 `json:"split"`
+	Tasks           []taskSelectionRequest `json:"tasks"`
+}
+
+type billingRunInvoice struct {
+	Invoice    billing.InvoiceResponse `json:"invoice"`
+	IssueError string                  `json:"issue_error,omitempty"`
 }
 
 type billingRunResponse struct {
-	Invoice      billing.InvoiceResponse `json:"invoice"`
-	EntryCount   int                     `json:"entry_count"`
-	TotalMinutes int                     `json:"total_minutes"`
+	Invoices     []billingRunInvoice `json:"invoices"`
+	EntryCount   int                 `json:"entry_count"`
+	TotalMinutes int                 `json:"total_minutes"`
 }
 
-// writeBillingRunError maps a RunBilling error to an HTTP response, the
-// same way httpapi's writeBillingError does for the other billing-backed
-// routes, plus invoiceID in the body: once RunBilling has committed its
-// draft, a later failure (only Issue can still fail at that point) must
-// not strand the caller without a way to find and retry it.
-func writeBillingRunError(w http.ResponseWriter, err error, invoiceID int64) {
-	status := http.StatusInternalServerError
-	msg := "internal error"
+// issueErrorMessage maps an issue failure on a billing run's invoice to a
+// message safe to show the caller, the same way httpapi's
+// writeBillingError maps the billing-backed routes' errors.
+func issueErrorMessage(invoiceID int64, err error) string {
 	switch {
-	case errors.Is(err, billing.ErrTooFewPayOptions):
-		status, msg = http.StatusUnprocessableEntity, err.Error()
-	case errors.Is(err, billing.ErrDueDatePassed):
-		status, msg = http.StatusConflict, err.Error()
+	case errors.Is(err, billing.ErrTooFewPayOptions), errors.Is(err, billing.ErrDueDatePassed), errors.Is(err, core.ErrInvalidInput):
+		return err.Error()
 	case errors.Is(err, core.ErrNotFound):
-		status, msg = http.StatusNotFound, "not found"
+		return "not found"
 	case errors.Is(err, core.ErrForbidden):
-		status, msg = http.StatusForbidden, "forbidden"
-	case errors.Is(err, core.ErrInvalidInput):
-		status, msg = http.StatusUnprocessableEntity, err.Error()
+		return "forbidden"
 	case errors.Is(err, core.ErrInvalidState):
-		status, msg = http.StatusConflict, "invalid state"
+		return "invalid state"
 	default:
 		slog.Error("billing run issue failed", "invoice_id", invoiceID, "error", err)
+		return "could not issue invoice"
 	}
-	module.WriteJSON(w, status, map[string]any{"error": msg, "invoice_id": invoiceID})
 }
 
 func runBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -865,30 +940,36 @@ func runBilling(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteError(w, http.StatusUnprocessableEntity, "to must be YYYY-MM-DD")
 		return
 	}
+	tasks := make([]TaskSelection, len(body.Tasks))
+	for i, t := range body.Tasks {
+		tasks[i] = TaskSelection{TaskID: t.TaskID, Minutes: t.Minutes, Amount: core.Cents(t.Amount)}
+	}
 
 	p := auth.From(r.Context())
 	ctx := billing.WithActor(r.Context(), p.UserID)
 	result, err := RunBilling(ctx, d.Billing, p.OrgID, r.PathValue("org"), RunInput{
 		ClientContactID: body.ClientContactID, From: from, To: to, DueInDays: body.DueInDays, Issue: body.Issue,
+		Split: body.Split, Tasks: tasks,
 	})
 	if err != nil {
-		if result.Invoice.ID != 0 {
-			// The draft invoice (and its locked entries) survived; only
-			// the Issue step failed. Tell the caller where to find it.
-			writeBillingRunError(w, err, result.Invoice.ID)
-			return
-		}
 		module.WriteCoreError(w, err)
 		return
 	}
 
-	invResp, err := d.Billing.InvoiceJSON(r.Context(), d.Pool, result.Invoice)
-	if err != nil {
-		slog.Error("building billing-run invoice response failed", "error", err)
-		module.WriteError(w, http.StatusInternalServerError, "internal error")
-		return
+	// The invoices are committed: from here on a failure must still name
+	// them, so a response-building error logs and reports what exists.
+	resp := billingRunResponse{Invoices: make([]billingRunInvoice, len(result.Invoices)), EntryCount: result.EntryCount, TotalMinutes: result.TotalMinutes}
+	for i, ri := range result.Invoices {
+		invResp, err := d.Billing.InvoiceJSON(r.Context(), d.Pool, ri.Invoice)
+		if err != nil {
+			slog.Error("building billing-run invoice response failed", "invoice_id", ri.Invoice.ID, "error", err)
+			module.WriteError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		resp.Invoices[i].Invoice = invResp
+		if ri.IssueErr != nil {
+			resp.Invoices[i].IssueError = issueErrorMessage(ri.Invoice.ID, ri.IssueErr)
+		}
 	}
-	module.WriteJSON(w, http.StatusCreated, billingRunResponse{
-		Invoice: invResp, EntryCount: result.EntryCount, TotalMinutes: result.TotalMinutes,
-	})
+	module.WriteJSON(w, http.StatusCreated, resp)
 }

@@ -5,6 +5,7 @@ package timesheets_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -36,12 +37,12 @@ func TestRunBillingSkipsFixedProjects(t *testing.T) {
 	in := timesheets.RunInput{ClientContactID: client, From: day, To: day, DueInDays: 14}
 
 	// Only fixed time: nothing to bill.
-	if _, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in); !errors.Is(err, core.ErrInvalidInput) {
+	if _, err := billAll(t, ctx, b, org.ID, in); !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("fixed-only run: err = %v, want ErrInvalidInput (no unbilled time)", err)
 	}
 
 	e.Entry(org, userID, timesheets.Entry{TaskID: tmTask.ID, WorkDate: day, Minutes: 60}, day)
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in)
+	result, err := billAll(t, ctx, b, org.ID, in)
 	if err != nil {
 		t.Fatalf("RunBilling: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestRunBillingGroupsByTask(t *testing.T) {
 	bEntry := e.Entry(org, userID, timesheets.Entry{TaskID: tB.ID, WorkDate: nov15, Minutes: 45}, nov15)
 
 	b := e.BillingService()
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: clientA, From: testkit.Date("2026-11-01"), To: testkit.Date("2026-11-30"), DueInDays: 14,
 	})
 	if err != nil {
@@ -93,17 +94,17 @@ func TestRunBillingGroupsByTask(t *testing.T) {
 	if result.TotalMinutes != 110 {
 		t.Fatalf("TotalMinutes = %d, want 110", result.TotalMinutes)
 	}
-	if len(result.Invoice.Lines) != 2 {
-		t.Fatalf("len(Lines) = %d, want 2", len(result.Invoice.Lines))
+	if len(result.Invoices[0].Invoice.Lines) != 2 {
+		t.Fatalf("len(Lines) = %d, want 2", len(result.Invoices[0].Invoice.Lines))
 	}
-	if result.Invoice.Lines[0].UnitAmount != 10000 {
-		t.Fatalf("Lines[0].UnitAmount = %d, want 10000", result.Invoice.Lines[0].UnitAmount)
+	if result.Invoices[0].Invoice.Lines[0].UnitAmount != 10000 {
+		t.Fatalf("Lines[0].UnitAmount = %d, want 10000", result.Invoices[0].Invoice.Lines[0].UnitAmount)
 	}
-	if result.Invoice.Lines[1].UnitAmount != 9500 {
-		t.Fatalf("Lines[1].UnitAmount = %d, want 9500", result.Invoice.Lines[1].UnitAmount)
+	if result.Invoices[0].Invoice.Lines[1].UnitAmount != 9500 {
+		t.Fatalf("Lines[1].UnitAmount = %d, want 9500", result.Invoices[0].Invoice.Lines[1].UnitAmount)
 	}
-	if result.Invoice.Total != 21450 {
-		t.Fatalf("Total = %d, want 21450", result.Invoice.Total)
+	if result.Invoices[0].Invoice.Total != 21450 {
+		t.Fatalf("Total = %d, want 21450", result.Invoices[0].Invoice.Total)
 	}
 
 	bEntryAfter, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{TaskID: &tB.ID})
@@ -132,7 +133,7 @@ func TestRunBillingRangeInclusive(t *testing.T) {
 	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: to.AddDate(0, 0, 1), Minutes: 40}, to.AddDate(0, 0, 1))       // after range
 
 	b := e.BillingService()
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
 	if err != nil {
@@ -161,7 +162,9 @@ func TestRunBillingConcurrent(t *testing.T) {
 	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from.AddDate(0, 0, 1), Minutes: 20}, from.AddDate(0, 0, 1))
 
 	b := e.BillingService()
-	in := timesheets.RunInput{ClientContactID: client, From: from, To: to, DueInDays: 14}
+	in := timesheets.RunInput{ClientContactID: client, From: from, To: to, DueInDays: 14, Split: "combined"}
+	// Both runs review the same preview; only one can bill it.
+	in.Tasks = selectAll(previewFor(t, ctx, b, org.ID, in))
 
 	var wg sync.WaitGroup
 	results := make([]error, 2)
@@ -175,19 +178,19 @@ func TestRunBillingConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	successes, invalidInputs := 0, 0
+	successes, stale := 0, 0
 	for _, err := range results {
 		switch {
 		case err == nil:
 			successes++
-		case errors.Is(err, core.ErrInvalidInput):
-			invalidInputs++
+		case errors.Is(err, core.ErrInvalidState):
+			stale++
 		default:
 			t.Fatalf("RunBilling concurrent: unexpected error %v", err)
 		}
 	}
-	if successes != 1 || invalidInputs != 1 {
-		t.Fatalf("successes=%d invalidInputs=%d, want 1 and 1", successes, invalidInputs)
+	if successes != 1 || stale != 1 {
+		t.Fatalf("successes=%d stale=%d, want 1 and 1", successes, stale)
 	}
 
 	entries, err := timesheets.ListEntries(ctx, pool, org.ID, timesheets.EntryFilter{TaskID: &task.ID})
@@ -202,7 +205,7 @@ func TestRunBillingConcurrent(t *testing.T) {
 
 	// A new entry billed by a second run only picks up the new entry.
 	newEntry := e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 15}, from)
-	result2, err := timesheets.RunBilling(ctx, b, org.ID, "acme", in)
+	result2, err := billAll(t, ctx, b, org.ID, in)
 	if err != nil {
 		t.Fatalf("second RunBilling: %v", err)
 	}
@@ -227,7 +230,7 @@ func TestRunBillingNothingUnbilled422(t *testing.T) {
 	client := e.Contact(org, testkit.Name("A Client")).ID
 
 	b := e.BillingService()
-	_, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	_, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: testkit.Date("2026-11-01"), To: testkit.Date("2026-11-30"), DueInDays: 14,
 	})
 	if !errors.Is(err, core.ErrInvalidInput) {
@@ -251,14 +254,14 @@ func TestVoidUnlocksEntries(t *testing.T) {
 
 	b := e.BillingService()
 	// Void only accepts an 'open' invoice, so issue it first.
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
 	})
 	if err != nil {
 		t.Fatalf("RunBilling: %v", err)
 	}
 
-	if _, err := b.Void(ctx, org.ID, "acme", result.Invoice.ID); err != nil {
+	if _, err := b.Void(ctx, org.ID, "acme", result.Invoices[0].Invoice.ID); err != nil {
 		t.Fatalf("Void: %v", err)
 	}
 
@@ -279,7 +282,7 @@ func TestVoidUnlocksEntries(t *testing.T) {
 	}
 
 	// ... and a new run bills it again.
-	result2, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result2, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
 	if err != nil {
@@ -308,21 +311,21 @@ func TestVoidUnlocksEntriesFromDraft(t *testing.T) {
 	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 60}, from)
 
 	b := e.BillingService()
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
 	if err != nil {
 		t.Fatalf("RunBilling: %v", err)
 	}
-	if result.Invoice.Status != "draft" {
-		t.Fatalf("Invoice.Status = %q, want draft", result.Invoice.Status)
+	if result.Invoices[0].Invoice.Status != "draft" {
+		t.Fatalf("Invoice.Status = %q, want draft", result.Invoices[0].Invoice.Status)
 	}
 
-	if _, err := b.Void(ctx, org.ID, "acme", result.Invoice.ID); err != nil {
+	if _, err := b.Void(ctx, org.ID, "acme", result.Invoices[0].Invoice.ID); err != nil {
 		t.Fatalf("Void draft: %v", err)
 	}
 
-	voided, err := core.GetInvoice(ctx, pool, org.ID, result.Invoice.ID)
+	voided, err := core.GetInvoice(ctx, pool, org.ID, result.Invoices[0].Invoice.ID)
 	if err != nil {
 		t.Fatalf("GetInvoice: %v", err)
 	}
@@ -338,7 +341,7 @@ func TestVoidUnlocksEntriesFromDraft(t *testing.T) {
 		t.Fatalf("entry still locked after voiding draft: %+v", entries)
 	}
 
-	result2, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result2, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
 	if err != nil {
@@ -369,7 +372,7 @@ func TestRunBillingAudits(t *testing.T) {
 
 	b := e.BillingService()
 	actorCtx := billing.WithActor(ctx, ownerID)
-	result, err := timesheets.RunBilling(actorCtx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, actorCtx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14,
 	})
 	if err != nil {
@@ -380,7 +383,7 @@ func TestRunBillingAudits(t *testing.T) {
 	var diff []byte
 	if err := pool.QueryRow(ctx,
 		`SELECT actor_user_id, diff FROM audit_log WHERE org_id = $1 AND entity = 'invoice' AND entity_id = $2 AND action = 'billing_run'`,
-		org.ID, result.Invoice.ID,
+		org.ID, result.Invoices[0].Invoice.ID,
 	).Scan(&actor, &diff); err != nil {
 		t.Fatalf("selecting billing_run audit row: %v", err)
 	}
@@ -420,16 +423,16 @@ func TestRunBillingIssueFlag(t *testing.T) {
 	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 60}, from)
 
 	b := e.BillingService()
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
 	})
 	if err != nil {
 		t.Fatalf("RunBilling: %v", err)
 	}
-	if result.Invoice.Status != "open" {
-		t.Fatalf("Status = %q, want open", result.Invoice.Status)
+	if result.Invoices[0].Invoice.Status != "open" {
+		t.Fatalf("Status = %q, want open", result.Invoices[0].Invoice.Status)
 	}
-	if result.Invoice.Number == nil {
+	if result.Invoices[0].Invoice.Number == nil {
 		t.Fatalf("Number = nil, want assigned")
 	}
 }
@@ -441,24 +444,8 @@ func TestRunBillingIssueFlag(t *testing.T) {
 // no locked entries - rather than creating a draft core.IssueInvoice would
 // then refuse to issue.
 //
-// This replaces the former TestRunBillingIssueFailureLeavesDraft, which
-// used this same zero-total setup to drive a *post-commit* Issue failure;
-// now that RunBilling itself rejects a zero total before committing, that
-// trigger no longer reaches Issue at all. No other realistic trigger
-// remains for a timesheet billing run's Issue step: Source "timesheet" is
-// exempt from the QLD pay-options rule (only "rent"/"bond" are checked),
-// and core.IssueInvoice's only other failure modes (not found, not a
-// draft) aren't reachable immediately after RunBilling creates the draft
-// itself. Forcing the failure via a cancelled context isn't viable either:
-// RunBilling uses the same ctx throughout, so a context cancelled early
-// enough to fail Issue would also fail the billing transaction that must
-// create the draft in the first place. Per the controller's documented
-// fallback, the RunResult-with-error-after-commit path (RunBilling
-// returning a populated result with a non-nil error after the billing
-// transaction already committed) is left covered by
-// TestRunBillingIssueFailureLeavesDraft's git history and this comment
-// alone; see docs/superpowers/plans/2026-11-05-01-followups.md's "Plan 3
-// leftovers" section.
+// A post-commit issue failure is covered by
+// TestRunBillingPerProjectIssueFailureReportsEach.
 func TestRunBillingZeroTotal422(t *testing.T) {
 	e := testkit.New(t)
 	pool, ctx := e.Pool, e.Ctx
@@ -473,14 +460,14 @@ func TestRunBillingZeroTotal422(t *testing.T) {
 	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: from, Minutes: 1}, from)
 
 	b := e.BillingService()
-	result, err := timesheets.RunBilling(ctx, b, org.ID, "acme", timesheets.RunInput{
+	result, err := billAll(t, ctx, b, org.ID, timesheets.RunInput{
 		ClientContactID: client, From: from, To: to, DueInDays: 14, Issue: true,
 	})
 	if !errors.Is(err, core.ErrInvalidInput) {
 		t.Fatalf("RunBilling: err = %v, want ErrInvalidInput", err)
 	}
-	if result.Invoice.ID != 0 {
-		t.Fatalf("result.Invoice.ID = %d, want 0 (no draft committed)", result.Invoice.ID)
+	if len(result.Invoices) != 0 {
+		t.Fatalf("result.Invoices = %+v, want none (no draft committed)", result.Invoices)
 	}
 
 	invoices, _, err := core.ListInvoices(ctx, pool, org.ID, core.InvoiceListFilter{})
@@ -515,26 +502,61 @@ func TestBillingRunRouteResponseShape(t *testing.T) {
 		TaskID: task.ID, WorkDate: testkit.Date("2026-11-01"), Minutes: 60,
 	}, testkit.Date("2026-11-05"))
 
+	pr := s.Do(http.MethodGet, fmt.Sprintf("/api/v1/orgs/acme/billing-runs/preview?client_contact_id=%d&from=2026-11-01&to=2026-11-30", client), nil)
+	if pr.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200, body=%s", pr.Code, pr.Body)
+	}
+	var preview struct {
+		Projects []struct {
+			ProjectID   int64  `json:"project_id"`
+			ProjectName string `json:"project_name"`
+			Minutes     int    `json:"minutes"`
+			Amount      int64  `json:"amount"`
+			Tasks       []struct {
+				TaskID    int64  `json:"task_id"`
+				TaskName  string `json:"task_name"`
+				Minutes   int    `json:"minutes"`
+				Amount    int64  `json:"amount"`
+				GSTAmount int64  `json:"gst_amount"`
+			} `json:"tasks"`
+		} `json:"projects"`
+		Minutes int   `json:"minutes"`
+		Amount  int64 `json:"amount"`
+	}
+	if err := json.Unmarshal(pr.Body, &preview); err != nil {
+		t.Fatalf("decoding preview: %v, body=%s", err, pr.Body)
+	}
+	if len(preview.Projects) != 1 || len(preview.Projects[0].Tasks) != 1 || preview.Minutes != 60 || preview.Projects[0].Minutes != 60 || preview.Amount != preview.Projects[0].Tasks[0].Amount {
+		t.Fatalf("preview = %s, want one project, one 60-minute task, matching sums", pr.Body)
+	}
+	tk := preview.Projects[0].Tasks[0]
+
 	body := map[string]any{
-		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14,
+		"client_contact_id": client, "from": "2026-11-01", "to": "2026-11-30", "due_in_days": 14, "split": "combined",
+		"tasks": []map[string]any{{"task_id": tk.TaskID, "minutes": tk.Minutes, "amount": tk.Amount}},
 	}
 	rr := s.Do(http.MethodPost, "/api/v1/orgs/acme/billing-runs", body)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201, body=%s", rr.Code, rr.Body)
 	}
 
-	var resp map[string]json.RawMessage
+	var resp struct {
+		Invoices     []map[string]json.RawMessage `json:"invoices"`
+		EntryCount   *int                         `json:"entry_count"`
+		TotalMinutes *int                         `json:"total_minutes"`
+	}
 	if err := json.Unmarshal(rr.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v, body=%s", err, rr.Body)
 	}
-	for _, key := range []string{"invoice", "entry_count", "total_minutes"} {
-		if _, ok := resp[key]; !ok {
-			t.Fatalf("response missing top-level key %q: body=%s", key, rr.Body)
-		}
+	if len(resp.Invoices) != 1 || resp.EntryCount == nil || resp.TotalMinutes == nil {
+		t.Fatalf("response = %s, want one invoice plus entry_count and total_minutes", rr.Body)
+	}
+	if _, ok := resp.Invoices[0]["issue_error"]; ok {
+		t.Fatalf("unissued run reports issue_error: %s", rr.Body)
 	}
 
 	var invoice map[string]json.RawMessage
-	if err := json.Unmarshal(resp["invoice"], &invoice); err != nil {
+	if err := json.Unmarshal(resp.Invoices[0]["invoice"], &invoice); err != nil {
 		t.Fatalf("decoding invoice: %v", err)
 	}
 	for _, key := range []string{"id", "contact_id", "total", "subtotal", "gst_total", "pay_options", "lines"} {

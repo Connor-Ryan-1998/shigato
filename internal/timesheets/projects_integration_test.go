@@ -110,7 +110,7 @@ func TestUpdateProjectCustomerLockedOnceBilled(t *testing.T) {
 	userID := e.User("billed@example.com").ID
 	day := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
 	e.Entry(org, userID, timesheets.Entry{TaskID: task.ID, WorkDate: day, Minutes: 60}, day)
-	if _, err := timesheets.RunBilling(ctx, e.BillingService(), org.ID, "acme", timesheets.RunInput{ClientContactID: other, From: day, To: day, DueInDays: 14}); err != nil {
+	if _, err := billAll(t, ctx, e.BillingService(), org.ID, timesheets.RunInput{ClientContactID: other, From: day, To: day, DueInDays: 14}); err != nil {
 		t.Fatalf("RunBilling: %v", err)
 	}
 	moved.ClientContactID = client

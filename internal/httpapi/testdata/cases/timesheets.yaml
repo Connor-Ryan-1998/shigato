@@ -155,21 +155,52 @@ cases:
     request: {method: GET, path: "/api/v1/orgs/acme/time-entries?unbilled=yes"}
     expect: {status: 422, body: {error: "unbilled must be true"}}
 
+  - name: bookkeeper cannot preview billing
+    as: keeper
+    request: {method: GET, path: "/api/v1/orgs/acme/billing-runs/preview?client_contact_id={c_client}&from=2026-11-01&to=2026-11-30"}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+
   - name: bookkeeper cannot run billing
     as: keeper
     request:
       method: POST
       path: /api/v1/orgs/acme/billing-runs
-      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14}
+      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14, split: combined, tasks: [{task_id: "{tk}", minutes: 60, amount: 12000}]}
     expect: {status: 403, body: {error: forbidden}, exact: true}
     unchanged: [invoices, invoice_lines, time_entries, audit_log]
 
-  # The seed logs no time, so there is nothing to bill.
-  - name: billing run with no unbilled time is refused
+  - name: preview rejects a foreign client
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/billing-runs/preview?client_contact_id={c_foreign}&from=2026-11-01&to=2026-11-30"}
+    expect: {status: 422, body: {error: "invalid input: client_contact_id not found"}}
+
+  - name: preview rejects a reversed range
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/billing-runs/preview?client_contact_id={c_client}&from=2026-11-30&to=2026-11-01"}
+    expect: {status: 422, body: {error: "invalid input: from must not be after to"}}
+
+  # The seed logs no time, so the preview is empty.
+  - name: preview with no unbilled time is empty
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/billing-runs/preview?client_contact_id={c_client}&from=2026-11-01&to=2026-11-30"}
+    expect: {status: 200, body: {projects: [], minutes: 0, amount: 0, gst_amount: 0}, exact: true}
+
+  - name: billing run needs a selection
     as: owner
     request:
       method: POST
       path: /api/v1/orgs/acme/billing-runs
-      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14}
-    expect: {status: 422, body: {error: "invalid input: no unbilled time"}}
+      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14, split: combined, tasks: []}
+    expect: {status: 422, body: {error: "invalid input: tasks must not be empty"}}
+    unchanged: [invoices, invoice_lines, invoice_counters, time_entries, audit_log]
+
+  # Nothing is logged against tk, so a selection claiming 60 minutes no
+  # longer matches what is unbilled.
+  - name: billing run refuses a stale selection
+    as: owner
+    request:
+      method: POST
+      path: /api/v1/orgs/acme/billing-runs
+      body: {client_contact_id: "{c_client}", from: "2026-11-01", to: "2026-11-30", due_in_days: 14, split: combined, tasks: [{task_id: "{tk}", minutes: 60, amount: 12000}]}
+    expect: {status: 409, body: {error: "billing preview changed; refresh and review"}}
     unchanged: [invoices, invoice_lines, invoice_counters, time_entries, audit_log]

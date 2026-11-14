@@ -21,3 +21,8 @@ cases:
     as: owner
     request: {method: GET, path: /api/v1/orgs/acme/bank-accounts}
     expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: billing preview is gone when timesheets is disabled
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/billing-runs/preview?client_contact_id=1&from=2026-11-01&to=2026-11-30"}
+    expect: {status: 404, body: {error: not found}, exact: true}
