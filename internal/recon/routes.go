@@ -415,22 +415,24 @@ func listBankLinesHandler(w http.ResponseWriter, r *http.Request, d module.Deps)
 // categoryRequest is both the create body and the strict-PUT update body:
 // every field is given on every call, so a PUT fully replaces the row.
 type categoryRequest struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	DefaultGSTCode string `json:"default_gst_code,omitempty"`
-	Capital        bool   `json:"capital"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	DefaultGSTCode string            `json:"default_gst_code,omitempty"`
+	Capital        bool              `json:"capital"`
+	Item21Label    *core.Item21Label `json:"item21_label"`
 }
 
 type categoryResponse struct {
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	DefaultGSTCode string `json:"default_gst_code,omitempty"`
-	Capital        bool   `json:"capital"`
+	ID             int64             `json:"id"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	DefaultGSTCode string            `json:"default_gst_code,omitempty"`
+	Capital        bool              `json:"capital"`
+	Item21Label    *core.Item21Label `json:"item21_label"`
 }
 
 func categoryToResponse(c Category) categoryResponse {
-	return categoryResponse{ID: c.ID, Name: c.Name, Type: c.Type, DefaultGSTCode: string(c.DefaultGSTCode), Capital: c.Capital}
+	return categoryResponse{ID: c.ID, Name: c.Name, Type: c.Type, DefaultGSTCode: string(c.DefaultGSTCode), Capital: c.Capital, Item21Label: c.Item21Label}
 }
 
 func createCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
@@ -444,7 +446,7 @@ func createCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps
 	var created Category
 	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
-		created, err = CreateCategory(r.Context(), tx, p.OrgID, body.Name, body.Type, core.GSTCode(body.DefaultGSTCode), body.Capital)
+		created, err = CreateCategory(r.Context(), tx, p.OrgID, body.Name, body.Type, core.GSTCode(body.DefaultGSTCode), body.Capital, body.Item21Label)
 		if err != nil {
 			return err
 		}
@@ -487,7 +489,7 @@ func updateCategoryHandler(w http.ResponseWriter, r *http.Request, d module.Deps
 	var updated Category
 	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
 		var err error
-		updated, err = UpdateCategory(r.Context(), tx, p.OrgID, id, body.Name, body.Type, core.GSTCode(body.DefaultGSTCode), body.Capital)
+		updated, err = UpdateCategory(r.Context(), tx, p.OrgID, id, body.Name, body.Type, core.GSTCode(body.DefaultGSTCode), body.Capital, body.Item21Label)
 		if err != nil {
 			return err
 		}

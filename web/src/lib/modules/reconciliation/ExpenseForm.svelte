@@ -4,6 +4,9 @@
 		id: number;
 		name: string;
 		type: string;
+		default_gst_code?: string;
+		capital?: boolean;
+		item21_label?: string | null;
 	};
 
 	export type SimpleOption = { id: number; name: string };

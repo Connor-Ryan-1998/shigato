@@ -21,18 +21,49 @@ type Category struct {
 	Type           string // "income" or "expense"
 	DefaultGSTCode core.GSTCode
 	Capital        bool
+	// Item21Label is where the category's expenses land on the rental
+	// schedule; nil means unmapped (counted as sundry, with a warning).
+	Item21Label *core.Item21Label
 }
 
-const categoryColumns = `id, org_id, name, type, coalesce(default_gst_code, ''), capital`
+const categoryColumns = `id, org_id, name, type, coalesce(default_gst_code, ''), capital, item21_label`
 
 func scanCategory(row pgx.Row) (Category, error) {
 	var c Category
 	var gst string
-	if err := row.Scan(&c.ID, &c.OrgID, &c.Name, &c.Type, &gst, &c.Capital); err != nil {
+	var label *string
+	if err := row.Scan(&c.ID, &c.OrgID, &c.Name, &c.Type, &gst, &c.Capital, &label); err != nil {
 		return Category{}, err
 	}
 	c.DefaultGSTCode = core.GSTCode(gst)
+	if label != nil {
+		l := core.Item21Label(*label)
+		c.Item21Label = &l
+	}
 	return c, nil
+}
+
+// validateItem21Label rejects unknown labels and the depreciation-only
+// ones, which no expense category may carry.
+func validateItem21Label(label *core.Item21Label) error {
+	if label == nil {
+		return nil
+	}
+	if _, err := core.ParseItem21Label(string(*label)); err != nil {
+		return err
+	}
+	if label.DepreciationOnly() {
+		return fmt.Errorf("%w: %s is fed only by depreciation items", core.ErrInvalidInput, *label)
+	}
+	return nil
+}
+
+func labelArg(label *core.Item21Label) *string {
+	if label == nil {
+		return nil
+	}
+	s := string(*label)
+	return &s
 }
 
 // validateCategory checks name, typ and gst against the category rules
@@ -62,8 +93,11 @@ func validateCategory(name, typ string, gst core.GSTCode) error {
 // org gives ErrInvalidInput, checked before insert and backstopped against
 // the unique_violation a concurrent request could race into (the same
 // pattern as CreateBankAccount).
-func CreateCategory(ctx context.Context, q core.Querier, orgID int64, name, typ string, defaultGST core.GSTCode, capital bool) (Category, error) {
+func CreateCategory(ctx context.Context, q core.Querier, orgID int64, name, typ string, defaultGST core.GSTCode, capital bool, label *core.Item21Label) (Category, error) {
 	if err := validateCategory(name, typ, defaultGST); err != nil {
+		return Category{}, err
+	}
+	if err := validateItem21Label(label); err != nil {
 		return Category{}, err
 	}
 
@@ -76,10 +110,10 @@ func CreateCategory(ctx context.Context, q core.Querier, orgID int64, name, typ 
 	}
 
 	row := q.QueryRow(ctx, `
-		INSERT INTO categories (org_id, name, type, default_gst_code, capital)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5)
+		INSERT INTO categories (org_id, name, type, default_gst_code, capital, item21_label)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6)
 		RETURNING `+categoryColumns,
-		orgID, name, typ, string(defaultGST), capital,
+		orgID, name, typ, string(defaultGST), capital, labelArg(label),
 	)
 	created, err := scanCategory(row)
 	if isUniqueViolation(err) {
@@ -122,16 +156,19 @@ func GetCategory(ctx context.Context, q core.Querier, orgID, id int64) (Category
 // UpdateCategory replaces orgID's category id wholesale (strict PUT: every
 // field is given on every call). It returns core.ErrNotFound if no such
 // category exists in that org.
-func UpdateCategory(ctx context.Context, q core.Querier, orgID, id int64, name, typ string, defaultGST core.GSTCode, capital bool) (Category, error) {
+func UpdateCategory(ctx context.Context, q core.Querier, orgID, id int64, name, typ string, defaultGST core.GSTCode, capital bool, label *core.Item21Label) (Category, error) {
 	if err := validateCategory(name, typ, defaultGST); err != nil {
+		return Category{}, err
+	}
+	if err := validateItem21Label(label); err != nil {
 		return Category{}, err
 	}
 
 	row := q.QueryRow(ctx, `
-		UPDATE categories SET name = $1, type = $2, default_gst_code = NULLIF($3, ''), capital = $4
+		UPDATE categories SET name = $1, type = $2, default_gst_code = NULLIF($3, ''), capital = $4, item21_label = $7
 		WHERE org_id = $5 AND id = $6
 		RETURNING `+categoryColumns,
-		name, typ, string(defaultGST), capital, orgID, id,
+		name, typ, string(defaultGST), capital, orgID, id, labelArg(label),
 	)
 	updated, err := scanCategory(row)
 	if errors.Is(err, pgx.ErrNoRows) {

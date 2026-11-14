@@ -54,6 +54,8 @@ type defaultExpenseCategory struct {
 	Name    string
 	GSTCode GSTCode
 	Capital bool
+	// Item21Label is the rental-schedule label; "" leaves it unmapped.
+	Item21Label Item21Label
 }
 
 // defaultExpenseCategories lists the 15 default expense categories every
@@ -61,21 +63,21 @@ type defaultExpenseCategory struct {
 // owns the Category type) so CreateOrg can seed them without recon
 // importing core, and core importing recon, forming a cycle.
 var defaultExpenseCategories = []defaultExpenseCategory{
-	{"Repairs & maintenance", GST, false},
-	{"Insurance", GST, false},
-	{"Council rates", NT, false},
-	{"Water", FRE, false},
-	{"Strata / body corporate", GST, false},
-	{"Agent & advertising fees", GST, false},
-	{"Loan interest", INP, false},
-	{"Bank fees", INP, false},
-	{"Stripe fees", GST, false},
-	{"Software & subscriptions", GST, false},
-	{"Accounting & legal", GST, false},
-	{"Travel", GST, false},
-	{"Office & supplies", GST, false},
-	{"Equipment", GST, true},
-	{"Other expenses", GST, false},
+	{"Repairs & maintenance", GST, false, Item21Repairs},
+	{"Insurance", GST, false, Item21Insurance},
+	{"Council rates", NT, false, Item21CouncilRates},
+	{"Water", FRE, false, Item21Water},
+	{"Strata / body corporate", GST, false, Item21BodyCorporate},
+	{"Agent & advertising fees", GST, false, Item21AgentFees},
+	{"Loan interest", INP, false, Item21Interest},
+	{"Bank fees", INP, false, Item21Sundry},
+	{"Stripe fees", GST, false, ""},
+	{"Software & subscriptions", GST, false, ""},
+	{"Accounting & legal", GST, false, Item21Legal},
+	{"Travel", GST, false, ""},
+	{"Office & supplies", GST, false, ""},
+	{"Equipment", GST, true, ""},
+	{"Other expenses", GST, false, ""},
 }
 
 // SeedDefaultCategories inserts orgID's default expense categories,
@@ -86,10 +88,10 @@ var defaultExpenseCategories = []defaultExpenseCategory{
 func SeedDefaultCategories(ctx context.Context, q Querier, orgID int64) error {
 	for _, c := range defaultExpenseCategories {
 		if _, err := q.Exec(ctx, `
-			INSERT INTO categories (org_id, name, type, default_gst_code, capital)
-			VALUES ($1, $2, 'expense', $3, $4)
+			INSERT INTO categories (org_id, name, type, default_gst_code, capital, item21_label)
+			VALUES ($1, $2, 'expense', $3, $4, NULLIF($5, ''))
 			ON CONFLICT (org_id, name) DO NOTHING`,
-			orgID, c.Name, string(c.GSTCode), c.Capital,
+			orgID, c.Name, string(c.GSTCode), c.Capital, string(c.Item21Label),
 		); err != nil {
 			return err
 		}
