@@ -99,9 +99,9 @@ func RegisterRoutes(mux *http.ServeMux, d module.Deps) {
 
 // --- shared helpers ---
 
-// orgFYStartMonth reads orgID's fy_start_month directly (not exposed on
+// OrgFYStartMonth reads orgID's fy_start_month directly (not exposed on
 // core.OrgSettings).
-func orgFYStartMonth(ctx context.Context, q core.Querier, orgID int64) (int, error) {
+func OrgFYStartMonth(ctx context.Context, q core.Querier, orgID int64) (int, error) {
 	var m int
 	err := q.QueryRow(ctx, `SELECT fy_start_month FROM orgs WHERE id = $1`, orgID).Scan(&m)
 	return m, err
@@ -113,7 +113,7 @@ func orgFYStartMonth(ctx context.Context, q core.Querier, orgID int64) (int, err
 func rangeFromRequest(ctx context.Context, q core.Querier, orgID int64, r *http.Request) (from, to time.Time, period, msg string, ok bool) {
 	query := r.URL.Query()
 	if p := query.Get("period"); p != "" {
-		fyStartMonth, err := orgFYStartMonth(ctx, q, orgID)
+		fyStartMonth, err := OrgFYStartMonth(ctx, q, orgID)
 		if err != nil {
 			return time.Time{}, time.Time{}, "", "internal error", false
 		}

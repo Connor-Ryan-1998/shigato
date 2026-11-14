@@ -91,6 +91,7 @@ func dashboardSection(ctx context.Context, q core.Querier, orgID int64, today ti
 
 func registerRoutes(mux *http.ServeMux, d module.Deps) {
 	registerDetailRoutes(mux, d)
+	registerRentalRoutes(mux, d)
 	mux.Handle("POST /api/v1/orgs/{org}/properties",
 		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			createProperty(w, r, d)

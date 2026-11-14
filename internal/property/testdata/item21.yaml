@@ -1,0 +1,34 @@
+# Item21(income, bills, depreciation, fy) for one property. Amounts are
+# cents. `deductions` is compared exactly (labels absent mean zero).
+- name: rent and other income split by source
+  fy: 2027
+  income: [{category: Rent, ex: 100000}, {category: Rent, ex: 50000}, {category: Other income, ex: 3000}]
+  want: {gross_rent: 150000, other_income: 3000, deductions: {}}
+
+- name: mapped expenses land on their labels ex GST
+  fy: 2027
+  bills:
+    - {category: Council rates, label: council_rates, ex: 80000}
+    - {category: Repairs & maintenance, label: repairs, ex: 10000}
+    - {category: Repairs & maintenance, label: repairs, ex: 5000}
+  want: {deductions: {council_rates: 80000, repairs: 15000}}
+
+- name: capital lines are never deductions
+  fy: 2027
+  bills: [{category: Equipment, capital: true, ex: 320000}, {category: Water, label: water, ex: 9000}]
+  want: {deductions: {water: 9000}}
+
+- name: unmapped category goes to sundry with one warning
+  fy: 2027
+  bills: [{category: Travel, ex: 2000}, {category: Travel, ex: 1000}]
+  want:
+    deductions: {sundry: 3000}
+    warnings: ['Category "Travel" has no Item 21 label; counted as Sundry']
+
+- name: depreciation by type and financial year
+  fy: 2027
+  depreciation:
+    - {type: plant_equipment, amounts: [{fy: 2026, amount: 999}, {fy: 2027, amount: 45000}]}
+    - {type: capital_works, amounts: [{fy: 2027, amount: 750000}]}
+    - {type: capital_works, amounts: [{fy: 2028, amount: 1}]}
+  want: {deductions: {capital_allowances: 45000, capital_works: 750000}}

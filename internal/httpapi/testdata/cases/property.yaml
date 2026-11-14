@@ -9,6 +9,7 @@ seed:
     owner: {org: acme, role: owner}
     keeper: {org: acme, role: bookkeeper}
     other_owner: {org: other, role: owner}
+    tenant: {org: acme, role: tenant, contact: c_t1}
   contacts:
     c_t1: {org: acme, kind: tenant, name: Tenant One}
     c_t2: {org: acme, kind: tenant, name: Tenant Two}
@@ -18,6 +19,7 @@ seed:
     # each case names.
     p_vacant: {org: acme, name: 2 Vacant St}
     p_let: {org: acme, name: 1 Let St}
+    p_other: {org: other, name: Elsewhere}
   leases:
     # Weekly from 2026-01-05; its only rent change is the initial one.
     l_let: {org: acme, property: p_let, tenant: c_t1}
@@ -165,3 +167,23 @@ cases:
     expect:
       status: 201
       body: {name: Aircon, type: plant_equipment, amounts: [{fy: 2027, amount: 45000}], documents: []}
+
+  - name: tenant cannot read rental reports
+    as: tenant
+    request: {method: GET, path: "/api/v1/orgs/acme/rental-reports/item21?fy=2027"}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+
+  - name: rental report rejects another org's property
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/rental-reports/item21?fy=2027&property_id={p_other}"}
+    expect: {status: 404, body: {error: not found}, exact: true}
+
+  - name: rental report needs a financial year
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/rental-reports/accountant"}
+    expect: {status: 422}
+
+  - name: another org cannot read a property's bills
+    as: other_owner
+    request: {method: GET, path: "/api/v1/orgs/other/properties/{p_vacant}/bills?fy=2027"}
+    expect: {status: 404, body: {error: not found}, exact: true}

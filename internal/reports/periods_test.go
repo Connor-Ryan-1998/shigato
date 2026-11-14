@@ -81,3 +81,26 @@ func TestFYQuarterInvalidFYStartMonth(t *testing.T) {
 		}
 	}
 }
+
+func TestFinancialYear(t *testing.T) {
+	cases := []struct {
+		fy, month int
+		from, to  string
+	}{
+		{2027, 7, "2026-07-01", "2027-06-30"},
+		{2027, 1, "2027-01-01", "2027-12-31"},
+		{2028, 4, "2027-04-01", "2028-03-31"},
+	}
+	for _, c := range cases {
+		from, to, err := FinancialYear(c.fy, c.month)
+		if err != nil {
+			t.Fatalf("FinancialYear(%d, %d): %v", c.fy, c.month, err)
+		}
+		if !from.Equal(mustDate(t, c.from)) || !to.Equal(mustDate(t, c.to)) {
+			t.Errorf("FinancialYear(%d, %d) = %s..%s, want %s..%s", c.fy, c.month, from.Format("2006-01-02"), to.Format("2006-01-02"), c.from, c.to)
+		}
+	}
+	if _, _, err := FinancialYear(2027, 13); err == nil {
+		t.Error("FinancialYear(2027, 13): want error")
+	}
+}

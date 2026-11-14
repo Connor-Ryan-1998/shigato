@@ -51,3 +51,15 @@ func addMonths(year, month, n int) (int, int) {
 func lastDayOfMonth(year, month int) time.Time {
 	return time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC)
 }
+
+// FinancialYear returns the inclusive calendar date range of the financial
+// year named by its end year fyEndYear (FY2027 = 2027), given the org's
+// fy_start_month (1-12). As in FYQuarter, an FY starting in January
+// coincides with its calendar year.
+func FinancialYear(fyEndYear, fyStartMonth int) (from, to time.Time, err error) {
+	from, _, err = FYQuarter(fmt.Sprintf("FY%04d-Q1", fyEndYear), fyStartMonth)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return from, from.AddDate(1, 0, -1), nil
+}
