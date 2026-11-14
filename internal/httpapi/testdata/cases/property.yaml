@@ -7,6 +7,8 @@ seed:
   orgs: [acme, other]
   users:
     owner: {org: acme, role: owner}
+    keeper: {org: acme, role: bookkeeper}
+    other_owner: {org: other, role: owner}
   contacts:
     c_t1: {org: acme, kind: tenant, name: Tenant One}
     c_t2: {org: acme, kind: tenant, name: Tenant Two}
@@ -76,3 +78,51 @@ cases:
     expect:
       status: 201
       body: {effective_date: "2026-06-01", amount: 55000}
+
+  # Property detail editing. Field rules are owned by the store tests
+  # (TestUpdatePropertyRejectsInvalid); these pin permission and isolation.
+  - name: bookkeeper cannot edit a property
+    as: keeper
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/properties/{p_vacant}"
+      body: {name: Renamed, residential: true}
+    expect: {status: 403, body: {error: forbidden}, exact: true}
+    unchanged: [properties, audit_log]
+
+  - name: another org cannot edit a property
+    as: other_owner
+    request:
+      method: PUT
+      path: "/api/v1/orgs/other/properties/{p_vacant}"
+      body: {name: Renamed, residential: true}
+    expect: {status: 404, body: {error: not found}, exact: true}
+    unchanged: [properties, audit_log]
+
+  - name: owner edits a property
+    as: owner
+    isolate: true
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/properties/{p_vacant}"
+      body: {name: Renamed, address: 2 Vacant St, residential: true, purchase_price: 65000000, year_built: 1995}
+    expect:
+      status: 200
+      body: {name: Renamed, purchase_price: 65000000, year_built: 1995, current_tenancy: null}
+
+  - name: owner edits notes
+    as: owner
+    isolate: true
+    request:
+      method: PUT
+      path: "/api/v1/orgs/acme/properties/{p_vacant}/notes"
+      body: {notes: "Leaking tap"}
+    expect: {status: 200, body: {notes: "Leaking tap"}}
+
+  - name: property detail shows the current tenancy
+    as: owner
+    request: {method: GET, path: "/api/v1/orgs/acme/properties/{p_let}"}
+    expect:
+      status: 200
+      body: {name: 1 Let St, current_tenancy: {lease_id: "{l_let}", rent: 50000, frequency: weekly, primary_tenant_name: Tenant One}}
+

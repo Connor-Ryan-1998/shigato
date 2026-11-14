@@ -93,6 +93,14 @@ func registerRoutes(mux *http.ServeMux, d module.Deps) {
 		d.Auth.RequireOrg(auth.PermPropertyRead)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			getProperty(w, r, d)
 		})))
+	mux.Handle("PUT /api/v1/orgs/{org}/properties/{id}",
+		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			updatePropertyHandler(w, r, d)
+		})))
+	mux.Handle("PUT /api/v1/orgs/{org}/properties/{id}/notes",
+		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			updateNotesHandler(w, r, d)
+		})))
 
 	mux.Handle("POST /api/v1/orgs/{org}/leases",
 		d.Auth.RequireOrg(auth.PermPropertyWrite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +159,72 @@ type propertyResponse struct {
 	Address     string `json:"address,omitempty"`
 	Kind        string `json:"kind,omitempty"`
 	Residential bool   `json:"residential"`
+}
+
+// propertyUpdateRequest is the strict full-replacement body of
+// PUT /properties/{id}; every optional field may be null or omitted to
+// clear it.
+type propertyUpdateRequest struct {
+	Name               string   `json:"name"`
+	Address            string   `json:"address"`
+	Kind               string   `json:"kind"`
+	Residential        bool     `json:"residential"`
+	ContractDate       *string  `json:"contract_date"`
+	SettlementDate     *string  `json:"settlement_date"`
+	PurchasePrice      *int64   `json:"purchase_price"`
+	StampDuty          *int64   `json:"stamp_duty"`
+	PurchaseLegalCosts *int64   `json:"purchase_legal_costs"`
+	YearBuilt          *int     `json:"year_built"`
+	LotPlan            string   `json:"lot_plan"`
+	LandAreaM2         *float64 `json:"land_area_m2"`
+	CouncilAccountRef  string   `json:"council_account_ref"`
+	WaterAccountRef    string   `json:"water_account_ref"`
+}
+
+type tenancyResponse struct {
+	LeaseID           int64  `json:"lease_id"`
+	Rent              int64  `json:"rent"`
+	Frequency         string `json:"frequency"`
+	PrimaryTenantID   int64  `json:"primary_tenant_id"`
+	PrimaryTenantName string `json:"primary_tenant_name"`
+}
+
+// propertyDetailResponse is GET/PUT /properties/{id}'s body: the list
+// shape plus every detail field and the tenancy active today.
+type propertyDetailResponse struct {
+	propertyResponse
+	ContractDate       *string          `json:"contract_date"`
+	SettlementDate     *string          `json:"settlement_date"`
+	PurchasePrice      *int64           `json:"purchase_price"`
+	StampDuty          *int64           `json:"stamp_duty"`
+	PurchaseLegalCosts *int64           `json:"purchase_legal_costs"`
+	YearBuilt          *int             `json:"year_built"`
+	LotPlan            string           `json:"lot_plan"`
+	LandAreaM2         *float64         `json:"land_area_m2"`
+	CouncilAccountRef  string           `json:"council_account_ref"`
+	WaterAccountRef    string           `json:"water_account_ref"`
+	Notes              string           `json:"notes"`
+	CurrentTenancy     *tenancyResponse `json:"current_tenancy"`
+}
+
+func formatDatePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format(dateLayout)
+	return &s
+}
+
+// parseOptionalDate parses s (nil or "" means no date).
+func parseOptionalDate(s *string) (*time.Time, error) {
+	if s == nil || *s == "" {
+		return nil, nil
+	}
+	t, err := parseDate(*s)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
 }
 
 func propertyToResponse(p Property) propertyResponse {
@@ -356,7 +430,107 @@ func getProperty(w http.ResponseWriter, r *http.Request, d module.Deps) {
 		module.WriteCoreError(w, err)
 		return
 	}
-	module.WriteJSON(w, http.StatusOK, propertyToResponse(prop))
+	writePropertyDetail(w, r, d, prop)
+}
+
+// writePropertyDetail writes prop's detail response, including the
+// tenancy active today.
+func writePropertyDetail(w http.ResponseWriter, r *http.Request, d module.Deps, prop Property) {
+	tenancy, err := CurrentTenancy(r.Context(), d.Pool, prop.OrgID, prop.ID, today(d))
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	resp := propertyDetailResponse{propertyResponse: propertyToResponse(prop),
+		ContractDate: formatDatePtr(prop.ContractDate), SettlementDate: formatDatePtr(prop.SettlementDate),
+		PurchasePrice: int64Ptr(prop.PurchasePrice), StampDuty: int64Ptr(prop.StampDuty),
+		PurchaseLegalCosts: int64Ptr(prop.PurchaseLegalCosts), YearBuilt: prop.YearBuilt,
+		LotPlan: prop.LotPlan, LandAreaM2: prop.LandAreaM2,
+		CouncilAccountRef: prop.CouncilAccountRef, WaterAccountRef: prop.WaterAccountRef, Notes: prop.Notes,
+	}
+	if tenancy != nil {
+		var name string
+		if err := d.Pool.QueryRow(r.Context(), `SELECT name FROM contacts WHERE org_id = $1 AND id = $2`, prop.OrgID, tenancy.PrimaryTenantID).Scan(&name); err != nil {
+			module.WriteCoreError(w, err)
+			return
+		}
+		resp.CurrentTenancy = &tenancyResponse{
+			LeaseID: tenancy.LeaseID, Rent: int64(tenancy.Rent), Frequency: string(tenancy.Frequency),
+			PrimaryTenantID: tenancy.PrimaryTenantID, PrimaryTenantName: name,
+		}
+	}
+	module.WriteJSON(w, http.StatusOK, resp)
+}
+
+func updatePropertyHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body propertyUpdateRequest
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	in := Property{
+		ID: id, Name: body.Name, Address: body.Address, Kind: body.Kind, Residential: body.Residential,
+		PurchasePrice: centsPtr(body.PurchasePrice), StampDuty: centsPtr(body.StampDuty),
+		PurchaseLegalCosts: centsPtr(body.PurchaseLegalCosts), YearBuilt: body.YearBuilt,
+		LotPlan: body.LotPlan, LandAreaM2: body.LandAreaM2,
+		CouncilAccountRef: body.CouncilAccountRef, WaterAccountRef: body.WaterAccountRef,
+	}
+	var err error
+	if in.ContractDate, err = parseOptionalDate(body.ContractDate); err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "invalid contract_date")
+		return
+	}
+	if in.SettlementDate, err = parseOptionalDate(body.SettlementDate); err != nil {
+		module.WriteError(w, http.StatusUnprocessableEntity, "invalid settlement_date")
+		return
+	}
+
+	p := auth.From(r.Context())
+	var updated Property
+	err = module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		var err error
+		if updated, err = UpdateProperty(r.Context(), tx, p.OrgID, in); err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "property", id, "update", body)
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	writePropertyDetail(w, r, d, updated)
+}
+
+func updateNotesHandler(w http.ResponseWriter, r *http.Request, d module.Deps) {
+	id, ok := module.PathID(r)
+	if !ok {
+		module.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body struct {
+		Notes string `json:"notes"`
+	}
+	if err := module.ReadJSON(r, &body); err != nil {
+		module.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	p := auth.From(r.Context())
+	err := module.RunInTx(r.Context(), d.Pool, func(tx pgx.Tx) error {
+		if err := UpdateNotes(r.Context(), tx, p.OrgID, id, body.Notes); err != nil {
+			return err
+		}
+		return core.Audit(r.Context(), tx, p.OrgID, &p.UserID, "property", id, "update_notes", map[string]any{"length": len(body.Notes)})
+	})
+	if err != nil {
+		module.WriteCoreError(w, err)
+		return
+	}
+	module.WriteJSON(w, http.StatusOK, map[string]string{"notes": body.Notes})
 }
 
 // --- leases handlers ---

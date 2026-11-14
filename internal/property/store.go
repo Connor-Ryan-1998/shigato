@@ -34,18 +34,128 @@ func ParseFrequency(s string) (Frequency, error) {
 
 // --- properties ---
 
-const propertyColumns = `id, org_id, name, coalesce(address,''), coalesce(kind,''), residential`
+const propertyColumns = `id, org_id, name, coalesce(address,''), coalesce(kind,''), residential,
+	contract_date, settlement_date, purchase_price, stamp_duty, purchase_legal_costs, year_built,
+	coalesce(lot_plan,''), land_area_m2::float8, coalesce(council_account_ref,''), coalesce(water_account_ref,''), notes`
 
 func scanProperty(row pgx.Row) (Property, error) {
 	var p Property
-	err := row.Scan(&p.ID, &p.OrgID, &p.Name, &p.Address, &p.Kind, &p.Residential)
+	var price, duty, legal *int64
+	err := row.Scan(&p.ID, &p.OrgID, &p.Name, &p.Address, &p.Kind, &p.Residential,
+		&p.ContractDate, &p.SettlementDate, &price, &duty, &legal, &p.YearBuilt,
+		&p.LotPlan, &p.LandAreaM2, &p.CouncilAccountRef, &p.WaterAccountRef, &p.Notes)
+	p.PurchasePrice, p.StampDuty, p.PurchaseLegalCosts = centsPtr(price), centsPtr(duty), centsPtr(legal)
 	return p, err
+}
+
+func centsPtr(v *int64) *core.Cents {
+	if v == nil {
+		return nil
+	}
+	c := core.Cents(*v)
+	return &c
+}
+
+func int64Ptr(c *core.Cents) *int64 {
+	if c == nil {
+		return nil
+	}
+	v := int64(*c)
+	return &v
+}
+
+// validateProperty checks the rules CreateProperty and UpdateProperty
+// share.
+func validateProperty(p Property) error {
+	if p.Name == "" {
+		return fmt.Errorf("%w: name is required", core.ErrInvalidInput)
+	}
+	for name, c := range map[string]*core.Cents{"purchase_price": p.PurchasePrice, "stamp_duty": p.StampDuty, "purchase_legal_costs": p.PurchaseLegalCosts} {
+		if c != nil && *c < 0 {
+			return fmt.Errorf("%w: %s must not be negative", core.ErrInvalidInput, name)
+		}
+	}
+	if p.YearBuilt != nil && (*p.YearBuilt < 1800 || *p.YearBuilt > time.Now().Year()) {
+		return fmt.Errorf("%w: year_built must be between 1800 and this year", core.ErrInvalidInput)
+	}
+	if p.LandAreaM2 != nil && *p.LandAreaM2 < 0 {
+		return fmt.Errorf("%w: land_area_m2 must not be negative", core.ErrInvalidInput)
+	}
+	return nil
+}
+
+// UpdateProperty replaces every field of property p.ID except Notes,
+// scoped to orgID. It returns core.ErrNotFound if no such property exists
+// in that org.
+func UpdateProperty(ctx context.Context, q core.Querier, orgID int64, p Property) (Property, error) {
+	if err := validateProperty(p); err != nil {
+		return Property{}, err
+	}
+	row := q.QueryRow(ctx, `
+		UPDATE properties SET name = $3, address = NULLIF($4,''), kind = NULLIF($5,''), residential = $6,
+			contract_date = $7, settlement_date = $8, purchase_price = $9, stamp_duty = $10,
+			purchase_legal_costs = $11, year_built = $12, lot_plan = NULLIF($13,''), land_area_m2 = $14,
+			council_account_ref = NULLIF($15,''), water_account_ref = NULLIF($16,'')
+		WHERE org_id = $1 AND id = $2
+		RETURNING `+propertyColumns,
+		orgID, p.ID, p.Name, p.Address, p.Kind, p.Residential,
+		p.ContractDate, p.SettlementDate, int64Ptr(p.PurchasePrice), int64Ptr(p.StampDuty),
+		int64Ptr(p.PurchaseLegalCosts), p.YearBuilt, p.LotPlan, p.LandAreaM2,
+		p.CouncilAccountRef, p.WaterAccountRef,
+	)
+	updated, err := scanProperty(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Property{}, core.ErrNotFound
+	}
+	return updated, err
+}
+
+// UpdateNotes replaces property id's notes, scoped to orgID. It returns
+// core.ErrNotFound if no such property exists in that org.
+func UpdateNotes(ctx context.Context, q core.Querier, orgID, id int64, notes string) error {
+	tag, err := q.Exec(ctx, `UPDATE properties SET notes = $3 WHERE org_id = $1 AND id = $2`, orgID, id, notes)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return core.ErrNotFound
+	}
+	return nil
+}
+
+// CurrentTenancy returns the lease on propertyID active on today (started,
+// and not terminated before today) with the rent in effect that day, or
+// nil when the property is vacant. When several leases overlap, the latest
+// started wins.
+func CurrentTenancy(ctx context.Context, q core.Querier, orgID, propertyID int64, today time.Time) (*Tenancy, error) {
+	var t Tenancy
+	var freq string
+	err := q.QueryRow(ctx, `
+		SELECT l.id, l.frequency, lt.contact_id,
+			(SELECT rc.amount FROM lease_rent_changes rc
+			 WHERE rc.lease_id = l.id AND rc.effective_date <= $3
+			 ORDER BY rc.effective_date DESC LIMIT 1)
+		FROM leases l
+		JOIN lease_tenants lt ON lt.lease_id = l.id AND lt.is_primary
+		WHERE l.org_id = $1 AND l.property_id = $2 AND l.start_date <= $3
+		  AND (l.termination_date IS NULL OR l.termination_date >= $3)
+		ORDER BY l.start_date DESC, l.id DESC LIMIT 1`,
+		orgID, propertyID, today,
+	).Scan(&t.LeaseID, &freq, &t.PrimaryTenantID, &t.Rent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	t.Frequency = Frequency(freq)
+	return &t, nil
 }
 
 // CreateProperty inserts a new property for orgID and returns it.
 func CreateProperty(ctx context.Context, q core.Querier, orgID int64, p Property) (Property, error) {
-	if p.Name == "" {
-		return Property{}, fmt.Errorf("%w: name is required", core.ErrInvalidInput)
+	if err := validateProperty(p); err != nil {
+		return Property{}, err
 	}
 	row := q.QueryRow(ctx, `
 		INSERT INTO properties (org_id, name, address, kind, residential)

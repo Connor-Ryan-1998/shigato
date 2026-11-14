@@ -26,6 +26,29 @@ type Property struct {
 	Address     string
 	Kind        string
 	Residential bool
+
+	// Purchase, build and reference details; nil/"" when not recorded.
+	ContractDate       *time.Time
+	SettlementDate     *time.Time
+	PurchasePrice      *core.Cents
+	StampDuty          *core.Cents
+	PurchaseLegalCosts *core.Cents
+	YearBuilt          *int
+	LotPlan            string
+	LandAreaM2         *float64
+	CouncilAccountRef  string
+	WaterAccountRef    string
+	// Notes is the property's free-text notes page, edited separately by
+	// UpdateNotes.
+	Notes string
+}
+
+// Tenancy summarises the lease active on a property on a given day.
+type Tenancy struct {
+	LeaseID         int64
+	Rent            core.Cents
+	Frequency       Frequency
+	PrimaryTenantID int64
 }
 
 // LeaseTenant is one tenant on a lease; exactly one tenant per lease is
