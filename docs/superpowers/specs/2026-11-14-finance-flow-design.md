@@ -148,12 +148,13 @@ Marking an invoice uncollectible should use Stripe's corresponding operation
 when a provider invoice exists. Voiding must preserve provider safeguards.
 Provider failures must be explicit and recoverable without duplicate invoices.
 
-**Unresolved provider detail:** Stripe does not offer a direct inverse of marking
-an invoice uncollectible. Before implementing reinstatement, verify supported
-Stripe behaviour and settle how local Open and the provider's state/payment
-link coexist. Do not silently claim that Stripe was reopened, clear its
-reference, or create a replacement provider invoice. If this requires a
-materially different user flow, return for approval.
+**Provider decision (resolved during implementation):** Stripe has no inverse
+of marking an invoice uncollectible, but keeps uncollectible invoices payable.
+Reinstating is therefore local only: the provider invoice, its reference and
+hosted link are left unchanged, Stripe keeps showing it as uncollectible, and
+an `invoice.paid` webhook still records payment. The reinstate dialog says so
+when the invoice has a Stripe link. Voiding an uncollectible invoice voids it
+at Stripe as for open invoices.
 
 ## Explicit non-goals
 
