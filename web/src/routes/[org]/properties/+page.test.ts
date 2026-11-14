@@ -40,4 +40,11 @@ describe("properties page", () => {
     expect(screen.getByRole('link', { name: 'New lease' }).getAttribute('href')).toBe('/acme/leases/new');
     expect(screen.queryByLabelText('Rent ($)')).toBeNull();
   });
+
+  it("links each property name to its edit page with a pencil icon", async () => {
+    render(Page);
+    const link = await screen.findByRole("link", { name: "Edit 12 High St" });
+    expect(link.getAttribute("href")).toBe("/acme/properties/1");
+    expect(link.querySelector("svg")).toBeTruthy();
+  });
 });

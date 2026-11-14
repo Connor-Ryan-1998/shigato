@@ -10,16 +10,20 @@ import LeasePage from '../../routes/[org]/leases/[id]/+page.svelte';
 import LeaseNewPage from '../../routes/[org]/leases/new/+page.svelte';
 import ProjectDialog from '../modules/timesheets/ProjectDialog.svelte';
 import BillingRunDialog from '../modules/timesheets/BillingRunDialog.svelte';
+import PropertyDetailsPage from '../../routes/[org]/properties/[id]/+page.svelte';
+import InsuranceDialog from '../modules/property/InsuranceDialog.svelte';
 
 export const components = {
 	BillingRunDialog,
 	ContactDialog,
 	ExpenseNewPage,
+	InsuranceDialog,
 	InvoiceNewPage,
 	InvoicePage,
 	LeaseNewPage,
 	LeasePage,
 	LogTimeDialog,
 	ProjectDialog,
+	PropertyDetailsPage,
 	SettingsPage
 } as const;

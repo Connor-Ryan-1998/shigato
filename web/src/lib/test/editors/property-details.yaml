@@ -1,0 +1,20 @@
+id: property-details
+component: PropertyDetailsPage
+page: {org: acme, id: "1"}
+api:
+  GET /api/v1/orgs/acme/properties/1:
+    {id: 1, name: Cottage, address: 1 Main St, kind: house, residential: true, contract_date: null, settlement_date: null,
+     purchase_price: null, stamp_duty: null, purchase_legal_costs: null, year_built: null, lot_plan: "", land_area_m2: null,
+     council_account_ref: "", water_account_ref: "", notes: "", current_tenancy: null}
+  GET /api/v1/orgs/acme/properties/1/insurance: []
+fill: {Name: Cottage two, Purchase price ($): "650000.00"}
+submit: Save details
+request: PUT /api/v1/orgs/acme/properties/1
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  busy_dismiss_blocked: Cancel
+  dirty_navigation_blocked: true
+skip:
+  cancel: page editor; Cancel restores the last saved values (details page keeps the form)
+  dirty_dismiss_confirms: page editor, no dialog to dismiss; leaving is covered by dirty_navigation_blocked

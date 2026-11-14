@@ -70,6 +70,17 @@
 		<Button disabled={loaded !== org} onclick={() => { name = ''; address = ''; residential = true; saveError = ''; creating = true; }}>New property</Button>
 	{/if}{/snippet}
 </PageHeader>
+{#snippet nameCell(property: Property)}
+	<span class="inline-flex items-center gap-1">
+		{property.name}
+		<a class="btn btn-ghost btn-xs btn-square" href={`/${org}/properties/${property.id}`} aria-label={`Edit ${property.name}`} title="Edit">
+			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4" aria-hidden="true">
+				<path d="M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" />
+				<path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z" />
+			</svg>
+		</a>
+	</span>
+{/snippet}
 {#snippet leaseCell(property: Property)}
 	{#each leases.filter((l) => l.property_id === property.id) as lease (lease.id)}
 		<div class="mb-2"><a class="link link-primary" href={`/${org}/leases/${lease.id}`}>Lease from {lease.start_date}{lease.termination_date ? ` to ${lease.termination_date}` : ''}</a>
@@ -80,7 +91,7 @@
 {:else}
 	{#if success}<p role="status" class="alert alert-success alert-soft mb-4">{success}</p>{/if}
 	<LoadState loading={loaded !== org} {error} empty={properties.length === 0} loadingLabel="Loading properties…" emptyTitle="No properties yet." onretry={load}>
-		<DataTable columns={[{ key: 'name', label: 'Name' }, { key: 'address', label: 'Address' }, { key: 'leases', label: 'Leases', cell: leaseCell }]} rows={properties} rowKey={(p) => p.id} />
+		<DataTable columns={[{ key: 'name', label: 'Name', cell: nameCell }, { key: 'address', label: 'Address' }, { key: 'leases', label: 'Leases', cell: leaseCell }]} rows={properties} rowKey={(p) => p.id} />
 	</LoadState>
 	{#if canWrite}
 		<Dialog bind:open={creating} title="New property" {busy}>
