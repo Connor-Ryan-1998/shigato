@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { apiMock } from '../../test/mock-api';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-}));
 import ProjectDialog from './ProjectDialog.svelte';
 import type { Project } from './types';
 
@@ -15,23 +11,7 @@ const project: Project = {
 };
 const contacts = [{ id: 9, name: 'Rizzware', kind: 'client' }, { id: 10, name: 'Other', kind: 'client' }, { id: 11, name: 'Tenant', kind: 'tenant' }];
 
-// jsdom has no modal dialog support.
-HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) { this.open = true; };
-HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) { this.open = false; };
-
 describe('ProjectDialog', () => {
-	it('does not write twice while a save is pending', async () => {
-		apiMock.mockReset();
-		apiMock.mockReturnValue(new Promise(() => {}));
-		render(ProjectDialog, { open: true, org: 'acme', contacts, project, onsaved: vi.fn() });
-		const form = screen.getByRole('button', { name: 'Save project' }).closest('form')!;
-		await fireEvent.submit(form);
-		await fireEvent.submit(form);
-		expect(apiMock.mock.calls).toHaveLength(1);
-		const event = new Event('cancel', { cancelable: true });
-		screen.getByRole('dialog').dispatchEvent(event);
-		expect(event.defaultPrevented).toBe(true);
-	});
 	it('sends a full replace on edit', async () => {
 		apiMock.mockResolvedValue(project);
 		const onsaved = vi.fn();
@@ -50,7 +30,6 @@ describe('ProjectDialog', () => {
 	});
 
 	it('rejects a bad rate without calling the API', async () => {
-		apiMock.mockReset();
 		render(ProjectDialog, { open: true, org: 'acme', contacts, onsaved: vi.fn() });
 		await fireEvent.input(screen.getByLabelText('Project name'), { target: { value: 'New' } });
 		await fireEvent.input(screen.getByLabelText('Base rate ($/h)'), { target: { value: '0' } });

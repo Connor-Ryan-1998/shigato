@@ -1,0 +1,36 @@
+# fn(in) == want for the pure formatters and parsers in lib/format.ts.
+# `want: null` means the input is rejected. The parse bounds match the
+# server's (100,000,000,000 cents; 10,000,000 milli).
+- {name: money formats positive cents as AUD, fn: money, in: 123456, want: "$1,234.56"}
+- {name: money formats negative cents as AUD, fn: money, in: -500, want: "-$5.00"}
+- {name: date formats an ISO date as en-AU, fn: date, in: "2026-11-05", want: "5 Nov 2026"}
+- {name: minutes formats as hours and minutes, fn: minutes, in: 125, want: "2h 05m"}
+
+- {name: parseCents one decimal, fn: parseCents, in: "12.3", want: 1230}
+- {name: parseCents comma-grouped two decimals, fn: parseCents, in: "1,200.50", want: 120050}
+- {name: parseCents whole dollars, fn: parseCents, in: "12", want: 1200}
+- {name: parseCents rejects three decimals, fn: parseCents, in: "1.234", want: null}
+- {name: parseCents rejects empty, fn: parseCents, in: "", want: null}
+- {name: parseCents rejects negative, fn: parseCents, in: "-5.00", want: null}
+- {name: parseCents rejects non-numeric, fn: parseCents, in: abc, want: null}
+- {name: parseCents rejects internal spaces, fn: parseCents, in: "1 200", want: null}
+- {name: parseCents rejects groups not 3 digits, fn: parseCents, in: "1,2,3", want: null}
+- {name: parseCents rejects leading-zero group, fn: parseCents, in: "0,100", want: null}
+- {name: parseCents rejects no leading digit, fn: parseCents, in: ".5", want: null}
+- {name: parseCents rejects no digits after point, fn: parseCents, in: "1.", want: null}
+- {name: parseCents rejects -0, fn: parseCents, in: "-0", want: null}
+- {name: parseCents rejects over server bound, fn: parseCents, in: "2000000000.00", want: null}
+- {name: parseCents accepts exactly the server bound, fn: parseCents, in: "1000000000.00", want: 100000000000}
+
+- {name: parseQuantityMilli one decimal, fn: parseQuantityMilli, in: "1.5", want: 1500}
+- {name: parseQuantityMilli whole, fn: parseQuantityMilli, in: "3", want: 3000}
+- {name: parseQuantityMilli rejects four decimals, fn: parseQuantityMilli, in: "0.0005", want: null}
+- {name: parseQuantityMilli rejects empty, fn: parseQuantityMilli, in: "", want: null}
+- {name: parseQuantityMilli rejects negative, fn: parseQuantityMilli, in: "-1.5", want: null}
+- {name: parseQuantityMilli rejects non-numeric, fn: parseQuantityMilli, in: abc, want: null}
+- {name: parseQuantityMilli rejects internal spaces, fn: parseQuantityMilli, in: "1 5", want: null}
+- {name: parseQuantityMilli rejects no leading digit, fn: parseQuantityMilli, in: ".5", want: null}
+- {name: parseQuantityMilli rejects no digits after point, fn: parseQuantityMilli, in: "1.", want: null}
+- {name: parseQuantityMilli rejects -0, fn: parseQuantityMilli, in: "-0", want: null}
+- {name: parseQuantityMilli rejects over server bound, fn: parseQuantityMilli, in: "20000.5", want: null}
+- {name: parseQuantityMilli accepts exactly the server bound, fn: parseQuantityMilli, in: "10000", want: 10000000}

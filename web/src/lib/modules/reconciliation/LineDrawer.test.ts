@@ -1,34 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { apiMock } from '../../test/mock-api';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error {
-		status: number;
-		constructor(status: number, message: string) {
-			super(message);
-			this.name = 'ApiError';
-			this.status = status;
-		}
-	}
-}));
 
 import LineDrawer from './LineDrawer.svelte';
 import type { BankLine } from './BankLineTable.svelte';
 import type { Category } from './ExpenseForm.svelte';
-
-// jsdom doesn't implement <dialog>'s showModal/close - Drawer.svelte (via
-// Dialog's same trick) calls them directly.
-beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
-		this.setAttribute('open', '');
-	});
-	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
-		this.removeAttribute('open');
-	});
-	apiMock.mockReset();
-});
 
 const categories: Category[] = [{ id: 1, name: 'Repairs', type: 'expense' }];
 

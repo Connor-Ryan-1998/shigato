@@ -1,14 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { setPage } from '../../lib/test/app.svelte';
 import { createRawSnippet } from 'svelte';
 import { render, screen } from '@testing-library/svelte';
-
-const page = { params: { org: 'acme' }, url: new URL('http://localhost/portal/acme/invoices') };
-vi.mock('$app/state', () => ({
-	get page() {
-		return page;
-	}
-}));
-vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 import Layout from './+layout.svelte';
 import { session } from '../../lib/session.svelte';
@@ -24,6 +17,8 @@ function meWithOrgs(orgs: { slug: string; name: string; role: string; portal?: b
 	};
 }
 
+beforeEach(() => setPage({ params: { org: 'acme' }, url: new URL('http://localhost/portal/acme/invoices') }));
+
 describe('portal layout', () => {
 	it('offers skip navigation and identifies the current portal section without staff links', () => {
 		session.setMe(meWithOrgs([{ slug: 'acme', name: 'Acme', role: 'tenant', portal: true }]));
@@ -32,10 +27,6 @@ describe('portal layout', () => {
 		expect(screen.getByRole('link', { name: 'Invoices' }).getAttribute('aria-current')).toBe('page');
 		expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
 	});
-	afterEach(() => {
-		session.clear();
-	});
-
 	// Item 9: a user who holds both a portal membership and a staff
 	// membership (e.g. an owner who's also a tenant of their own property)
 	// needs a way back to their staff org without signing out of the portal

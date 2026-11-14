@@ -2,15 +2,6 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import InviteDialog from './InviteDialog.svelte';
 
-beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
-		this.setAttribute('open', '');
-	});
-	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
-		this.removeAttribute('open');
-	});
-});
-
 describe('InviteDialog', () => {
 	it('shows the link and a copy button when emailed is false', () => {
 		render(InviteDialog, {

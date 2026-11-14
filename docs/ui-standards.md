@@ -184,8 +184,10 @@ loading, uploads, context guards, success links, and warnings.
 
 ## Existing-screen coverage
 
-Paths below are relative to `web/src/routes/`. Colocated tests cover the named
-screen unless another proof is listed. Shared visual changes also apply to
+Paths below are relative to `web/src/routes/`; `lib/test/...` paths are
+relative to `web/src/`. Colocated tests cover the named screen unless another
+proof is listed. `lib/test/editors/*.yaml` entries run the shared editor
+contract (see `docs/testing.md`). Shared visual changes also apply to
 screens that need no route-specific rewrite.
 
 | Screen or shell | Standardization / retained layout | Regression proof |
@@ -197,23 +199,23 @@ screens that need no route-specific rewrite.
 | `[org]/[...rest]/+page.svelte` | Existing PageHeader not-found layout retained | route review; shared PageHeader tests |
 | `[org]/+page.svelte` | Existing shared heading/cards/state layout retained | `+page.test.ts`, `e2e/smoke.spec.ts` |
 | `[org]/projects/+page.svelte` | Shared filters/load states; explicit create dialog | `+page.svelte.test.ts` |
-| `[org]/projects/[id]/+page.svelte` | Shared back/header/filters; domain summary/chart/tables retained | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/time/+page.svelte` | Shared header/filter/load states; keyboard-operable view trigger | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/projects/[id]/+page.svelte` | Shared back/header/filters; domain summary/chart/tables retained | `+page.svelte.test.ts`; project dialog `lib/test/editors/project-dialog.yaml` |
+| `[org]/time/+page.svelte` | Shared header/filter/load states; keyboard-operable view trigger | `+page.svelte.test.ts`, `lib/test/editors/log-time-dialog.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/invoices/+page.svelte` | Existing URL status views; shared pagination | `e2e/smoke.spec.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/invoices/new/+page.svelte` | Dedicated guarded editor; shared contact dialog | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/invoices/[id]/+page.svelte` | Existing detail/actions retained; protected shared payment dialog | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/invoices/new/+page.svelte` | Dedicated guarded editor; shared contact dialog | `+page.test.ts`, `lib/test/editors/invoice-new-contact.yaml`, `e2e/financial-workflows.spec.ts` |
+| `[org]/invoices/[id]/+page.svelte` | Existing detail/actions retained; protected shared payment dialog | `lib/test/editors/invoice-payment.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/billing-run/+page.svelte` | Dedicated guarded workflow; retained invoice recovery link | `+page.svelte.test.ts`, `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/contacts/+page.svelte` | List/filter/state layout; reused contact dialog | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/contacts/+page.svelte` | List/filter/state layout; reused contact dialog | `+page.svelte.test.ts`, `lib/test/editors/contact-dialog-*.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/properties/+page.svelte` | List, explicit property dialog, New lease navigation | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/leases/new/+page.svelte` | New dedicated guarded lease editor | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/leases/[id]/+page.svelte` | Short action dialogs; warning panel remains on detail page | `+page.svelte.test.ts`, `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/leases/new/+page.svelte` | New dedicated guarded lease editor | `+page.svelte.test.ts`, `lib/test/editors/lease-new.yaml`, `e2e/financial-workflows.spec.ts` |
+| `[org]/leases/[id]/+page.svelte` | Short action dialogs; warning panel remains on detail page | `+page.svelte.test.ts`, `+page.test.ts`, `lib/test/editors/lease-rent-change.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/expenses/+page.svelte` | List/filter/state layout; New expense navigation | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/expenses/new/+page.svelte` | New dedicated guarded expense editor, existing shared split form | parent `expenses/+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/expenses/[id]/+page.svelte` | Shared back/header/table; stored IDs remain fallback for missing names | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/expenses/new/+page.svelte` | New dedicated guarded expense editor, existing shared split form | parent `expenses/+page.svelte.test.ts`, `lib/test/editors/expense-new.yaml` |
+| `[org]/expenses/[id]/+page.svelte` | Shared back/header/table; stored IDs remain fallback for missing names | `+page.svelte.test.ts` |
 | `[org]/reconciliation/+page.svelte` | Shared filters/pagination; contextual matching drawer retained | module `LineDrawer.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/reconciliation/accounts/+page.svelte` | Shared back/header; protected account/import dialogs | module `ImportDialog.svelte`, `e2e/financial-workflows.spec.ts` |
+| `[org]/reconciliation/accounts/+page.svelte` | Shared back/header; protected account/import dialogs | module `ImportDialog.svelte`; import API covered by `e2e/financial-workflows.spec.ts` |
 | `[org]/reports/+page.svelte` | Shared filter surfaces; financial tables, grouping, CSV retained | `+page.test.ts`, `e2e/financial-workflows.spec.ts` |
-| `[org]/settings/+page.svelte` | Grouped draft with Save/Cancel and navigation protection | `+page.svelte.test.ts`, `e2e/financial-workflows.spec.ts` |
+| `[org]/settings/+page.svelte` | Grouped draft with Save/Cancel and navigation protection | `+page.svelte.test.ts`, `lib/test/editors/settings-page.yaml`, `e2e/financial-workflows.spec.ts` |
 | `[org]/settings/members/+page.svelte` | Existing stable background-refresh list; protected invite dialogs | `+page.test.ts`, module invite/table tests |
 | `portal/+page.svelte` | Shared header; picker/single-org redirect retained | `e2e/portal.spec.ts` |
 | `portal/[org]/invoices/+page.svelte` | Shared table/format/state layout; numeric alignment | `e2e/portal.spec.ts` |
@@ -232,9 +234,10 @@ screens that need no route-specific rewrite.
 - [ ] Keep filter/pagination semantics honest; preserve existing URL navigation.
 - [ ] Provide explicit submit/cancel, duplicate-submit guards, and dirty/busy protection.
 - [ ] Preserve failed input; separate write success from refresh/navigation failure.
+- [ ] Register every editor in `web/src/lib/test/editors/` so the shared contract checks the two items above.
 - [ ] Keep warnings, financial safeguards, and recovery links visible.
 - [ ] Check labels, descriptions, headings, focus, keyboard access, narrow viewport, and both themes.
-- [ ] Add behavior tests and a real-browser check for new interaction behavior.
+- [ ] Add behavior tests in the layer that owns them (`docs/testing.md`); add a real-browser check only for behavior a browser alone can show.
 - [ ] Add the route and proof to the coverage ledger; explain any layout exception.
 - [ ] Run repository Taskfile checks sequentially; record any blocked verification honestly.
 

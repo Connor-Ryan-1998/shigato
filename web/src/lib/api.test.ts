@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// Exercises the real api client against a stubbed fetch.
+vi.unmock('./api');
 import { api, ApiError, registerReloginPrompt, resetOnUnauthorized, setOnUnauthorized } from './api';
 
 function jsonResponse(status: number, body: unknown, statusText = ''): Response {

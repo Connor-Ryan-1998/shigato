@@ -1,24 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { apiMock } from "../../../lib/test/mock-api";
+import { setPage } from "../../../lib/test/app.svelte";
 import { render, screen } from "@testing-library/svelte";
-
-vi.mock("$app/state", () => ({
-  page: {
-    params: { org: "acme" },
-    url: new URL("http://localhost/acme/reports"),
-  },
-}));
-
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock("../../../lib/api", () => ({
-  api: apiMock,
-  ApiError: class ApiError extends Error {
-    status: number;
-    constructor(status: number, message: string) {
-      super(message);
-      this.status = status;
-    }
-  },
-}));
 
 import Page from "./+page.svelte";
 import { ApiError } from "../../../lib/api";
@@ -64,7 +47,8 @@ function route(path: string) {
 
 describe("reports page", () => {
   beforeEach(() => {
-    apiMock.mockReset();
+    setPage({ params: { org: "acme" }, url: "http://localhost/acme/reports" });
+
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(2026, 10, 7)); // 7 Nov 2026 -> FY2027 Q2
   });

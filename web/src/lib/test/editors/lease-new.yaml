@@ -1,0 +1,18 @@
+id: lease-new
+component: LeaseNewPage
+page: {org: acme}
+session: {perms: [property_read, property_write]}
+api:
+  GET /api/v1/orgs/acme/properties: [{id: 1, name: Cottage, residential: true}]
+  GET /api/v1/orgs/acme/contacts: [{id: 7, name: Tina, kind: tenant}, {id: 8, name: Tom, kind: tenant}, {id: 9, name: Client, kind: client}]
+fill: {Rent ($): "500", Paid-to date: "2026-11-06", Opening arrears ($): "123.45", "Co-tenant: Tom": "true"}
+submit: Create lease
+request: POST /api/v1/orgs/acme/leases
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  busy_dismiss_blocked: Cancel
+  dirty_navigation_blocked: true
+skip:
+  cancel: page editor; Cancel leaves the page (asks first when dirty) instead of closing an editor
+  dirty_dismiss_confirms: page editor, no dialog to dismiss; leaving is covered by dirty_navigation_blocked

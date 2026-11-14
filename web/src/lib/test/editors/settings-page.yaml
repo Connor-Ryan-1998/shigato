@@ -1,0 +1,19 @@
+id: settings
+component: SettingsPage
+page: {org: acme}
+session: {perms: [org_admin]}
+api:
+  GET /api/v1/orgs/acme/settings:
+    {name: Acme, abn: "", gst_registered: false, bas_frequency: "", bank_bsb: "001002", bank_account: "00123456",
+     payid: owner@example.com, invoice_lead_days: 0, auto_send_rent: true}
+fill: {Organisation name: Acme Pty, PayID: bad payid}
+submit: Save settings
+request: PUT /api/v1/orgs/acme/settings
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  busy_dismiss_blocked: Cancel
+  dirty_navigation_blocked: true
+skip:
+  cancel: page editor; Cancel restores the last saved values (settings page test "cancels drafts back to the last saved values")
+  dirty_dismiss_confirms: page editor, no dialog to dismiss; leaving is covered by dirty_navigation_blocked

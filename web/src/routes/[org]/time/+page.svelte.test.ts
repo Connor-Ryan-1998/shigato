@@ -1,15 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../lib/test/app.svelte';
+import { apiMock } from '../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-}));
 import Page from './+page.svelte';
 
 const project = {
@@ -43,12 +38,10 @@ function route(method: string, path: string): Promise<unknown> {
 const entryCalls = () => apiMock.mock.calls.filter(([m, p]) => m === 'GET' && p.includes('/time-entries?')).map(([, p]) => p);
 
 beforeEach(() => {
-	page.params.org = 'acme';
+	setPage({ params: { org: 'acme' } });
 	login();
-	apiMock.mockReset();
+
 	apiMock.mockImplementation(route);
-	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute('open', ''); });
-	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) { this.removeAttribute('open'); });
 });
 
 describe('time logging page', () => {
@@ -106,7 +99,6 @@ describe('time logging page', () => {
 	});
 
 	it('deletes after confirmation and reloads', async () => {
-		vi.spyOn(window, 'confirm').mockReturnValue(true);
 		render(Page);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Delete entry 5' }));
 		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('DELETE', '/api/v1/orgs/acme/time-entries/5'));

@@ -1,0 +1,20 @@
+id: project-edit
+component: ProjectDialog
+props:
+  open: true
+  org: acme
+  contacts: [{id: 9, name: Rizzware, kind: client}]
+  project:
+    {id: 5, client_contact_id: 9, name: Website, hourly_rate: 12000, gst_code: GST, status: in_progress,
+     description: Old, start_date: "2026-01-01", end_date: null, billing_method: tm, active: true}
+callbacks: [onsaved]
+fill: {Project name: Website v2, Base rate ($/h): "150.50"}
+submit: Save project
+request: PUT /api/v1/orgs/acme/projects/5
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

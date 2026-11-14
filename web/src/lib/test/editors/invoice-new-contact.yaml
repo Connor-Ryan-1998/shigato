@@ -1,0 +1,18 @@
+# The new-invoice page's "New contact" button opens ContactDialog in place.
+id: invoice-new-contact
+component: InvoiceNewPage
+page: {org: acme}
+api:
+  GET /api/v1/orgs/acme/contacts: []
+ready: New invoice
+open: New contact
+fill: {Contact kind: client, Name: Jane Client}
+submit: Create contact
+request: POST /api/v1/orgs/acme/contacts
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

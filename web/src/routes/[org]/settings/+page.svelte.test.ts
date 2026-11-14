@@ -1,19 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeNavigate, page, setPage } from '../../../lib/test/app.svelte';
+import { apiMock } from '../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme' } });
-const { beforeNavigateMock } = vi.hoisted(() => ({ beforeNavigateMock: vi.fn() }));
-vi.mock('$app/navigation', () => ({ beforeNavigate: beforeNavigateMock }));
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error {
-		constructor(public status: number, message: string) { super(message); }
-	}
-}));
 import { ApiError } from '../../../lib/api';
 import Page from './+page.svelte';
 
@@ -24,13 +15,13 @@ const settings = {
 };
 
 beforeEach(() => {
-	page.params.org = 'acme';
+	setPage({ params: { org: 'acme' } });
 	session.setMe({ user: { id: 1, email: 'owner@example.com', name: 'Owner' }, orgs: [
 		{ slug: 'acme', name: 'Acme', role: 'owner', perms: ['org_admin'] },
 		{ slug: 'other', name: 'Other', role: 'owner', perms: ['org_admin'] }
 	] });
 	session.setOrg('acme');
-	apiMock.mockReset();
+
 	apiMock.mockImplementation((method: string, _path: string, body: unknown) =>
 		Promise.resolve(method === 'GET' ? { ...settings } : body));
 });
@@ -42,7 +33,6 @@ function form() { return screen.getByRole('button', { name: 'Save settings' }).c
 
 describe('organisation settings', () => {
 	it('cancels drafts back to the last saved values without a write', async () => {
-		vi.spyOn(window, 'confirm').mockReturnValue(true);
 		render(Page);
 		await loaded();
 		await fireEvent.input(screen.getByLabelText('Organisation name'), { target: { value: 'Unsaved' } });
@@ -55,7 +45,7 @@ describe('organisation settings', () => {
 		render(Page);
 		await loaded();
 		await fireEvent.input(screen.getByLabelText('Organisation name'), { target: { value: 'Unsaved' } });
-		const navigate = beforeNavigateMock.mock.calls.at(-1)![0];
+		const navigate = beforeNavigate.mock.calls.at(-1)![0];
 		const cancel = vi.fn();
 		navigate({ to: { url: new URL('http://localhost/acme/contacts') }, cancel });
 		expect(cancel).toHaveBeenCalledOnce();
@@ -123,17 +113,6 @@ describe('organisation settings', () => {
 			expect.objectContaining({ bank_bsb: '', bank_account: '', payid: '' })));
 	});
 
-	it('keeps input and server error after rejected save', async () => {
-		apiMock.mockImplementation((method: string) => method === 'GET' ? Promise.resolve({ ...settings }) :
-			Promise.reject(new ApiError(422, 'invalid payid')));
-		render(Page);
-		await loaded();
-		await fireEvent.input(screen.getByLabelText('PayID'), { target: { value: 'bad payid' } });
-		await fireEvent.submit(form());
-		expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'invalid payid');
-		expect((screen.getByLabelText('PayID') as HTMLInputElement).value).toBe('bad payid');
-	});
-
 	it('does not offer a blank editable form on failed load and supports retry', async () => {
 		apiMock.mockRejectedValueOnce(new ApiError(500, 'load failed'));
 		render(Page);
@@ -183,21 +162,5 @@ describe('organisation settings', () => {
 		render(Page);
 		expect(await screen.findByRole('alert')).toBeTruthy();
 		expect(apiMock).not.toHaveBeenCalled();
-	});
-
-	it('prevents duplicate submits and disables editing while saving', async () => {
-		let finish!: (value: unknown) => void;
-		apiMock.mockImplementation((method: string) => method === 'GET' ? Promise.resolve({ ...settings }) :
-			new Promise((resolve) => { finish = resolve; }));
-		render(Page);
-		await loaded();
-		const settingsForm = form();
-		await fireEvent.submit(settingsForm);
-		await fireEvent.submit(settingsForm);
-		expect(apiMock.mock.calls.filter(([method]) => method === 'PUT')).toHaveLength(1);
-		expect(screen.getByRole('button', { name: 'Saving…' })).toHaveProperty('disabled', true);
-		expect((screen.getByLabelText('Organisation name') as HTMLInputElement).closest('fieldset')?.disabled).toBe(true);
-		finish({ ...settings });
-		await screen.findByText('Settings saved.');
 	});
 });

@@ -1,17 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../lib/test/app.svelte';
+import { apiMock } from '../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error {
-		constructor(public status: number, message: string) { super(message); }
-	}
-}));
 import { ApiError } from '../../../lib/api';
 import Page from './+page.svelte';
 
@@ -21,16 +14,13 @@ const contact = {
 };
 
 beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-	HTMLDialogElement.prototype.close = function () { this.open = false; };
-	vi.spyOn(window, 'confirm').mockReturnValue(true);
-	page.params.org = 'acme';
+	setPage({ params: { org: 'acme' } });
 	session.setMe({ user: { id: 1, email: 'owner@example.com', name: 'Owner' }, orgs: [
 		{ slug: 'acme', name: 'Acme', role: 'owner', perms: ['invoices_read', 'contacts_write'] },
 		{ slug: 'other', name: 'Other', role: 'owner', perms: ['invoices_read', 'contacts_write'] }
 	] });
 	session.setOrg('acme');
-	apiMock.mockReset();
+
 	apiMock.mockImplementation((method: string, _path: string, body: object) =>
 		Promise.resolve(method === 'GET' ? [{ ...contact }] : { id: 8, ...body }));
 });
@@ -66,34 +56,6 @@ describe('contacts', () => {
 		expect(apiMock).toHaveBeenCalledWith('PUT', '/api/v1/orgs/acme/contacts/7', { name: 'Corrected', email: '', phone: '', company_name: '', abn: '' });
 		expect(screen.getByText('Contact updated.')).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'New contact' })).toBeTruthy();
-	});
-
-	it('cancels editing without saving and closes the editor', async () => {
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Edit Tina Tenant' }));
-		await name('Discard');
-		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-		expect(screen.queryByLabelText('Name', { exact: true })).toBeNull();
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(0);
-		expect(screen.getByRole('cell', { name: 'Tina Tenant' })).toBeTruthy();
-	});
-
-	it('retains failed edit and prevents duplicate submissions while pending', async () => {
-		let reject!: (error: Error) => void;
-		apiMock.mockImplementation((m: string) => m === 'GET' ? Promise.resolve([{ ...contact }]) : new Promise((_resolve, fail) => { reject = fail; }));
-		render(Page);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Edit Tina Tenant' }));
-		await name('Retained');
-		const editForm = screen.getByRole('button', { name: 'Save contact' }).closest('form')!;
-		await fireEvent.submit(editForm);
-		await fireEvent.submit(editForm);
-		expect(apiMock.mock.calls.filter(([m]) => m === 'PUT')).toHaveLength(1);
-		expect(screen.getByLabelText('Name', { exact: true }).matches(':disabled')).toBe(true);
-		expect(screen.getByRole('button', { name: 'Cancel' })).toHaveProperty('disabled', true);
-		reject(new ApiError(422, 'name is required'));
-		await screen.findByText('name is required');
-		expect((screen.getByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('Retained');
-		expect(screen.getByRole('button', { name: 'Save contact' })).toHaveProperty('disabled', false);
 	});
 
 	it('ignores late edit completion after org switch', async () => {
@@ -163,31 +125,6 @@ describe('contacts', () => {
 			kind, name: 'New contact', email: 'new@example.com', phone: '0400000000', company_name: 'New Co', abn: '51824753556'
 		});
 		expect(screen.queryByLabelText('Name', { exact: true })).toBeNull();
-	});
-
-	it('retains draft on 422', async () => {
-		apiMock.mockImplementation((method: string) => method === 'GET' ? Promise.resolve([]) :
-			Promise.reject(new ApiError(422, 'name is required')));
-		render(Page);
-		await name();
-		await fireEvent.submit(form());
-		expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'name is required');
-		expect((screen.getByLabelText('Name', { exact: true }) as HTMLInputElement).value).toBe('New contact');
-	});
-
-	it('prevents duplicate creates', async () => {
-		let finish!: (v: unknown) => void;
-		apiMock.mockImplementation((method: string) => method === 'GET' ? Promise.resolve([]) :
-			new Promise((resolve) => { finish = resolve; }));
-		render(Page);
-		await name();
-		const createForm = form();
-		await fireEvent.submit(createForm);
-		await fireEvent.submit(createForm);
-		expect(apiMock.mock.calls.filter(([method]) => method === 'POST')).toHaveLength(1);
-		expect(screen.getByRole('button', { name: 'Creating…' })).toHaveProperty('disabled', true);
-		finish({ ...contact });
-		await screen.findByText('Contact created.');
 	});
 
 	it('handles empty list and missing optional fields', async () => {

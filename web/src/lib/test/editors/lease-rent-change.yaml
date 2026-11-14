@@ -1,0 +1,23 @@
+# The lease page's "Change rent" action opens a dialog the page saves.
+id: lease-rent-change
+component: LeasePage
+page: {org: acme, id: "4"}
+session: {perms: [property_read, property_write]}
+api:
+  GET /api/v1/orgs/acme/leases/4:
+    {id: 4, start_date: "2026-01-01", frequency: weekly, bond_amount: 0, bond_status: due,
+     rent_changes: [{id: 1, effective_date: "2026-01-01", amount: 50000}], charges: []}
+  GET /api/v1/orgs/acme/leases/4/ledger: {periods: [], opening_arrears: 0, arrears: 0, invoiced_not_due: 0, unissued: 0}
+ready: Ledger
+open: Change rent
+fill: {New rent from: "2026-02-01", Rent ($): "520"}
+submit: Change rent
+request: POST /api/v1/orgs/acme/leases/4/rent-changes
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true
+skip:
+  cancel: the action dialog has no Cancel button; Escape is checked by dirty_dismiss_confirms

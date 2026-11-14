@@ -11,7 +11,9 @@ screen, including settings, authentication, and the customer portal.
   warnings, and portal isolation.
 - Every editor needs failed-input preservation, duplicate-submit protection,
   and explicit cancellation. Preserve dirty edits and block busy dismissal.
-- Test changed behavior; update the standards' screen ledger for new routes.
+- Test changed behavior in the layer that owns it, using the shared YAML
+  harnesses in [Testing](docs/testing.md); update the standards' screen ledger
+  for new routes.
 - Run Taskfile validation sequentially through `uv run --locked`; see README
   and inherited repository instructions. Never use production/operator databases
   for browser tests or commit credentials, session cookies, or generated secrets.

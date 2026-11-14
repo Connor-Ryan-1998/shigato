@@ -61,6 +61,6 @@ export default defineConfig({
 		// Auto-unmounts/cleans up the DOM after every component test so one
 		// test's rendered markup (e.g. a second "Overdue" link) can't leak
 		// into the next test's queries.
-		setupFiles: ['@testing-library/svelte/vitest']
+		setupFiles: ['@testing-library/svelte/vitest', './src/lib/test/setup.ts']
 	}
 });

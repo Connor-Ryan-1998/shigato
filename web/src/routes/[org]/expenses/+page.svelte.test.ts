@@ -1,13 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../lib/test/app.svelte';
+import { apiMock } from '../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({ api: apiMock, ApiError: class ApiError extends Error {} }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
 import Page from './new/+page.svelte';
 import ListPage from './+page.svelte';
 
@@ -20,11 +17,11 @@ function route(method: string, path: string, body?: unknown): Promise<unknown> {
 	throw new Error(`Unexpected ${method} ${path} ${body}`);
 }
 beforeEach(() => {
-	page.params.org = 'acme';
+	setPage({ params: { org: 'acme' } });
 	session.setMe({ user: { id: 1, email: 'owner@example.com', name: 'Owner' }, orgs: ['acme', 'other'].map((slug) => ({ slug, name: slug, role: 'owner', perms: ['reports_read', 'recon_write', 'invoices_read'] })) });
 	session.setOrg('acme');
 	session.setModules(['reconciliation']);
-	apiMock.mockReset();
+
 	apiMock.mockImplementation(route);
 });
 async function fill() {

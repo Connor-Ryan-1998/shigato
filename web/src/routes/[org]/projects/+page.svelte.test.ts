@@ -1,15 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../lib/test/app.svelte';
+import { apiMock } from '../../../lib/test/mock-api';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { session } from '../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-}));
 import Page from './+page.svelte';
 
 const project = (id: number, name: string, status: string, extra = {}) => ({
@@ -23,10 +17,10 @@ const projects = [
 ];
 
 beforeEach(() => {
-	page.params.org = 'acme';
+	setPage({ params: { org: 'acme' } });
 	session.setMe({ user: { id: 1, email: 'o@example.com', name: 'Owner' }, orgs: [{ slug: 'acme', name: 'Acme', role: 'owner', perms: ['timesheets_read', 'timesheets_admin'] }] });
 	session.setOrg('acme');
-	apiMock.mockReset();
+
 	apiMock.mockImplementation((_m: string, p: string) =>
 		Promise.resolve(p.endsWith('/projects') ? projects : [{ id: 9, name: 'Rizzware', kind: 'client' }]));
 });

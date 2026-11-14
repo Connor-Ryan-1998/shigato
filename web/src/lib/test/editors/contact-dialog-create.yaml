@@ -1,0 +1,14 @@
+id: contact-create
+component: ContactDialog
+props: {open: true, org: acme}
+callbacks: [onsaved]
+fill: {Contact kind: client, Name: New contact, Email: new@example.com}
+submit: Create contact
+request: POST /api/v1/orgs/acme/contacts
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

@@ -1,20 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { apiMock } from "../../../../lib/test/mock-api";
+import { setPage } from "../../../../lib/test/app.svelte";
+import { signIn } from "../../../../lib/test/session";
 import { render, screen, fireEvent } from "@testing-library/svelte";
-
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock("$app/state", () => ({
-  page: {
-    params: { org: "acme", id: "4" },
-    url: new URL("http://localhost/acme"),
-  },
-}));
-vi.mock("../../../../lib/session.svelte", () => ({
-  session: { currentOrg: { slug: "acme", perms: ["property_read", "property_write"] } },
-}));
-vi.mock("../../../../lib/api", () => ({
-  api: apiMock,
-  ApiError: class ApiError extends Error {},
-}));
 
 import Page from "./+page.svelte";
 
@@ -46,9 +34,9 @@ const LEDGER = {
 
 describe("lease page", () => {
   beforeEach(() => {
-    HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-    HTMLDialogElement.prototype.close = function () { this.open = false; };
-    apiMock.mockReset();
+    setPage({ params: { org: "acme", id: "4" }, url: "http://localhost/acme" });
+    signIn({ perms: ["property_read", "property_write"] });
+
     apiMock.mockImplementation((m: string, p: string) =>
       m === "GET"
         ? Promise.resolve(p.endsWith("/ledger") ? LEDGER : LEASE)

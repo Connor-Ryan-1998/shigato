@@ -1,39 +1,14 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { goto, replaceState, setPage } from '../../../lib/test/app.svelte';
+import { apiMock } from '../../../lib/test/mock-api';
 import { render, screen } from '@testing-library/svelte';
-
-const page = { url: new URL('http://localhost/auth/magic?token=abc123') };
-vi.mock('$app/state', () => ({
-	get page() {
-		return page;
-	}
-}));
-const { goto, replaceState } = vi.hoisted(() => ({ goto: vi.fn(), replaceState: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto, replaceState }));
-
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error {
-		status: number;
-		constructor(status: number, message: string) {
-			super(message);
-			this.name = 'ApiError';
-			this.status = status;
-		}
-	}
-}));
 
 import Page from './+page.svelte';
 import { ApiError } from '../../../lib/api';
 
-describe('magic sign-in page', () => {
-	beforeEach(() => {
-		apiMock.mockReset();
-		goto.mockClear();
-		replaceState.mockClear();
-		page.url = new URL('http://localhost/auth/magic?token=abc123');
-	});
+beforeEach(() => setPage({ url: new URL('http://localhost/auth/magic?token=abc123') }));
 
+describe('magic sign-in page', () => {
 	it('shows the fixed expired message on a 410, and scrubs the token from the URL', async () => {
 		apiMock.mockImplementation((method: string, path: string) => {
 			if (method === 'POST' && path === '/api/v1/auth/magic/verify') {

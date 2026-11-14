@@ -1,0 +1,22 @@
+id: log-time
+component: LogTimeDialog
+props:
+  open: true
+  org: acme
+  projects:
+    - {id: 3, name: Website, client_contact_id: 2, hourly_rate: 15000, gst_code: GST, status: in_progress,
+       description: "", start_date: null, end_date: null, billing_method: tm, active: true}
+callbacks: [onsaved]
+api:
+  GET /api/v1/orgs/acme/projects/3/tasks: [{id: 11, project_id: 3, name: Build, active: true}]
+ready: Build
+fill: {Date: "2026-11-02", Time (H:MM): "1:00", Note: Ingress}
+submit: Log time
+request: POST /api/v1/orgs/acme/time-entries
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

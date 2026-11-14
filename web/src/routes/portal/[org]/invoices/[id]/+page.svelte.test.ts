@@ -1,37 +1,17 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { page, setPage } from '../../../../../lib/test/app.svelte';
+import { apiMock } from '../../../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { render, screen } from '@testing-library/svelte';
-
-// A reactive stand-in for $app/state's page (runes work here because this
-// is a .svelte.test.ts file), so the stale-response test can switch id the
-// way an id-to-id hop does: same page instance, new page.params.id.
-const page = $state({
-	params: { org: 'acme', id: '7' },
-	url: new URL('http://localhost/portal/acme/invoices/7')
-});
-vi.mock('$app/state', () => ({
-	get page() {
-		return page;
-	}
-}));
-
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error {
-		status: number;
-		constructor(status: number, message: string) {
-			super(message);
-			this.name = 'ApiError';
-			this.status = status;
-		}
-	}
-}));
 
 import Page from './+page.svelte';
 
 beforeEach(() => {
-	apiMock.mockReset();
+	setPage({
+	params: { org: 'acme', id: '7' },
+	url: new URL('http://localhost/portal/acme/invoices/7')
+});
+
 	page.params = { org: 'acme', id: '7' };
 });
 

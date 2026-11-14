@@ -1,0 +1,17 @@
+id: contact-edit
+component: ContactDialog
+props:
+  open: true
+  org: acme
+  contact: {id: 7, kind: tenant, name: Tina Tenant, email: tina@example.com, phone: "0412345678", company_name: Example company, abn: "51824753556"}
+callbacks: [onsaved]
+fill: {Name: Retained, Phone: ""}
+submit: Save contact
+request: PUT /api/v1/orgs/acme/contacts/7
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  cancel: Cancel
+  busy_dismiss_blocked: true
+  dirty_dismiss_confirms: true
+  dirty_navigation_blocked: true

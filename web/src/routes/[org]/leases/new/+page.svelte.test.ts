@@ -1,16 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../../lib/test/app.svelte';
+import { apiMock } from '../../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { session } from '../../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
-vi.mock('../../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-}));
 import { ApiError } from '../../../../lib/api';
 import Page from './+page.svelte';
 
@@ -22,10 +16,10 @@ function route(m: string, p: string): Promise<unknown> {
 	return Promise.resolve([]);
 }
 beforeEach(() => {
-	page.params.org = 'acme';
+	setPage({ params: { org: 'acme' } });
 	session.setMe({ user: { id: 1, email: 'owner@example.com', name: 'Owner' }, orgs: ['acme', 'other'].map((slug) => ({ slug, name: slug, role: 'owner', perms: ['property_read', 'property_write'] })) });
 	session.setOrg('acme');
-	apiMock.mockReset();
+
 	apiMock.mockImplementation(route);
 });
 async function fillRent() { await fireEvent.input(await screen.findByLabelText('Rent ($)'), { target: { value: '500' } }); }
@@ -61,33 +55,6 @@ describe('existing lease onboarding', () => {
 		await fireEvent.input(screen.getByLabelText('Opening arrears ($)'), { target: { value: '0' } });
 		await fireEvent.submit(form());
 		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('POST', '/api/v1/orgs/acme/leases', expect.objectContaining({ paid_to_date: undefined, opening_arrears: 0 })));
-	});
-	it('keeps balances and tenants after boundary-date validation error', async () => {
-		apiMock.mockImplementation((m: string, p: string) => m === 'POST' ? Promise.reject(new ApiError(422, 'paid_to_date must be the last day of a rent period')) : route(m, p));
-		render(Page);
-		await fillRent();
-		await fireEvent.input(screen.getByLabelText('Paid-to date'), { target: { value: '2026-11-06' } });
-		await fireEvent.input(screen.getByLabelText('Opening arrears ($)'), { target: { value: '123.45' } });
-		await fireEvent.click(screen.getByLabelText('Co-tenant: Tom'));
-		await fireEvent.submit(form());
-		await screen.findByText('paid_to_date must be the last day of a rent period');
-		expect((screen.getByLabelText('Paid-to date') as HTMLInputElement).value).toBe('2026-11-06');
-		expect((screen.getByLabelText('Opening arrears ($)') as HTMLInputElement).value).toBe('123.45');
-		expect(screen.getByLabelText('Co-tenant: Tom')).toHaveProperty('checked', true);
-	});
-	it('guards duplicate submission', async () => {
-		let finish!: (v: unknown) => void;
-		apiMock.mockImplementation((m: string, p: string) => m === 'POST' ? new Promise((resolve) => { finish = resolve; }) : route(m, p));
-		render(Page);
-		await fillRent();
-		const leaseForm = form();
-		await fireEvent.submit(leaseForm);
-		await fireEvent.submit(leaseForm);
-		expect(apiMock.mock.calls.filter(([m]) => m === 'POST')).toHaveLength(1);
-		for (const label of ['Property', 'Tenant', 'Start', 'Frequency', 'Rent ($)', 'Bond ($)', 'Paid-to date', 'Opening arrears ($)']) {
-			expect(screen.getByLabelText(label, { exact: true }).matches(':disabled'), label).toBe(true);
-		}
-		finish({ id: 4 });
 	});
 	it('denies old form submission after route changes', async () => {
 		render(Page);

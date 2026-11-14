@@ -7,15 +7,6 @@ const contacts = [
 	{ id: 2, name: 'Casey Client', kind: 'client' }
 ];
 
-beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
-		this.setAttribute('open', '');
-	});
-	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
-		this.removeAttribute('open');
-	});
-});
-
 describe('PortalInviteDialog', () => {
 	it('shows the link and a copy button when the invite was not emailed but a link is returned', () => {
 		render(PortalInviteDialog, {

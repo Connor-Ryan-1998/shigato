@@ -1,15 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../../lib/test/app.svelte';
+import { apiMock } from '../../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { act, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { session } from '../../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme', id: '4' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-}));
 import { ApiError } from '../../../../lib/api';
 import Page from './+page.svelte';
 
@@ -30,14 +25,12 @@ function route(method: string, path: string): Promise<unknown> {
 	return Promise.resolve({ warnings: ['Existing rent increase warning', 'Existing invoices were not recalculated'], affected_invoices: affected });
 }
 beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-	HTMLDialogElement.prototype.close = function () { this.open = false; };
+	setPage({ params: { org: 'acme', id: '4' } });
 	page.params = { org: 'acme', id: '4' };
 	session.setMe({ user: { id: 1, name: 'Owner', email: 'owner@example.com' }, orgs: ['acme', 'other'].map((slug) => ({ slug, name: slug, role: 'owner', perms: ['property_read', 'property_write'] })) });
 	session.setOrg('acme');
-	apiMock.mockReset();
+
 	apiMock.mockImplementation(route);
-	vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 async function actionForm(button = 'Change rent') {
 	await fireEvent.click(await screen.findByRole('button', { name: button }));
@@ -79,17 +72,6 @@ describe('billed-period lease warnings', () => {
 		await screen.findByText('invalid rent date');
 		expect((screen.getByLabelText('Rent ($)') as HTMLInputElement).value).toBe('520');
 		expect(screen.queryByRole('status', { name: 'Invoice review required' })).toBeNull();
-	});
-	it('prevents duplicate save and locks drafts while pending', async () => {
-		let finish!: (value: unknown) => void;
-		apiMock.mockImplementation((m: string,p: string) => m === 'POST' ? new Promise((resolve) => { finish = resolve; }) : route(m,p));
-		render(Page);
-		const form = await actionForm();
-		await fireEvent.submit(form);
-		await fireEvent.submit(form);
-		expect(apiMock.mock.calls.filter(([m]) => m === 'POST')).toHaveLength(1);
-		expect(screen.getByLabelText('Rent ($)').matches(':disabled')).toBe(true);
-		await act(() => { finish({ affected_invoices: affected }); });
 	});
 	it('does not apply older lease load after a new lease loads', async () => {
 		let finish!: (value: unknown) => void;

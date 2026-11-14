@@ -1,21 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { jsonResponse } from '../../lib/test/mock-api';
+import { goto, page, setPage } from '../../lib/test/app.svelte';
+// Exercises the real api client against a stubbed fetch.
+vi.unmock('../../lib/api');
 import { render, screen, fireEvent } from '@testing-library/svelte';
-
-const page = { url: new URL('http://localhost/login') };
-vi.mock('$app/state', () => ({
-	get page() {
-		return page;
-	}
-}));
-const { goto } = vi.hoisted(() => ({ goto: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto }));
 
 import Login from './+page.svelte';
 import { session } from '../../lib/session.svelte';
 
-function jsonResponse(status: number, body: unknown): Response {
-	return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-}
+beforeEach(() => setPage({ url: new URL('http://localhost/login') }));
 
 describe('login page', () => {
 	it('does not submit the password form twice while a request is pending', async () => {
@@ -29,10 +22,6 @@ describe('login page', () => {
 		expect(fetchMock.mock.calls.filter(([path]) => String(path).includes('/auth/login'))).toHaveLength(1);
 		expect(screen.getByLabelText('Password').matches(':disabled')).toBe(true);
 	});
-	beforeEach(() => {
-		session.clear();
-	});
-
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		goto.mockClear();

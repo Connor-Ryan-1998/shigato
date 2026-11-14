@@ -1,28 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { apiMock } from "../../../lib/test/mock-api";
+import { goto, setPage } from "../../../lib/test/app.svelte";
+import { signIn } from "../../../lib/test/session";
 import { render, screen, fireEvent } from "@testing-library/svelte";
-
-vi.mock("$app/state", () => ({
-  page: {
-    params: { org: "acme" },
-    url: new URL("http://localhost/acme/billing-run"),
-  },
-}));
-const { apiMock, gotoMock } = vi.hoisted(() => ({
-  apiMock: vi.fn(),
-  gotoMock: vi.fn(),
-}));
-vi.mock("$app/navigation", () => ({ goto: gotoMock, beforeNavigate: vi.fn() }));
-vi.mock("../../../lib/session.svelte", () => ({ session: { currentOrg: { slug: "acme", perms: ["invoices_write"] } } }));
-vi.mock("../../../lib/api", () => ({
-  api: apiMock,
-  ApiError: class ApiError extends Error {
-    status: number;
-    constructor(status: number, message: string) {
-      super(message);
-      this.status = status;
-    }
-  },
-}));
 
 import Page from "./+page.svelte";
 import { ApiError } from "../../../lib/api";
@@ -34,8 +14,9 @@ const CONTACTS = [
 
 describe("billing run page", () => {
   beforeEach(() => {
-    apiMock.mockReset();
-    gotoMock.mockReset();
+    setPage({ params: { org: "acme" }, url: "http://localhost/acme/billing-run" });
+    signIn({ perms: ["invoices_write"] });
+
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(2026, 10, 7));
   });
@@ -55,7 +36,7 @@ describe("billing run page", () => {
     expect(screen.queryByText("Tenant Tim")).toBeNull();
     await fireEvent.click(screen.getByText("Create invoice"));
     await vi.waitFor(() =>
-      expect(gotoMock).toHaveBeenCalledWith("/acme/invoices/77"),
+      expect(goto).toHaveBeenCalledWith("/acme/invoices/77"),
     );
     expect(apiMock).toHaveBeenCalledWith(
       "POST",

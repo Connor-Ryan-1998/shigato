@@ -1,11 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../../lib/test/app.svelte';
+import { apiMock } from '../../../../lib/test/mock-api';
 import { flushSync } from 'svelte';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { session } from '../../../../lib/session.svelte';
-const page = $state({ params: { org: 'acme', id: '7' } });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../../lib/api', () => ({ api: apiMock, ApiError: class ApiError extends Error {} }));
 import Page from './+page.svelte';
 const expense = { id: 7, spent_on: '2026-11-01', description: 'Office supplies', supplier_contact_id: 4, receipt_file_id: 9, bank_line_id: 12, total: 11000, lines: [{ id: 1, category_id: 2, amount: 11000, gst_code: 'GST', gst_amount: 1000, property_id: 3 }] };
 function route(_m: string,p: string): Promise<unknown> {
@@ -15,10 +13,11 @@ function route(_m: string,p: string): Promise<unknown> {
 	return Promise.resolve(expense);
 }
 beforeEach(() => {
+	setPage({ params: { org: 'acme', id: '7' } });
 	page.params = { org: 'acme', id: '7' };
 	session.setMe({ user: { id: 1, email: 'book@example.com', name: 'Bookkeeper' }, orgs: ['acme', 'other'].map((slug) => ({ slug, name: slug, role: 'bookkeeper', perms: ['reports_read', 'invoices_read'] })) });
 	session.setOrg('acme'); session.setModules(['reconciliation', 'property']);
-	apiMock.mockReset(); apiMock.mockImplementation(route);
+apiMock.mockImplementation(route);
 });
 describe('Expense details', () => {
 	it('shows resolved splits, server GST, supplier, bank status and receipt download', async () => {

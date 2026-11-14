@@ -1,26 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../../../lib/test/app.svelte';
+import { apiMock } from '../../../../lib/test/mock-api';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-
-vi.mock('$app/state', () => ({
-	page: { params: { org: 'acme' }, url: new URL('http://localhost/acme/settings/members') }
-}));
-
-vi.mock('$app/navigation', () => ({
-	goto: vi.fn(), beforeNavigate: vi.fn()
-}));
-
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock('../../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error {
-		status: number;
-		constructor(status: number, message: string) {
-			super(message);
-			this.name = 'ApiError';
-			this.status = status;
-		}
-	}
-}));
 
 import Page from './+page.svelte';
 import { ApiError } from '../../../../lib/api';
@@ -29,15 +10,7 @@ const MEMBERS = [
 	{ user_id: 1, name: 'Owner One', email: 'owner@example.com', role: 'owner', sso_linked: false }
 ];
 
-beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
-		this.setAttribute('open', '');
-	});
-	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
-		this.removeAttribute('open');
-	});
-	apiMock.mockReset();
-});
+beforeEach(() => setPage({ params: { org: 'acme' }, url: new URL('http://localhost/acme/settings/members') }));
 
 describe('members page - role change', () => {
 	it('sends a PUT with the new role when the select changes', async () => {

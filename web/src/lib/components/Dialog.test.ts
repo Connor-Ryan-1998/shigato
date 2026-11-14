@@ -1,14 +1,12 @@
 import { expect, it, vi } from 'vitest';
+import { beforeNavigate } from '../test/app.svelte';
+// Exercises the real api client against a stubbed fetch.
+vi.unmock('../api');
 import { createRawSnippet, tick } from 'svelte';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import Dialog from './Dialog.svelte';
 import { session } from '../session.svelte';
 import { api, registerReloginPrompt, resetOnUnauthorized } from '../api';
-const { beforeNavigateMock } = vi.hoisted(() => ({ beforeNavigateMock: vi.fn() }));
-vi.mock('$app/navigation', () => ({ beforeNavigate: beforeNavigateMock }));
-
-HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new Event('close')); };
 const children = createRawSnippet(() => ({ render: () => '<label>Name<input name="name" value="Initial" /></label>' }));
 
 it('keeps a dirty editor open when Escape discard is refused', async () => {
@@ -43,11 +41,10 @@ it('protects navigation away from a dirty dialog', async () => {
 	await tick();
 	await fireEvent.input(screen.getByRole('textbox'), { target: { value: 'Changed' } });
 	const cancel = vi.fn();
-	expect(beforeNavigateMock.mock.calls.length).toBeGreaterThan(0);
-	beforeNavigateMock.mock.calls.at(-1)![0]({ to: { url: new URL('http://localhost/acme') }, cancel });
+	expect(beforeNavigate.mock.calls.length).toBeGreaterThan(0);
+	beforeNavigate.mock.calls.at(-1)![0]({ to: { url: new URL('http://localhost/acme') }, cancel });
 	expect(cancel).toHaveBeenCalledOnce();
 	vi.restoreAllMocks();
-	session.clear();
 });
 
 it('does not prompt beforeunload after expired-session authentication is cancelled', async () => {
@@ -71,20 +68,19 @@ it('does not prompt beforeunload after expired-session authentication is cancell
 		Object.defineProperty(window, 'location', { value: realLocation, writable: true });
 		registerReloginPrompt(null);
 		vi.unstubAllGlobals();
-		session.clear();
 	}
 });
 
 it('asks once for nested editors and removes guards on teardown', async () => {
 	session.setMe({ user: { id: 1, name: 'Owner', email: 'owner@example.com' }, orgs: [] });
 	const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-	const start = beforeNavigateMock.mock.calls.length;
+	const start = beforeNavigate.mock.calls.length;
 	const first = render(Dialog, { title: 'First', open: true, children });
 	const second = render(Dialog, { title: 'Second', open: true, children });
 	await tick();
 	await fireEvent.input(screen.getAllByRole('textbox')[1], { target: { value: 'Changed' } });
 	const cancel = vi.fn();
-	for (const [navigate] of beforeNavigateMock.mock.calls.slice(start)) navigate({ to: { url: new URL('http://localhost/acme') }, cancel });
+	for (const [navigate] of beforeNavigate.mock.calls.slice(start)) navigate({ to: { url: new URL('http://localhost/acme') }, cancel });
 	expect(confirm).toHaveBeenCalledOnce();
 	expect(cancel).toHaveBeenCalledOnce();
 	first.unmount();
@@ -95,5 +91,5 @@ it('asks once for nested editors and removes guards on teardown', async () => {
 	const clean = new Event('beforeunload', { cancelable: true });
 	window.dispatchEvent(clean);
 	expect(clean.defaultPrevented).toBe(false);
-	vi.restoreAllMocks(); session.clear();
+	vi.restoreAllMocks();
 });

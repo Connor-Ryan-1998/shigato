@@ -1,19 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { goto, page, setPage } from '../../../../lib/test/app.svelte';
+import { apiMock } from '../../../../lib/test/mock-api';
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { session } from '../../../../lib/session.svelte';
 
-const page = $state({ params: { org: 'acme', id: '5' }, url: new URL('http://x/acme/projects/5') });
-vi.mock('$app/state', () => ({ get page() { return page; } }));
-const { apiMock, gotoMock } = vi.hoisted(() => ({ apiMock: vi.fn(), gotoMock: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto: gotoMock, beforeNavigate: vi.fn() }));
-vi.mock('../../../../lib/api', () => ({
-	api: apiMock,
-	ApiError: class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-}));
 import Page from './+page.svelte';
-
-HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) { this.open = true; };
-HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) { this.open = false; };
 
 const project = {
 	id: 5, client_contact_id: 9, name: 'HTM Data Platform', hourly_rate: 12000, gst_code: 'GST', status: 'in_progress',
@@ -34,11 +25,12 @@ function route(m: string, p: string): Promise<unknown> {
 }
 
 beforeEach(() => {
+	setPage({ params: { org: 'acme', id: '5' }, url: new URL('http://x/acme/projects/5') });
 	session.setMe({ user: { id: 1, email: 'o@example.com', name: 'Owner' }, orgs: [{ slug: 'acme', name: 'Acme', role: 'owner', perms: ['timesheets_read', 'timesheets_write', 'timesheets_admin'] }] });
 	session.setOrg('acme');
-	apiMock.mockReset();
+
 	apiMock.mockImplementation(route);
-	gotoMock.mockReset();
+	goto.mockReset();
 });
 
 describe('project detail', () => {
@@ -61,7 +53,7 @@ describe('project detail', () => {
 	it('switches to the timesheet tab and filters by status', async () => {
 		render(Page);
 		await fireEvent.click(await screen.findByRole('tab', { name: 'Timesheet' }));
-		expect(gotoMock).toHaveBeenCalledWith('?tab=timesheet', expect.objectContaining({ replaceState: true }));
+		expect(goto).toHaveBeenCalledWith('?tab=timesheet', expect.objectContaining({ replaceState: true }));
 		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('GET', '/api/v1/orgs/acme/time-entries?project_id=5&unbilled=true'));
 		await fireEvent.change(screen.getByLabelText('Billing status'), { target: { value: 'billed' } });
 		await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith('GET', '/api/v1/orgs/acme/time-entries?project_id=5&billed=true'));

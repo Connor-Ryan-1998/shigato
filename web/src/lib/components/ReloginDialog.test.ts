@@ -1,26 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { jsonResponse } from '../test/mock-api';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import ReloginDialog from './ReloginDialog.svelte';
 import { session } from '../session.svelte';
-
-// jsdom doesn't implement <dialog>'s showModal/close - Dialog.svelte calls
-// them directly, so stub them out rather than exercising the real modal
-// behaviour (that's native browser behaviour, not this component's logic).
-beforeEach(() => {
-	HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) {
-		this.setAttribute('open', '');
-	});
-	HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
-		this.removeAttribute('open');
-	});
-});
-
-function jsonResponse(status: number, body: unknown): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { 'Content-Type': 'application/json' }
-	});
-}
 
 describe('ReloginDialog', () => {
 	it('tears down the expired session before leaving for SSO', async () => {

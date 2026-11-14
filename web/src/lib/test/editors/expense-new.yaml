@@ -1,0 +1,19 @@
+id: expense-new
+component: ExpenseNewPage
+page: {org: acme}
+session: {perms: [reports_read, recon_write, invoices_read]}
+modules: [reconciliation]
+api:
+  GET /api/v1/orgs/acme/categories: [{id: 2, name: Supplies, type: expense}]
+  GET /api/v1/orgs/acme/contacts?kind=supplier: [{id: 4, name: Supply shop}]
+fill: {Description: Cash supplies, Amount ($): "18", Supplier: "4"}
+submit: Save
+request: POST /api/v1/orgs/acme/expenses
+contract:
+  blocks_duplicate_submit: true
+  preserves_input_on: 422
+  busy_dismiss_blocked: Cancel
+  dirty_navigation_blocked: true
+skip:
+  cancel: page editor; Cancel leaves the page instead of closing an editor
+  dirty_dismiss_confirms: page editor, no dialog to dismiss; leaving is covered by dirty_navigation_blocked

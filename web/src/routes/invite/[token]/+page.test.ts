@@ -1,24 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { jsonResponse } from '../../../lib/test/mock-api';
+import { goto, page, setPage } from '../../../lib/test/app.svelte';
+// Exercises the real api client against a stubbed fetch.
+vi.unmock('../../../lib/api');
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-
-const page = { params: { token: 'test-token' } };
-vi.mock('$app/state', () => ({
-	get page() {
-		return page;
-	}
-}));
-const { goto } = vi.hoisted(() => ({ goto: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto }));
 
 import InvitePage from './+page.svelte';
 import { session, type MeResponse } from '../../../lib/session.svelte';
-
-function jsonResponse(status: number, body: unknown): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { 'Content-Type': 'application/json' }
-	});
-}
 
 const baseDetails = {
 	org_name: 'Acme',
@@ -27,6 +15,8 @@ const baseDetails = {
 	expired: false,
 	needs_password: false
 };
+
+beforeEach(() => setPage({ params: { token: 'test-token' } }));
 
 describe('invite accept page', () => {
 	it('blocks repeat acceptance and locks the draft during submission', async () => {
@@ -39,10 +29,6 @@ describe('invite accept page', () => {
 		expect(vi.mocked(fetch).mock.calls.filter(([path]) => String(path).endsWith('/accept'))).toHaveLength(1);
 		expect(screen.getByLabelText('Password').matches(':disabled')).toBe(true);
 	});
-	beforeEach(() => {
-		session.clear();
-	});
-
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		goto.mockClear();

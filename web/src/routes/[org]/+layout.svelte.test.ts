@@ -1,21 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { page, setPage } from '../../lib/test/app.svelte';
 import { flushSync, createRawSnippet } from 'svelte';
 import { render } from '@testing-library/svelte';
 
-// A reactive stand-in for $app/state's page (runes work here because this
-// is a .svelte.test.ts file), so the test can switch org the way the org
-// switcher's goto does: same layout instance, new page.params.org. The
-// getter defers reading `page` until render time, after the hoisted mock
-// factory has run and this declaration has been initialised.
-const page = $state({ params: { org: 'acme' }, url: new URL('http://localhost/acme') });
-vi.mock('$app/state', () => ({
-	get page() {
-		return page;
-	}
-}));
-vi.mock('$app/navigation', () => ({ goto: vi.fn(), beforeNavigate: vi.fn() }));
-
 import Layout from './+layout.svelte';
+
+beforeEach(() => setPage({ params: { org: 'acme' }, url: new URL('http://localhost/acme') }));
 
 describe('[org] layout', () => {
 	// Pages load their data once on mount, so switching org must remount
